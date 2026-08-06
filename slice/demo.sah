@@ -1,0 +1,31 @@
+// The demo: draw a rectangle to the framebuffer, ring the MMIO doorbell,
+// wait for a keyboard interrupt, redraw with a key-derived color, ring again.
+struct rect { int x; int y; int w; int h; };
+
+int draw_rect(i32* fb, int x0, int y0, int w, int h, int color) {
+    int y = y0;
+    while (y < y0 + h) {
+        int x = x0;
+        while (x < x0 + w) {
+            fb[y * 320 + x] = color;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return 0;
+}
+
+int main() {
+    i32* fb = 0x20000000;
+    i128* door = 0x1F000000;
+    int* mb = 0x3000;
+    struct rect r;
+    r.x = 40; r.y = 30; r.w = 120; r.h = 70;
+    draw_rect(fb, r.x, r.y, r.w, r.h, 0x2080FF);
+    *door = 1;
+    while (mb[3] == 0) { }
+    int key = mb[3];
+    draw_rect(fb, r.x + 60, r.y + 40, r.w, r.h, key * 65536 + 200);
+    *door = 1;
+    return 0;
+}

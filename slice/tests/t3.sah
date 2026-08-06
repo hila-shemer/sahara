@@ -1,0 +1,42 @@
+struct pt { int x; int y; };
+
+int add3(int a, int b, int c) { return a + b + c; }
+
+int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+int sum_arr(int* a, int n) {
+    int s = 0;
+    int i = 0;
+    while (i < n) { s = s + a[i]; i = i + 1; }
+    return s;
+}
+
+int many(int a, int b, int c, int d, int e, int f, int g, int h,
+         int i, int j, int k, int l, int m, int n, int o, int p,
+         int q, int r) {
+    return a + b*2 + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q*3 + r;
+}
+
+int main() {
+    int acc = 0;
+    acc = add3(1, 2, 3);
+    acc = acc + fib(10);
+    int arr[8];
+    int i = 0;
+    while (i < 8) { arr[i] = i * i; i = i + 1; }
+    acc = acc + sum_arr(arr, 8);
+    struct pt p;
+    p.x = 11; p.y = 22;
+    struct pt* q = &p;
+    acc = acc + q->x * q->y;
+    if (acc > 400) { acc = acc + 1; } else { acc = acc - 1; }
+    i128 big = 1;
+    big = big << 100;
+    big = big / 12345;
+    acc = acc + big % 1000;
+    acc = acc + many(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18);
+    return acc;
+}

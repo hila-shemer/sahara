@@ -1,0 +1,4 @@
+slice/out/
+slice/emu
+slice/encoding.h
+__pycache__/
