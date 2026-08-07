@@ -36,8 +36,15 @@ ruling most urgently.
 5. **TOOLING-SPEC 3.2 — wb/flags for discarded writes.** Writes to r31
    and predicate writes to p0 are architecturally discarded. Chosen:
    flags wrote-dst / wrote-pred are 0 and wb/pred_wb are 0 for them.
-   Also: wrote-pred + pred_wb are used only for compare/FCMP predicate
-   writes; PWR (which writes p1–p7 wholesale) sets neither. **[cross-impl]**
+   ~~Also: wrote-pred + pred_wb are used only for compare/FCMP predicate
+   writes; PWR (which writes p1–p7 wholesale) sets neither.~~
+   *Revised (iteration 2):* superseded by the toolchain's SPEC-ISSUES
+   reading 1, marked "emulators must match": `pred_wb` is the **full
+   8-bit predicate file after the write** (bit i = P[i], so bit 0 is
+   always 1), valid whenever flags bit 2 is set — and PWR sets bit 2
+   with the new file. trace-q's `reg pN` reconstruction depends on this.
+   The p0-discard part stands: a compare targeting p0 writes nothing,
+   sets no flag. **[cross-impl]**
 
 6. **ISA-SPEC 7.2 — trace record on triple fault.** "No state is
    written"; chosen: the triple fault emits no TRAP record (nothing was

@@ -83,3 +83,54 @@ def test_pwr_p0_immutable():
     prog = [ldi(1, 0), asm("PWR", src1=1), asm("PRD", dst=0), halt()]
     m, _ = run_words(prog)
     assert m.regs[0] & 1 == 1
+
+
+class _RecordingTracer:
+    """Captures exec_ records; enough tracer surface for Machine."""
+    level = 2
+
+    def __init__(self):
+        self.execs = []
+
+    def exec_(self, cycle, pc, insn, wb, flags, pred_wb):
+        self.execs.append((cycle, flags, pred_wb))
+
+    def memw(self, *a):
+        pass
+
+    def memr(self, *a):
+        pass
+
+    def trap(self, *a):
+        pass
+
+    def event(self, *a):
+        pass
+
+    def devw(self, *a):
+        pass
+
+
+def test_pred_wb_traces_full_predicate_file():
+    # Toolchain SPEC-ISSUES reading 1 (emulators must match): pred_wb is
+    # the full 8-bit predicate file after the write, for compares AND PWR.
+    import trc
+    t = _RecordingTracer()
+    prog = [
+        cmpi("CMPEQ", 1, 31, 0),              # p1 := 1  -> file 0b00000011
+        cmpi("CMPEQ", 2, 31, 1),              # p2 := 0  -> file 0b00000011
+        ldi(3, 0b10101010),
+        asm("PWR", src1=3),                   # file 0b10101011 (p0 stays 1)
+        halt(),
+    ]
+    run_words(prog, tracer=t)
+    predrecs = [(c, pw) for c, fl, pw in t.execs if fl & trc.F_WROTE_PRED]
+    assert predrecs == [(0, 0b00000011), (1, 0b00000011), (3, 0b10101011)]
+
+
+def test_pred_wb_compare_to_p0_discarded():
+    import trc
+    t = _RecordingTracer()
+    prog = [cmpi("CMPEQ", 0, 31, 0), halt()]  # dst p0: write discarded
+    run_words(prog, tracer=t)
+    assert not any(fl & trc.F_WROTE_PRED for _, fl, _ in t.execs)

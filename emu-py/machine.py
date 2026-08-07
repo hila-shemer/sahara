@@ -13,6 +13,10 @@ import trc
 MASK128 = (1 << 128) - 1
 IMM_MASK = (1 << E.IMM_BITS) - 1
 
+# execute() returns this as `predw` when the whole predicate file was
+# written in place (PWR), as opposed to True/False for a single-bit write.
+PRED_FILE_WRITE = object()
+
 # opcode-value -> (name, iform, family, operands), like the C header table
 OPTABLE = {}
 for _name, (_val, _fam, _ops) in E.OPCODES.items():
@@ -318,10 +322,15 @@ class Machine:
                 flags |= trc.F_WROTE_DST
                 wb_val = wb & MASK128
         if predw is not None:
-            wrote = self.wpred(f["dst"], predw)
+            # PWR has already written the file; compares write one bit here.
+            wrote = True if predw is PRED_FILE_WRITE \
+                else self.wpred(f["dst"], predw)
             if wrote:
+                # pred_wb carries the full predicate file after the write
+                # (bit i = P[i]) -- the toolchain's SPEC-ISSUES reading 1,
+                # which trace-q's `reg pN` reconstruction depends on.
                 flags |= trc.F_WROTE_PRED
-                pred_wb = 1 if predw else 0
+                pred_wb = sum(self.preds[i] << i for i in range(8))
         if self.trace:
             self.trace.exec_(self.cycle, pc, insn, wb_val, flags, pred_wb)
         self.cycle += 1
@@ -386,7 +395,7 @@ class Machine:
             src = self.rreg(f["src1"])
             for i in range(1, 8):
                 self.preds[i] = (src >> i) & 1
-            return None, None, None, False
+            return None, PRED_FILE_WRITE, None, False
 
         if fam == "FP":
             return self.exec_fp(name, f)
