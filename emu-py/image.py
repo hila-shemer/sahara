@@ -17,6 +17,12 @@ DEVTAB_PA = 0x0800
 DEVTAB_LEN = 0x0800                     # 2 KB
 DEVTAB_MAGIC = int.from_bytes(b"SAHARAPT", "little")
 
+# PLATFORM-SPEC 1: "everything at 0x0F00_0000 and above in this map is
+# device space in the sense of ISA-SPEC section 9.2". Classification is
+# by address, independent of which devices the table instantiates (the
+# atomics-trap-DEVERR rule needs no device internals; SPEC-ISSUES 24).
+DEV_SPACE_BASE = 0x0F000000
+
 
 class ImageError(Exception):
     pass

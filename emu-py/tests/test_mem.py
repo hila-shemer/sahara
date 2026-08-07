@@ -147,3 +147,61 @@ def test_devorder_ifence_drains():
     m.step()                                   # IFENCE
     assert not m.phys.queue
     assert int.from_bytes(m.phys.read_raw(DATA, 8), "little") == 0xE5
+
+
+# --------------------- platform device space (PLATFORM-SPEC 1)
+# "Everything at 0x0F00_0000 and above in this map is device space in
+# the sense of ISA-SPEC section 9.2" — a property of the address, held
+# before any device instance exists (checks/c3_irq_dev.py pins the same
+# base). SPEC-ISSUES 24: the carve-out beats RAM region 0's extent, and
+# the gaps between the fixed windows are device space too, not
+# swiss-cheese RAM. Unmapped device space traps DEVERR (entry 8's rule).
+
+import image  # noqa: E402  (emu-py dir is on sys.path via helpers)
+
+DSB = image.DEV_SPACE_BASE
+
+
+def _dev_space_run(prog, **kw):
+    kw.setdefault("ram", 1 << 28)       # 256 MB: extent covers DSB
+    kw.setdefault("dev_base", DSB)
+    return run_words(vbase_setup() + prog,
+                     data=[(HANDLER_PA, wbytes(cause_handler()))], **kw)
+
+
+def test_load_in_device_window_without_device_deverr():
+    # the keyboard window, before any keyboard device is registered
+    prog = li128(1, DSB + 0x10000) + [lds(2, 1, 0, w=64), halt()]
+    m, _ = _dev_space_run(prog)
+    assert m.regs[10] == E.CAUSES["DEVERR"]
+    assert m.regs[11] == DSB + 0x10000
+
+
+def test_device_space_gap_is_not_ram():
+    # between the NIC window's end (0x0F06_0000) and the pixel buffer
+    prog = li128(1, DSB + 0x70000) + [st(2, 1, 0, w=64), halt()]
+    m, _ = _dev_space_run(prog)
+    assert m.regs[10] == E.CAUSES["DEVERR"]
+
+
+def test_ram_extent_never_overrides_device_space():
+    # even --ram 512 MB does not turn 0x0F00_0000 into RAM
+    prog = li128(1, DSB) + [st(2, 1, 0, w=64), halt()]
+    m, _ = _dev_space_run(prog, ram=1 << 29)
+    assert m.regs[10] == E.CAUSES["DEVERR"]
+
+
+def test_ram_up_to_device_space_base_still_ram():
+    prog = (li128(1, DSB - 8)
+            + [ldi(2, 0x77), st(2, 1, 0, w=64), lds(3, 1, 0, w=64), halt()])
+    m, _ = _dev_space_run(prog)
+    assert m.regs[10] == 0              # no trap
+    assert m.regs[3] == 0x77
+
+
+def test_fetch_from_device_space_deverr():
+    from helpers import jalr
+    prog = li128(1, DSB) + [jalr(31, 1), halt()]
+    m, _ = _dev_space_run(prog)
+    assert m.regs[10] == E.CAUSES["DEVERR"]
+    assert m.regs[12] == DSB            # epc = the unfetchable pc

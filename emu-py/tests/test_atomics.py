@@ -127,6 +127,28 @@ def test_atomic_to_device_window_deverr_no_side_effect():
     assert dev.stores == []              # never written
 
 
+def test_atomic_to_platform_device_space_deverr_before_access():
+    """c3_irq_dev phase 2's shape: no device instance exists, but the
+    platform's fixed windows (PLATFORM-SPEC 1, PA >= 0x0F00_0000)
+    classify as device space by address alone, so an AMO there traps
+    DEVERR — dst untouched, epc = the AMO, and no MEMR/MEMW/DEVW
+    footprint in the trace (SPEC-ISSUES 24 + root SPEC-ISSUES 17)."""
+    import image
+    from helpers import OrderedTracer
+    ea = image.DEV_SPACE_BASE + 0x10000        # keyboard window
+    tr = OrderedTracer()
+    prog = (vbase_setup() + li128(1, ea)
+            + [ldi(0, 0x5AFE), amo("AMOADD", 0, 1, 2, w=64), halt()])
+    m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))],
+                     ram=1 << 28, dev_base=image.DEV_SPACE_BASE, tracer=tr)
+    assert m.regs[10] == E.CAUSES["DEVERR"]
+    assert m.regs[11] == ea
+    assert m.regs[12] == E.RESET_PC + 9 * 8    # the AMO's own pc
+    assert m.regs[0] == 0x5AFE                 # dst survives the trap
+    assert not [r for r in tr.recs if r[0] in ("memr", "memw", "devw")
+                and r[2] >= image.DEV_SPACE_BASE]
+
+
 def test_all_amos():
     ops = {
         "AMOAND": 0b1100 & 0b1010,

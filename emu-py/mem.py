@@ -84,9 +84,19 @@ class PhysMap:
     queue so single-CPU program order is preserved.
     """
 
-    def __init__(self, ram_len, devorder=None):
+    def __init__(self, ram_len, devorder=None, dev_base=None):
+        # dev_base: start of platform device space (PLATFORM-SPEC 1:
+        # "everything at 0x0F00_0000 and above in this map is device
+        # space"). The device windows overlap RAM region 0's extent in
+        # the spec's map; the carve-out wins for routing: no PA at or
+        # above dev_base is ever RAM, even before any device instance
+        # is registered — an access there with no mapped device is an
+        # AccessError (-> DEVERR). See SPEC-ISSUES.md entry 24.
         self.ram = SparseMem()
+        if dev_base is not None:
+            ram_len = min(ram_len, dev_base)
         self.ram_regions = [(0, ram_len)]
+        self.dev_base = dev_base
         self.devices = []
         self.devorder = devorder            # None = off; else queue depth
         self.queue = []                     # [(pa, bytes)] oldest first

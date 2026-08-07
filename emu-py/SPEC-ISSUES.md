@@ -180,3 +180,25 @@ ruling most urgently.
     that PTE word (0x1e → 0x3e in c2_mmu.s) plus two expect=checkfail
     negatives (c2_noinvtp_remap/ptbase, root SPEC-ISSUES 23 harness
     class); c2_mmu and both negatives pass on emu-py unchanged.
+
+24. **PLATFORM-SPEC 1 — device-space classification vs RAM region 0's
+    extent, before any device exists.** The map's RAM row spans
+    `0x0 .. ram_len` (default 256 MB = 0x1000_0000) while the device
+    windows sit at 0x0F00_0000+ *inside* that extent, and headless
+    v1.0 writes a device table with zero devices; the spec also says
+    "everything at 0x0F00_0000 and above in this map is device space
+    in the sense of ISA-SPEC 9.2". Chosen (matching
+    checks/c3_irq_dev.py's `DEV_SPACE_BASE = 0x0F000000`): device
+    space is a property of the *address* — no PA at or above
+    0x0F00_0000 is ever RAM, regardless of ram_len or of which
+    devices the table instantiates. The carve-out beats the RAM row;
+    the gaps between the fixed windows (e.g. 0x0F06_0000 .. 0x0FFF_FFFF)
+    are device space too, not swiss-cheese RAM; `--ram` larger than
+    256 MB still stops being RAM at 0x0F00_0000. An access into
+    device space with no mapped device follows entry 8's rule (trap
+    DEVERR, baddr = ea), so pre-devspec every access there — load,
+    store, atomic, fetch — traps DEVERR with no access footprint.
+    Alternative readings (windows-only carve-out with RAM gaps, or
+    table-driven classification where an empty table means it is all
+    RAM) would pass/fail c3_irq_dev phase 2 differently and diverge
+    on a plain load at 0x0F06_0000. **[cross-impl]**

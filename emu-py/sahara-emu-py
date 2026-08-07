@@ -56,7 +56,8 @@ def main(argv):
     with open(args.image, "rb") as f:
         img_data = f.read()
 
-    phys = mem.PhysMap(args.ram, devorder=args.check_devorder)
+    phys = mem.PhysMap(args.ram, devorder=args.check_devorder,
+                       dev_base=image.DEV_SPACE_BASE)
     image.load_image(phys, img_data)
     image.write_device_table(phys, args.ram)
 

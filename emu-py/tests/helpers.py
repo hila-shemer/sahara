@@ -260,8 +260,9 @@ def dfbase_setup(pa=DF_PA):
 
 # ------------------------------------------------------------ running
 def make_machine(words, ram=1 << 24, data=None, check_invtp=False,
-                 tracer=None, events=(), devorder=None, devices=()):
-    phys = mem_.PhysMap(ram, devorder=devorder)
+                 tracer=None, events=(), devorder=None, devices=(),
+                 dev_base=None):
+    phys = mem_.PhysMap(ram, devorder=devorder, dev_base=dev_base)
     for dev in devices:
         phys.add_device(dev)
     prog = b"".join(w.to_bytes(8, "little") for w in words)
