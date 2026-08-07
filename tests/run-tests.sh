@@ -16,6 +16,9 @@
 # MANIFEST line: NAME SRC [level=N] [expect=<32 lowercase hex>] [flags]
 # expect= overrides the required HALT r0 value for tests that cannot
 # reach the 0x600D path (e.g. the triple-fault halt, SPEC-ISSUES 12).
+# expect=checkfail marks a test whose CORRECT outcome is a check-mode
+# assertion: exit 3, stdout first word CHECKFAIL. Only the class is
+# compared — the reason text is implementation-worded (SPEC-ISSUES 23).
 
 set -u
 
@@ -46,7 +49,6 @@ run_one() {
     local name="$1" src="$2" level="$3" expect="$4"; shift 4
     local flags=("$@")
     local img="$OUT/$name.img" sym="$OUT/$name.sym"
-    local pass_line="HALT r0=$expect"
     ran=$((ran+1))
 
     if ! python3 "$ASM" -o "$img" "$TESTS/defs.s" "$TESTS/$src" 2>"$OUT/$name.asm.err"; then
@@ -66,7 +68,17 @@ run_one() {
               --maxcycles "$MAXCYCLES" --check-invtp "${flags[@]}" \
               2>"$OUT/$name.$run.err")
         rc=$?
-        if [ $rc -ne 0 ] || [ "$out" != "$pass_line" ]; then
+        ok=1
+        if [ "$expect" = "checkfail" ]; then
+            # Correct outcome is the check-mode assertion: exit 3 and a
+            # stdout line whose first word is CHECKFAIL. The reason text
+            # is implementation-worded and NOT compared (SPEC-ISSUES 23).
+            [ $rc -eq 3 ] && case "$out" in CHECKFAIL\ *|CHECKFAIL) ;; \
+                *) ok=0;; esac || ok=0
+        else
+            [ $rc -eq 0 ] && [ "$out" = "HALT r0=$expect" ] || ok=0
+        fi
+        if [ $ok -ne 1 ]; then
             echo "FAIL $name (run $run): rc=$rc stdout='$out'"
             [ -s "$OUT/$name.$run.err" ] && sed 's/^/    stderr: /' \
                 "$OUT/$name.$run.err"
@@ -109,8 +121,8 @@ while read -r name src rest; do
         case "$tok" in
             level=*) level="${tok#level=}";;
             expect=*) expect="${tok#expect=}"
-                      [[ "$expect" =~ ^[0-9a-f]{32}$ ]] \
-                          || die "$name: expect= must be 32 lowercase hex digits";;
+                      [[ "$expect" =~ ^([0-9a-f]{32}|checkfail)$ ]] \
+                          || die "$name: expect= must be 32 lowercase hex digits or 'checkfail'";;
             *) flags+=("$tok");;
         esac
     done
