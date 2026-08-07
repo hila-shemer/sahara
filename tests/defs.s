@@ -50,6 +50,7 @@
         .equ FCSR_UF, 8
         .equ FCSR_NX, 16
         .equ FCSR_RM_LSB, 5
+        .equ RM_UNIT, 32   # rm value n encodes as n * RM_UNIT
         .equ RM_RNE, 0
         .equ RM_RTZ, 1
         .equ RM_RDN, 2

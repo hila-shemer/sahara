@@ -26,7 +26,8 @@ while read -r name src rest; do
 done < "$TESTS/MANIFEST"
 
 echo "== 2. generated files match generators =="
-for pair in "gen_c5.py c5_base.s" "gen_c3.py c3_atomics.s" "gen_defs.py defs.s"; do
+for pair in "gen_c5.py c5_base.s" "gen_c3.py c3_atomics.s" \
+            "gen_c4.py c4_fp.s" "gen_defs.py defs.s"; do
     set -- $pair
     cp "$TESTS/$2" "$TMP/$2.committed"
     python3 "$TESTS/$1" >/dev/null || die "$1 failed"
@@ -34,6 +35,21 @@ for pair in "gen_c5.py c5_base.s" "gen_c3.py c3_atomics.s" "gen_defs.py defs.s";
         || die "$2 is stale: rerun tests/$1 and commit"
     echo "ok: $2"
 done
+
+# fpvec.dat is host-C-generated (committed); rebuild and compare when a
+# compiler is present. IEEE + fesetround makes this host-independent
+# for the committed vectors (fpvec.c header); a mismatch means either a
+# stale .dat or a host that disagrees with IEEE — both fatal.
+if command -v cc >/dev/null 2>&1; then
+    cc -std=c11 -O0 -frounding-math -o "$TMP/fpvec" \
+        "$TESTS/fpvec/fpvec.c" -lm || die "fpvec.c does not compile"
+    "$TMP/fpvec" > "$TMP/fpvec.dat" || die "fpvec run failed"
+    cmp -s "$TMP/fpvec.dat" "$TESTS/fpvec/fpvec.dat" \
+        || die "fpvec.dat is stale or host FP disagrees: rebuild and diff"
+    echo "ok: fpvec.dat"
+else
+    die "no C compiler: cannot verify fpvec.dat (needed for C4)"
+fi
 
 FAKE="$TMP/fake-emu"
 printf '#!/usr/bin/env bash\nexec python3 "%s" "$@"\n' \
