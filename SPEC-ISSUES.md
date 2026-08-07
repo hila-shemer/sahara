@@ -269,3 +269,20 @@ Both emulator implementations must match the readings marked
     test source/generator were flipped to `[ea], rs`; all 13 suite
     images were verified byte-identical before/after the flip
     (operand order is surface syntax only).
+
+30. **emu-common-prompt `--check-devorder N` — nothing on this
+    platform can fail it.** The mode models ISA 9.2's weak store
+    order (a depth-N queue of ordinary stores, drained by device
+    stores), but every device consumer on the reference platform
+    reads device space only — the pixel buffer and NIC TX/RX buffers
+    are device windows, and no device DMAs from RAM — while 9.1
+    keeps single-CPU self-loads program-ordered (the queue must
+    forward). So there is no guest-observable difference and no
+    assertable staleness: the mode's only testable property today is
+    semantics-neutrality, which is what c7_dev_ordq pins (the c7_dev
+    image must pass identically under `--check-devorder 4`, forwarding
+    out of a full queue included). The mode earns real assertions
+    only when a RAM-reading device (DMA) or SMP arrives. Chosen: an
+    emulator whose devorder mode perturbs nothing observable is
+    conforming; a CHECKFAIL under c7_dev_ordq is a bug. **(emulators
+    must match)**

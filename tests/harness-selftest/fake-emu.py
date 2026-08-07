@@ -105,7 +105,44 @@ def main():
             # timers). Not an execution claim.
             name = os.path.basename(image_path)
             name = name[:-4] if name.endswith(".img") else name
-            if name == "c3_irq_dev":
+            if name.startswith("c7_dev"):
+                # what checks/c7_dev.py demands: register-read MEMRs
+                # with the pinned reference values, two PRESENT DEVWs
+                # with the D-13 pixel writes around the last one, and
+                # a 3-UNALIGNED + 10-DEVERR trap census.
+                DISPLAY, KBD, NIC = 0x0F000000, 0x0F010000, 0x0F030000
+                PIX = 0x10000000
+                cyc = 10
+                for ea, v in [(DISPLAY + 8, 640), (DISPLAY + 16, 480),
+                              (DISPLAY + 24, 2560), (DISPLAY + 32, 1),
+                              (NIC + 32, 0x0000563412005452),
+                              (KBD + 0, 0xFFFFFFFFFFFFFFFF)]:
+                    T.write_record(f, T.T_MEMR, T.mem_payload(cyc, ea,
+                                                              8, v))
+                    cyc += 1
+                for _ in range(3):
+                    T.write_record(f, T.T_TRAP, T.trap_payload(
+                        cyc, E.CAUSES["UNALIGNED"], entry, KBD + 2, 1))
+                    cyc += 1
+                for _ in range(10):
+                    T.write_record(f, T.T_TRAP, T.trap_payload(
+                        cyc, E.CAUSES["DEVERR"], entry, KBD, 1))
+                    cyc += 1
+                T.write_record(f, T.T_DEVW, T.mem_payload(cyc, DISPLAY,
+                                                          8, 0))
+                cyc += 1
+                T.write_record(f, T.T_DEVW, T.mem_payload(cyc, PIX, 4,
+                                                          0x00FF0000))
+                cyc += 1
+                T.write_record(f, T.T_DEVW, T.mem_payload(cyc, PIX + 4,
+                                                          4, 0x0000FF00))
+                cyc += 1
+                T.write_record(f, T.T_DEVW, T.mem_payload(cyc, DISPLAY,
+                                                          8, 0))
+                cyc += 1
+                T.write_record(f, T.T_DEVW, T.mem_payload(cyc, PIX + 8,
+                                                          4, 0x000000FF))
+            elif name == "c3_irq_dev":
                 # what checks/c3_irq_dev.py demands: 32 paired
                 # MEMR/MEMW at the atomic box, 8 TIMER deliveries
                 # (several inside the AMO cycle span), 1 unpaired
