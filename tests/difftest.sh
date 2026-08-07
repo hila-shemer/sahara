@@ -20,7 +20,7 @@ TESTS="$ROOT/tests"
 ASM="$ROOT/asm/asm.py"
 TRACEQ="$ROOT/trace-q/trace-q"
 OUT="$TESTS/out/diff"
-PASS_LINE="HALT r0=0000000000000000000000000000600d"
+PASS_HEX="0000000000000000000000000000600d"
 MAXCYCLES="${MAXCYCLES:-10000000}"
 
 [ $# -ge 2 ] || die "usage: difftest.sh EMU_A EMU_B [test names...]"
@@ -40,7 +40,10 @@ identical=0 diverged=0 shared_fail=0 broken=0 ran=0
 
 run_emu() {  # emu img trace flags... -> stdout to $run_out, rc in $run_rc
     local emu="$1" img="$2" trc="$3" errf="$4"; shift 4
-    run_out=$("$emu" "$img" --trace "$trc" --trace-level 1 \
+    # HARNESS_EXPECT_R0: selftest-stub backchannel only; real emulators
+    # ignore it (not part of the CLI contract).
+    run_out=$(HARNESS_EXPECT_R0="$expect" \
+              "$emu" "$img" --trace "$trc" --trace-level 1 \
               --maxcycles "$MAXCYCLES" --check-invtp "$@" 2>"$errf")
     run_rc=$?
 }
@@ -49,8 +52,13 @@ while read -r name src rest; do
     case "$name" in ""|\#*) continue;; esac
     [ $want_all -eq 1 ] || [ -n "${want[$name]:-}" ] || continue
     flags=()
+    expect="$PASS_HEX"
     for tok in $rest; do
-        case "$tok" in level=*) ;; *) flags+=("$tok");; esac
+        case "$tok" in
+            level=*) ;;
+            expect=*) expect="${tok#expect=}";;
+            *) flags+=("$tok");;
+        esac
     done
     ran=$((ran+1))
     img="$OUT/$name.img"
@@ -92,7 +100,7 @@ while read -r name src rest; do
         diverged=$((diverged+1))
         continue
     fi
-    if [ $rc_a -ne 0 ] || [ "$out_a" != "$PASS_LINE" ]; then
+    if [ $rc_a -ne 0 ] || [ "$out_a" != "HALT r0=$expect" ]; then
         echo "SHARED-FAIL $name: both agree, both fail " \
              "(rc=$rc_a stdout='$out_a')"
         shared_fail=$((shared_fail+1))

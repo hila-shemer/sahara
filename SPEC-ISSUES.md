@@ -99,3 +99,53 @@ Both emulator implementations must match the readings marked
     one via `.quad`. Note the tension with ISA-SPEC 3 "future revisions
     may assign meaning" to unused fields: a future revision could make
     that word illegal. The test documents this.
+
+15. **ISA-SPEC 10.3 fcsr flag bit order vs encoding.py** — the spec
+    sentence "Bits 4:0 accumulate exception flags NV, DZ, OF, UF, NX"
+    reads naturally as NV = bit 4 (list written 4 down to 0), but
+    encoding.py `FCSR_FLAG_BITS` assigns **NV = bit 0 .. NX = bit 4**.
+    Encoding truth is encoding.py, so the toolchain and the C4 vectors
+    use NV=0/DZ=1/OF=2/UF=3/NX=4. Recommend rewording the spec sentence
+    to name the bits explicitly. **(emulators must match — via
+    encoding.py, which they are required to consume)**
+
+16. **ISA-SPEC 4 / 2.3, MFSR-of-cycle read timing** — `cycle`
+    increments by 1 per retired instruction, but whether an MFSR that
+    reads `cycle` sees the value before or after its own increment is
+    unspecified. Chosen: **before** (the value counts instructions
+    retired prior to the reading instruction, plus deliveries). c1's
+    squash cycle-delta checks (two MFSRs N instructions apart differ by
+    N+1) depend on it. **(emulators must match)**
+
+17. **TOOLING-SPEC 3.2, records for non-retiring instructions** — EXEC
+    is "emitted for every retired instruction", and a faulting
+    instruction does not retire (ISA-SPEC 4: no architectural effect).
+    Chosen: a faulting instruction emits **no EXEC record**; the TRAP
+    record (whose epc points at it) is its only footprint. Consequence
+    for the triple fault: delivery at TL=2 delivers nothing, so **no
+    third TRAP record is written** — checks/c1_triplefault.sh asserts
+    exactly two. **(emulators must match)**
+
+18. **ISA-SPEC 10.4, FCVT `mod` bits 7:2 "must be zero"** — no
+    consequence is stated for a violation. Chosen: traps ILLEGAL, like
+    the other reserved-encoding rules in the same section; defs.s
+    provides `RAW_FCVT_BADMOD` and C4 asserts it. **(emulators must
+    match)**
+
+19. **ISA-SPEC 10.3, "the next FP operation that rounds then traps"**
+    (reserved rounding mode) — which operations "round" is not
+    enumerated. Chosen: FADD/FSUB/FMUL/FDIV/FSQRT/FMADD and all FCVT
+    forms round; FMIN/FMAX/FCMP* do not and must NOT trap on a
+    reserved mode. C4 asserts the trap via FADD only; the FMIN/FCMP
+    non-trap side is unasserted (bounded coverage). **(emulators must
+    match)**
+
+20. **ISA-SPEC 7.6, cycle value after a WFI stall** — "virtual time
+    advances directly to the next cycle at which one becomes pending"
+    does not pin whether WFI's own retire-increment lands before or
+    after the jump, so the exact post-WFI cycle differs by ±1 between
+    natural readings. c1 asserts only `cycle >= timecmp` after the
+    stall. The value is observable in traces, so the cross-diff will
+    surface any disagreement loudly. Recommend freezing: jump to
+    exactly the pending cycle, then +1 for WFI's retire. **(emulators
+    must match)**

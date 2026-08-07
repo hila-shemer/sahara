@@ -12,6 +12,10 @@
 # Every test runs twice and the two traces must be byte-identical
 # (determinism is checked here, for free, for both emulators).
 # All harness errors are fatal and named. Warnings do not exist.
+#
+# MANIFEST line: NAME SRC [level=N] [expect=<32 lowercase hex>] [flags]
+# expect= overrides the required HALT r0 value for tests that cannot
+# reach the 0x600D path (e.g. the triple-fault halt, SPEC-ISSUES 12).
 
 set -u
 
@@ -22,7 +26,7 @@ TESTS="$ROOT/tests"
 ASM="$ROOT/asm/asm.py"
 TRACEQ="$ROOT/trace-q/trace-q"
 OUT="$TESTS/out"
-PASS_LINE="HALT r0=0000000000000000000000000000600d"
+PASS_HEX="0000000000000000000000000000600d"
 MAXCYCLES="${MAXCYCLES:-10000000}"
 
 [ -n "${EMU:-}" ] || die "set EMU=path/to/emulator"
@@ -39,9 +43,10 @@ pass=0 fail=0 ran=0
 fail_names=""
 
 run_one() {
-    local name="$1" src="$2" level="$3"; shift 3
+    local name="$1" src="$2" level="$3" expect="$4"; shift 4
     local flags=("$@")
     local img="$OUT/$name.img" sym="$OUT/$name.sym"
+    local pass_line="HALT r0=$expect"
     ran=$((ran+1))
 
     if ! python3 "$ASM" -o "$img" "$TESTS/defs.s" "$TESTS/$src" 2>"$OUT/$name.asm.err"; then
@@ -53,11 +58,15 @@ run_one() {
     local trc rc out
     for run in a b; do
         trc="$OUT/$name.$run.trc"
-        out=$("$EMU" "$img" --trace "$trc" --trace-level "$level" \
+        # HARNESS_EXPECT_R0 is not part of the CLI contract; real
+        # emulators ignore it. Only the selftest stub reads it (so the
+        # expect= plumbing is testable without an emulator).
+        out=$(HARNESS_EXPECT_R0="$expect" \
+              "$EMU" "$img" --trace "$trc" --trace-level "$level" \
               --maxcycles "$MAXCYCLES" --check-invtp "${flags[@]}" \
               2>"$OUT/$name.$run.err")
         rc=$?
-        if [ $rc -ne 0 ] || [ "$out" != "$PASS_LINE" ]; then
+        if [ $rc -ne 0 ] || [ "$out" != "$pass_line" ]; then
             echo "FAIL $name (run $run): rc=$rc stdout='$out'"
             [ -s "$OUT/$name.$run.err" ] && sed 's/^/    stderr: /' \
                 "$OUT/$name.$run.err"
@@ -94,14 +103,18 @@ while read -r name src rest; do
     case "$name" in ""|\#*) continue;; esac
     [ $want_all -eq 1 ] || [ -n "${want[$name]:-}" ] || continue
     level=1
+    expect="$PASS_HEX"
     flags=()
     for tok in $rest; do
         case "$tok" in
             level=*) level="${tok#level=}";;
+            expect=*) expect="${tok#expect=}"
+                      [[ "$expect" =~ ^[0-9a-f]{32}$ ]] \
+                          || die "$name: expect= must be 32 lowercase hex digits";;
             *) flags+=("$tok");;
         esac
     done
-    if run_one "$name" "$src" "$level" ${flags[@]+"${flags[@]}"}; then
+    if run_one "$name" "$src" "$level" "$expect" ${flags[@]+"${flags[@]}"}; then
         pass=$((pass+1))
     else
         fail=$((fail+1)); fail_names="$fail_names $name"
