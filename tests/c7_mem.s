@@ -3,10 +3,10 @@
 # generator and rerun (deterministic; output is committed).
 # Expected values computed in the generator from ISA-SPEC
 # 5.3/3.4 over an explicit little-endian byte model,
-# independent of any emulator. Bounded coverage (device
-# ordering, 64-bit device access, UNALIGNED-vs-DEVERR
-# priority) listed in gen_c7.py's docstring — SPEC-ISSUES 25.
-# Conventions per tests/README.md.
+# independent of any emulator. Device ordering, successful
+# 64-bit register access, and the UNALIGNED-before-DEVERR
+# precedence live in tests/c7_dev.s (bounded-coverage notes
+# in gen_c7.py's docstring). Conventions per tests/README.md.
 
         .org 0x1000
 start:

@@ -20,3 +20,7 @@ c4_fp c4_fp.s
 c5_base c5_base.s
 c6_control c6_control.s level=2
 c7_mem c7_mem.s
+c7_dev c7_dev.s level=2
+# same image under the weak-store check mode (ISA 9.2): the queue must
+# be semantics-neutral on a single CPU — identical pass, same checks
+c7_dev_ordq c7_dev.s level=2 --check-devorder 4

@@ -26,12 +26,12 @@ Coverage (C7 outline):
 
 Bounded coverage — deliberately NOT here (no silent gaps):
 - successful 64-bit device-register accesses, device ordering rules
-  1-2 (--check-devorder, doorbell-after-stores), and device read side
-  effects need defined per-device behavior: devspec-gated, C7's
-  device-order tranche lands when devspec/INDEX.md exists.
-- UNALIGNED-vs-DEVERR priority for a misaligned device access is
-  unspecified (ISA 5.3 vs 9.2 both claim it); no test until the spec
-  picks — SPEC-ISSUES 25.
+  1-2 (--check-devorder, PRESENT/doorbell), device read side effects,
+  and the UNALIGNED-before-DEVERR precedence (SPEC-ISSUES 25, decided
+  by devspec) live in tests/c7_dev.s now that devspec/ landed.
+- device behavior that needs EVENT injection or the NIC translator
+  (queue pops with content, overflow, resize, TX/RX flows) remains
+  gated on the device-phase fixtures — see c7_dev.s's header.
 
 Deterministic; output is committed.
 """
@@ -324,10 +324,10 @@ def generate():
     emit("# generator and rerun (deterministic; output is committed).")
     emit("# Expected values computed in the generator from ISA-SPEC")
     emit("# 5.3/3.4 over an explicit little-endian byte model,")
-    emit("# independent of any emulator. Bounded coverage (device")
-    emit("# ordering, 64-bit device access, UNALIGNED-vs-DEVERR")
-    emit("# priority) listed in gen_c7.py's docstring — SPEC-ISSUES 25.")
-    emit("# Conventions per tests/README.md.")
+    emit("# independent of any emulator. Device ordering, successful")
+    emit("# 64-bit register access, and the UNALIGNED-before-DEVERR")
+    emit("# precedence live in tests/c7_dev.s (bounded-coverage notes")
+    emit("# in gen_c7.py's docstring). Conventions per tests/README.md.")
     emit()
     emit("        .org 0x1000")
     emit("start:")

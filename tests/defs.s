@@ -83,6 +83,12 @@
         .equ DEV_KBD_BASE, 0x0F010000
         .equ DEV_MOUSE_BASE, 0x0F020000
         .equ DEV_NIC_BASE, 0x0F030000
+        .equ DEV_PIXBUF_BASE, 0x10000000
+        # NIC window sub-regions (PLATFORM-SPEC section 7)
+        .equ DEV_NIC_TXBUF, 0x0F040000   # nic base + 0x1_0000
+        .equ DEV_NIC_RXBUF, 0x0F050000   # nic base + 0x2_0000
+        # devorder RAM slots (c7_dev; tests/README.md)
+        .equ ORDQ_SLOTS, 0x790
 
         # raw instruction words (built from encoding.py field
         # positions; the assembler refuses to emit these, which

@@ -32,7 +32,8 @@ committed generator scripts — never by running an emulator under test).
   - `0x750`-`0x760` c1 user-mode slots (PRIV count, user epc/status)
   - `0x768`-`0x780` c1 TL-lowering save area (epc/cause/baddr/status)
   - `0x788` timer delivery count (c3_irq_dev)
-  - `0x790`-`0x7f8` free for later groups
+  - `0x790`-`0x7b8` devorder store-queue slots (c7_dev, ORDQ_SLOTS)
+  - `0x7c0`-`0x7f8` free for later groups
 
   Device window base addresses (PLATFORM-SPEC 1) are also in defs.s
   as `DEV_*_BASE`; everything at 0x0F00_0000 and up is device space.
