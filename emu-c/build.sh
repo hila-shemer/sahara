@@ -22,5 +22,7 @@ python3 test/run_tests.py
 
 # Shared conformance suite (consumed from the toolchain, never edited
 # here). Each test runs twice, byte-identical traces required,
-# --check-invtp always on; this is the stop-condition gate.
-EMU="$PWD/bazel-bin/sahara-emu" ../tests/run-tests.sh
+# --check-invtp always on; this is the stop-condition gate. REPLAY=1:
+# bit-exact replay of every test's trace is a reference-implementation
+# check (CONFORMANCE.md), and this is the reference implementation.
+REPLAY=1 EMU="$PWD/bazel-bin/sahara-emu" ../tests/run-tests.sh
