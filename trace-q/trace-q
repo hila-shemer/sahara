@@ -11,6 +11,12 @@ Usage:
   trace-q diverge A.trc B.trc [--ignore-meta] [--sym FILE]
   trace-q range C1 C2 TRACE [--sym FILE]
   trace-q trapdump TRACE [--sym FILE]
+  trace-q events TRACE -o EVENTS.trc
+
+`events` is a harness extension beyond the TOOLING-SPEC 3.3 query set:
+it extracts the EVENT subsequence (plus the leading META) into a valid
+.trc for the emulators' --replay mode (TOOLING-SPEC 3.2; SPEC-ISSUES
+26). Prints the extracted EVENT count.
 
 Every output is plain text, one fact per line, symbolized when a .sym
 file is given. Register/predicate values are reconstructed from EXEC
@@ -348,6 +354,26 @@ def cmd_trapdump(args):
         print("none")
 
 
+def cmd_events(args):
+    out = take_opt(args, "-o")
+    if out is None or len(args) != 1:
+        die("usage: events TRACE -o EVENTS.trc")
+    recs, _ = load(args[0], None)
+    n = 0
+    try:
+        with open(out, "wb") as fh:
+            # keep the original META so the replay input is a valid
+            # .trc (first record is META) and self-describing
+            T.write_record(fh, T.T_META, recs[0].payload)
+            for r in recs[1:]:
+                if r.type == T.T_EVENT:
+                    T.write_record(fh, r.type, r.payload)
+                    n += 1
+    except OSError as e:
+        die(f"cannot write {out}: {e}")
+    print(f"{n} events")
+
+
 COMMANDS = {
     "exec": cmd_exec,
     "at": cmd_at,
@@ -357,6 +383,7 @@ COMMANDS = {
     "diverge": cmd_diverge,
     "range": cmd_range,
     "trapdump": cmd_trapdump,
+    "events": cmd_events,
 }
 
 

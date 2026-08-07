@@ -10,6 +10,7 @@
 c0_smoke c0_smoke.s
 c1_traps c1_traps.s
 c1_triplefault c1_triplefault.s expect=00000000000000000000000000003f3f
+c1_wfihang c1_wfihang.s expect=00000000000000000000000000057a11
 c2_mmu c2_mmu.s
 c2_noinvtp_remap c2_noinvtp_remap.s expect=checkfail
 c2_noinvtp_ptbase c2_noinvtp_ptbase.s expect=checkfail

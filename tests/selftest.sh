@@ -98,6 +98,24 @@ EMU="$TMP/fake-r0" "$TESTS/run-tests.sh" c2_noinvtp_remap \
     && { cat "$TMP/rt5.out"; die "run-tests must reject HALT where CHECKFAIL expected"; }
 echo "ok: expect=checkfail rejects a HALTing run"
 
+# REPLAY=1: extract-events + --replay re-run + diverge. The stub has
+# no EVENT records (0-event replay is still a meaningful determinism
+# re-run) and reproduces its trace, so this must pass...
+REPLAY=1 EMU="$FAKE" "$TESTS/run-tests.sh" c0_smoke > "$TMP/rt6.out" 2>&1 \
+    || { cat "$TMP/rt6.out"; die "REPLAY=1 should pass with the stub"; }
+echo "ok: replay round-trip passes"
+# ...and a stub that emits a different wb only under --replay must be
+# caught as a replay divergence.
+printf '#!/usr/bin/env bash\nFAKE_REPLAY_WB=9 exec python3 "%s" "$@"\n' \
+    "$TESTS/harness-selftest/fake-emu.py" > "$TMP/fake-rwb"
+chmod +x "$TMP/fake-rwb"
+REPLAY=1 EMU="$TMP/fake-rwb" "$TESTS/run-tests.sh" c0_smoke \
+    > "$TMP/rt7.out" 2>&1 \
+    && { cat "$TMP/rt7.out"; die "replay divergence must fail the test"; }
+grep -q "REPLAY DIVERGENCE" "$TMP/rt7.out" \
+    || { cat "$TMP/rt7.out"; die "no REPLAY DIVERGENCE in output"; }
+echo "ok: replay divergence caught"
+
 echo "== 4. difftest.sh =="
 "$TESTS/difftest.sh" "$FAKE" "$FAKE" > "$TMP/dt.out" 2>&1 \
     || { cat "$TMP/dt.out"; die "difftest identical stubs should pass"; }

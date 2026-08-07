@@ -38,7 +38,7 @@ def main():
     if not args:
         sys.exit("fake-emu: no image")
     image_path = args[0]
-    trace_path, level = None, 0
+    trace_path, level, replaying = None, 0, False
     i = 1
     while i < len(args):
         a = args[i]
@@ -48,7 +48,10 @@ def main():
         elif a == "--trace-level":
             level = int(args[i + 1])
             i += 2
-        elif a in ("--maxcycles", "--ram", "--check-devorder", "--replay"):
+        elif a == "--replay":
+            replaying = True
+            i += 2
+        elif a in ("--maxcycles", "--ram", "--check-devorder"):
             i += 2
         elif a == "--check-invtp":
             i += 1
@@ -77,6 +80,10 @@ def main():
 
     if trace_path:
         wb = int(os.environ.get("FAKE_WB", "0"))
+        # FAKE_REPLAY_WB: diverge only under --replay, so selftest can
+        # prove the harness catches a replay that fails to reproduce.
+        if replaying and os.environ.get("FAKE_REPLAY_WB"):
+            wb = int(os.environ["FAKE_REPLAY_WB"])
         with open(trace_path, "wb") as f:
             T.write_record(f, T.T_META, T.meta_payload(
                 f"image={image_path}\nlevel={level}\nstub=1\n"))
