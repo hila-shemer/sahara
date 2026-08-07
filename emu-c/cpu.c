@@ -799,25 +799,24 @@ static void exec_insn(SeCpu *c, uint64_t insn)
         /* mod bits 7:2 must be zero; format codes 0/1/2 = 32/64/128,
          * 128-bit FP does not exist (10.4) */
         bool ok = (mod >> 2) == 0u;
-        bool consults_rm = false;
         unsigned srcw = 32u << sfmt, dstw = 32u << wf;
         switch (opcode) {
         case OPC_FCVTFI:
         case OPC_FCVTFIU:
-            /* FP (32/64) -> int (32/64/128); truncation, fcsr ignored */
+            /* FP (32/64) -> int (32/64/128); truncates regardless of
+             * fcsr, but still "rounds" for the reserved-rm trap (root
+             * SPEC-ISSUES 19: all FCVT forms round) */
             ok = ok && sfmt <= 1u && wf <= 2u;
             break;
         case OPC_FCVTIF:
         case OPC_FCVTUIF:
             ok = ok && sfmt <= 2u && wf <= 1u;
-            consults_rm = true;
             break;
         default: /* OPC_FCVTFF: 32 <-> 64 only (SPEC-ISSUES.md) */
             ok = ok && sfmt <= 1u && wf <= 1u && sfmt != wf;
-            consults_rm = true;
             break;
         }
-        if (!ok || (consults_rm && rm > RM_RMM)) {
+        if (!ok || rm > RM_RMM) {
             deliver(c, CAUSE_ILLEGAL, pc, 0u);
             return;
         }

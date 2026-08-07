@@ -488,13 +488,13 @@ def test_fp():
                 1 << E.FCSR_FLAG_BITS["DZ"])
 
     # reserved rounding mode: traps at the next op that rounds, not at
-    # MTSR and not at FMIN/FCMP/FCVTFI (SPEC-ISSUES.md)
+    # MTSR and not at FMIN/FCMP; all FCVT forms round (root
+    # SPEC-ISSUES 19), so FCVTFI is the op that trips here
     expect_halt("reserved-rm-traps-at-round",
                 handler_img(_set_rm(5) + [
                     enc("FMIN", dst=2, src1=1, src2=1, width=1),
                     enc("FCMPLT", dst=1, src1=1, src2=1, width=1),
-                    enc("FCVTFI", dst=2, src1=1, width=1, mod=1),
-                    enc("FADD", dst=2, src1=1, src2=1, width=1)],
+                    enc("FCVTFI", dst=2, src1=1, width=1, mod=1)],
                     cause_check_handler(E.CAUSES["ILLEGAL"])), 111)
     # ... and MTSR of a good mode afterwards unwedges it
     fp_arith_vec("rm-rewrite-recovers", "FADD", 64, O.RTZ,

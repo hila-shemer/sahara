@@ -135,11 +135,12 @@ they need a spec ruling more urgently than the rest.
     checked against host-hardware IEEE doubles at RNE).
 
 22. **ISA-SPEC 10.3 — which ops are "the next FP operation that
-    rounds"?** Chose: the ops that *consult* the fcsr rounding mode
-    trap on a reserved mode (FADD FSUB FMUL FDIV FSQRT FMADD FCVTIF
-    FCVTUIF FCVTFF); FCVTFI/FCVTFIU (RTZ always, 10.4), FMIN/FMAX and
-    FCMP* execute normally. Arguable the other way for FCVTFI ("rounds
-    toward zero" is still rounding). **[divergence risk]**
+    rounds"?** First chose "the ops that consult fcsr" (exempting
+    FCVTFI/FCVTFIU, which truncate regardless of fcsr); root
+    SPEC-ISSUES 19 (toolchain) rules the other way — *all* FCVT forms
+    round, FMIN/FMAX/FCMP* must not trap — with "emulators must
+    match". Adopted the toolchain ruling; risk resolved unless the
+    spec is edited to disagree.
 
 23. **ISA-SPEC 10.4 — FCVTFF with source format == destination
     format.** "FP -> FP (32 <-> 64)" plus "illegal format combinations
@@ -184,3 +185,13 @@ they need a spec ruling more urgently than the rest.
     except -0 under RDN; sums of like-signed zeros keep the sign;
     FMADD applies the same rule between the product sign and the
     addend; FMIN/FMAX order -0 < +0.
+
+30. **ISA-SPEC 7.6 — exact cycle value after a WFI stall** (root
+    SPEC-ISSUES 20). Implemented: WFI retires normally (EXEC record at
+    cycle N, cycle -> N+1), then virtual time jumps so that
+    post-stall `cycle` equals **exactly the pending event's cycle**
+    (timecmp); no extra +1. The root entry recommends freezing the
+    other reading (jump, then +1 for the retire). c1 only asserts
+    `cycle >= timecmp`, so both pass today; the TRAP record's cycle
+    field will differ in the cross-diff until Hila freezes one.
+    **[divergence risk]**
