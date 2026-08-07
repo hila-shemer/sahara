@@ -584,7 +584,7 @@ expect cycle_delta = 1
 table, sizes RAM, locates the display, installs trap vectors, builds a
 one-node page table identity-mapping the first 16 MB, and enables the MMU.
 Assembler syntax per TOOLING-SPEC.md section 4; store operand order
-(`st.W value, [addr]`) per devspec/asm.md.
+(`st.W [addr], value`) per devspec/asm.md section 5.5.
 
 Simplifications, called out so no one copies them blindly: it assumes
 `u128` table fields fit in 64 bits (it checks the high halves and fails
@@ -635,7 +635,7 @@ ram_loop:
         b       ram_loop
 ram_done:
         la      r11, ram_top
-        st.64   r6, [r11 + 0]          # publish RAM top for later stages
+        st.64   [r11 + 0], r6          # publish RAM top for later stages
 
         # ---- 3. walk device records; find the display (section 3.5)
         # r5 already points one past the RAM records = first device record.
@@ -647,7 +647,7 @@ dev_loop:
         cmpeq.64 p2, r7, 1             # display?
         (p2) ldz.64 r8, [r5 + 32]      # params[0] = pixel buffer PA
         (p2) la  r12, fb_pa
-        (p2) st.64 r8, [r12 + 0]
+        (p2) st.64 [r12 + 0], r8
         # unknown types need no special case: the unconditional
         # 64-byte advance below IS the required skip rule (section 4.2).
         add     r5, r5, 64
@@ -666,23 +666,23 @@ dev_done:
         # u128, prefix_mask u128, rest reserved-zero) + 256 x 16-byte
         # entries. This node has shift 0 and covers VPN 0..255.
         la      r10, pt_root           # 64-byte aligned (see .align below)
-        st.64   zero, [r10 + 0]        # shift = 0
-        st.64   zero, [r10 + 8]        # prefix       = 0   (low)
-        st.64   zero, [r10 + 16]       #                    (high)
+        st.64   [r10 + 0], zero        # shift = 0
+        st.64   [r10 + 8], zero        # prefix       = 0   (low)
+        st.64   [r10 + 16], zero       #                    (high)
         li      r7, 0xFFFFFFFFFFFFFF00
-        st.64   r7, [r10 + 24]         # prefix_mask, low:  bits 8..63
+        st.64   [r10 + 24], r7         # prefix_mask, low:  bits 8..63
         li      r7, 0x0000FFFFFFFFFFFF
-        st.64   r7, [r10 + 32]         # prefix_mask, high: bits 64..111
-        st.64   zero, [r10 + 40]       # reserved header bytes must be 0
-        st.64   zero, [r10 + 48]
-        st.64   zero, [r10 + 56]
+        st.64   [r10 + 32], r7         # prefix_mask, high: bits 64..111
+        st.64   [r10 + 40], zero       # reserved header bytes must be 0
+        st.64   [r10 + 48], zero
+        st.64   [r10 + 56], zero
         add     r12, r10, 64           # r12 -> entries[0]
         mov     r11, zero              # i = 0
 pt_loop:
         shl     r13, r11, 16           # frame PA = i << 16
         or      r13, r13, PTE_LEAF_RWX # leaf entry, R+W+X, U=0
-        st.64   r13, [r12 + 0]         # entry low half
-        st.64   zero, [r12 + 8]        # entry high half
+        st.64   [r12 + 0], r13         # entry low half
+        st.64   [r12 + 8], zero        # entry high half
         add     r12, r12, 16
         add     r11, r11, 1
         cmplt   p1, r11, 256

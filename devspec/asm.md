@@ -519,7 +519,8 @@ Per TOOLING-SPEC 1. Header: magic bytes `53 41 48 49 4D 47 30 31`
 ("SAHIMG01"), entry u128, nsegs u64. Segment descriptors follow in **source
 order** (order of `.org` appearance), 48 bytes each; payloads follow the
 descriptor table, packed in the same order with no padding, so the first
-segment's `file_off` = 40 + 48·nsegs. Per segment:
+segment's `file_off` = 32 + 48·nsegs (the TOOLING-SPEC 1 header is 32
+bytes: magic u64, entry u128, nsegs u64). Per segment:
 
 - `load_pa` = the `.org` address; `mem_len` = full segment size;
 - `file_len` = mem_len minus the trailing run of zero bytes (i.e. index of
@@ -825,18 +826,18 @@ Assembled instruction stream (T3.1 is this program's `la`):
 0x2000: 48 69 00           | "Hi\0"
 ```
 
-`t4.img`, complete, 162 bytes (segment 1: file_off 0x88, file_len 32,
-mem_len 32; segment 2: file_off 0xA8, file_len 2 — the trailing NUL is
+`t4.img`, complete, 162 bytes (segment 1: file_off 0x80, file_len 32,
+mem_len 32; segment 2: file_off 0xA0, file_len 2 — the trailing NUL is
 trimmed — mem_len 3):
 
 ```
 0000: 53 41 48 49 4d 47 30 31 00 10 00 00 00 00 00 00
 0010: 00 00 00 00 00 00 00 00 02 00 00 00 00 00 00 00
 0020: 00 10 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-0030: 88 00 00 00 00 00 00 00 20 00 00 00 00 00 00 00
+0030: 80 00 00 00 00 00 00 00 20 00 00 00 00 00 00 00
 0040: 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 0050: 00 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-0060: a8 00 00 00 00 00 00 00 02 00 00 00 00 00 00 00
+0060: a0 00 00 00 00 00 00 00 02 00 00 00 00 00 00 00
 0070: 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 0080: 54 10 00 00 00 a8 00 00 58 20 00 00 00 e0 3f 00
 0090: 30 30 c4 07 00 00 00 00 fe 00 00 00 00 00 00 00

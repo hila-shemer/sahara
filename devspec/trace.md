@@ -449,9 +449,10 @@ A `.sym` line not matching the TOOLING-SPEC §2 grammar is fatal (exit 2).
 
 **Disassembly canonical form** (the `asm=` value). Surface syntax follows
 TOOLING-SPEC §4.3; where that section is silent this document fixes a
-canonical rendering (note: `devspec/asm.md` owns the assembler grammar;
-the integration pass reconciles any conflict in favor of asm.md — listed
-as a dependency of this document):
+canonical rendering (`devspec/asm.md` owns the assembler grammar;
+integration verified the two agree — store operand order
+`st.W [ea], rs3`, MADD shape `madd rd, rs1, rs2|imm, rs3`, and the FCVT
+suffix/source-format tokens all match asm.md §5):
 
 1. Mnemonics and register names lowercase; registers always `rN`/`pN`
    (never aliases). Predication prefix `(p3) ` / `(!p3) ` printed iff the
@@ -809,23 +810,26 @@ width 800, height 600, stride 3200, format 1:
 
 ### TV-6 — NIC frame EVENT record (88 bytes)
 
-A 60-byte ARP request (gateway 10.0.2.2 asking for 10.0.2.15,
-slirp-style gateway MAC 52:55:00:00:02:02 — addressing conventions per
-PLATFORM-SPEC §7 / `devspec/nic.md`), arriving at cycle 1000, NIC at
-device index 3:
+A 60-byte ARP reply (10.0.2.2 is-at 52:55:0a:00:02:02 — the translator
+peer MAC of `devspec/nic.md` §6.1 — unicast to the guest MAC
+52:54:00:12:34:56; the frame is `devspec/nic.md` vector TV-2
+byte-for-byte), arriving at cycle 1000, NIC at device index 3:
 
 ```
 0000: 05 00 00 00 50 00 00 00 e8 03 00 00 00 00 00 00
-0010: 03 00 00 00 00 00 00 00 3c 00 00 00 ff ff ff ff
-0020: ff ff 52 55 00 00 02 02 08 06 00 01 08 00 06 04
-0030: 00 01 52 55 00 00 02 02 0a 00 02 02 00 00 00 00
-0040: 00 00 0a 00 02 0f 00 00 00 00 00 00 00 00 00 00
+0010: 03 00 00 00 00 00 00 00 3c 00 00 00 52 54 00 12
+0020: 34 56 52 55 0a 00 02 02 08 06 00 01 08 00 06 04
+0030: 00 02 52 55 0a 00 02 02 0a 00 02 02 52 54 00 12
+0040: 34 56 0a 00 02 0f 00 00 00 00 00 00 00 00 00 00
 0050: 00 00 00 00 00 00 00 00
 ```
 
 Decode: type 5, len 80; cycle 1000; device 3; payload_len 60; then the
-frame: dst ff:ff:ff:ff:ff:ff, src 52:55:00:00:02:02, ethertype 0x0806,
-ARP request, 18 zero pad bytes to the 60-byte minimum.
+frame: dst 52:54:00:12:34:56, src 52:55:0a:00:02:02, ethertype 0x0806,
+ARP reply, 18 zero pad bytes to the 60-byte minimum. (An ARP *request*
+arriving at the guest cannot occur on the reference platform — the
+translator never ARPs the guest, nic.md §6.3 — so the fixture uses the
+reply the translator actually sends.)
 
 ### TV-7 — symbol sidecar and resolution
 

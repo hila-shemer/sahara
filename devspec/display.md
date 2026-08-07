@@ -10,8 +10,8 @@ marked with their source. Non-normative material appears in indented
 Shared semantics owned elsewhere are referenced, never defined here:
 
 - Resize EVENT payload encoding and event/trace record formats: per
-  devspec/trace.md §EVENT.
-- Device table byte layout: per devspec/boot.md (values summarized in
+  devspec/trace.md §4.4 (EVENT payloads) and §2.3.5 (record framing).
+- Device table byte layout: per devspec/boot.md §3.5 (values summarized in
   section 2 below from PLATFORM-SPEC §2).
 - Instruction-level ordering and trap semantics: ISA-SPEC.md sections 3.2,
   4, 5.4, 7.1, 9.2.
@@ -48,9 +48,13 @@ Both windows are device space in the sense of ISA-SPEC §9.2. The pixel
 buffer base PA must be 16-byte aligned; the control window base must be
 64 KB aligned.
 
-The initial mode is emulator configuration, fixed before reset and
-identical between a recording run and its replay; it is recorded in the
-trace META record (key catalog per devspec/trace.md §META).
+The initial mode is fixed before reset and identical between a recording
+run and its replay. The trace META catalog (devspec/trace.md §2.3.7) is
+closed in v1 and carries no display-mode key, so replay reproducibility
+relies on the initial mode being the fixed reference default above; an
+emulator making the initial mode configurable must ensure recording and
+replay use the same configuration (a future trace-format revision would
+carry it in META).
 
 ---
 
@@ -254,8 +258,9 @@ presented; there is no implicit presentation.
 The host window size is not architectural state. When it changes, the
 emulator *may* (GUI mode) generate a **resize event**: an entry in the
 synchronous event queue of ISA-SPEC §4, `(cycle, device, payload)`, where
-the payload carries the new WIDTH, HEIGHT, and STRIDE (payload encoding
-owned by devspec/trace.md §EVENT). The chosen geometry must satisfy
+the payload carries the new WIDTH, HEIGHT, STRIDE, and FORMAT — format
+always 1 in v1.0 (payload encoding owned by devspec/trace.md §4.4: four
+u64 fields, width/height/stride/format). The chosen geometry must satisfy
 section 3.4. In replay mode resize events come exclusively from the trace
 and the host window is not consulted (PLATFORM-SPEC §§7-8 pattern; trace
 semantics per devspec/trace.md).
@@ -271,7 +276,7 @@ EVENT record.
 A resize event with cycle C is processed at the first between-instructions
 boundary at which `cycle >= C` (the same recognition points as interrupts,
 ISA-SPEC §7.5; exact interleaving with instruction retirement and trace
-records is elaborated by devspec/trace.md). Processing performs, as one
+records per devspec/trace.md §3.3). Processing performs, as one
 atomic action:
 
 1. WIDTH, HEIGHT, STRIDE are set to the event's values — all three
@@ -583,8 +588,8 @@ byte 15 becomes 00 but the presented image is unchanged (D-12).
 
 Initial mode 640 x 480 x 2560; IE = 0 throughout except step 12 (so
 delivery points are explicit); "event(W,H,S) @ C" = a resize EVENT record
-with cycle C (payload encoding per devspec/trace.md §EVENT). Steps execute
-in order; loads are 64-bit.
+with cycle C, format = 1 (payload encoding per devspec/trace.md §4.4).
+Steps execute in order; loads are 64-bit.
 
 | step | action | expected |
 |-----:|--------|----------|
@@ -627,13 +632,16 @@ illegal ones must never be).
 
 ---
 
-## Dependencies (placeholder references to resolve at integration)
+## Dependencies (resolved at integration)
 
-1. devspec/trace.md §EVENT — the resize EVENT payload encoding (new WIDTH/
-   HEIGHT/STRIDE) and the device-index convention; referenced in sections
-   6.1–6.2 and vector V5.
-2. devspec/trace.md — elaborated event-delivery interleaving with
-   instruction retirement/trace records (section 6.2) and the META key for
-   the initial display mode (section 1).
-3. devspec/boot.md — device table byte layout for the type-1 (display)
-   entry (section 1 summarizes PLATFORM-SPEC §2 values only).
+1. devspec/trace.md §4.4 — the resize EVENT payload encoding (width,
+   height, stride, format as four u64s) and §2.3.5's device-index
+   convention (0-based device-table index; display = 0 in the reference
+   table order of devspec/boot.md §5); referenced in sections 6.1–6.2 and
+   vector V5.
+2. devspec/trace.md §3.3 — event-delivery interleaving with instruction
+   retirement and trace records (section 6.2). Note: trace.md's v1 META
+   catalog (§2.3.7) has no display-mode key; section 1 states the
+   consequence for replay.
+3. devspec/boot.md §3.5 — device table byte layout for the type-1
+   (display) entry (section 1 summarizes PLATFORM-SPEC §2 values only).

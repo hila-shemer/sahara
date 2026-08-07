@@ -11,10 +11,10 @@ normative for the reference platform NIC.
 Interfaces owned elsewhere and only referenced here:
 
 - Device register offsets/widths — PLATFORM-SPEC §7 (frozen).
-- EVENT record payload encoding — devspec/trace.md §EVENT (placeholder
-  reference; see §10).
-- Device table layout — devspec/boot.md; the NIC entry is type 4 with
-  params[0] holding the MAC in the encoding of §2.5 of this document.
+- EVENT record payload encoding — devspec/trace.md §4.3 (see §10).
+- Device table layout — devspec/boot.md §3.5/§3.6; the NIC entry is type 4
+  with params[0] holding the MAC in the packing of boot.md §3.6, which
+  §2.5 of this document restates.
 - Virtual-time rules — ISA-SPEC §4 and PLATFORM-SPEC §8 (frozen); §7 of this
   document elaborates within them.
 
@@ -120,7 +120,8 @@ no legitimate reason to pop an empty mailbox). Reading RX_POP traps DEVERR.
 
 MAC reads the device's 48-bit MAC address in bits 47:0; bits 63:48 read 0.
 
-**Encoding (normative, defined here):** for MAC address m0:m1:m2:m3:m4:m5
+**Encoding (normative; identical by construction to the device-table
+packing owned by devspec/boot.md §3.6):** for MAC address m0:m1:m2:m3:m4:m5
 (m0 = first byte on the wire, i.e. the leftmost byte in conventional
 notation), the register value is
 
@@ -542,13 +543,15 @@ Rules for the assigned cycle C:
 ### 7.2 EVENT payload
 
 The encoding of the EVENT record payload for a NIC arrival is owned by the
-trace specification: **per devspec/trace.md §EVENT**. This document
-constrains only its information content: the payload must carry exactly the
-frame bytes as exposed to the guest (length = the RX_LEN value, padding
+trace specification: **per devspec/trace.md §4.3** (payload = exactly the
+frame bytes, `payload_len` = the RX_LEN value). This document constrains
+only its information content: the payload must carry exactly the frame
+bytes as exposed to the guest (length = the RX_LEN value, padding
 included), such that replay can reproduce the RX buffer and RX_LEN without
-consulting the translator. Whether the emulator's own writes into the RX
-buffer additionally appear as trace records is likewise trace.md's call;
-this document assumes they do not (guest accesses only).
+consulting the translator. The emulator's own writes into the RX buffer do
+**not** appear as trace records: trace.md §2.3.2–§2.3.6 define
+MEMW/MEMR/DEVW as per-instruction data accesses, so the frame enters the
+trace solely as its EVENT record (confirmed at integration).
 
 ### 7.3 Replay isolation guarantee
 
@@ -655,7 +658,7 @@ register state unchanged by the faulting access).
 **Determinism**
 
 - NIC-C-31: every guest-exposed frame has exactly one EVENT record whose
-  payload equals the exposed bytes (per devspec/trace.md §EVENT), RX_LEN
+  payload equals the exposed bytes (per devspec/trace.md §4.3), RX_LEN
   bytes long.
 - NIC-C-32: a synthesized reply's event cycle is strictly greater than the
   triggering doorbell store's cycle; event cycles are non-decreasing in
@@ -947,10 +950,10 @@ cycles (NIC-C-31/32).
 
 ## 10. Cross-document dependencies
 
-| dependency | needed for |
+| dependency | resolution (integration pass) |
 |---|---|
-| devspec/trace.md §EVENT | encoding of the NIC arrival payload (§7.2); whether device-internal RX-buffer writes appear as trace records (assumed not) |
-| devspec/boot.md | device table NIC entry (type 4); params[0] must carry the MAC in the §2.5 encoding |
+| devspec/trace.md §4.3 | NIC arrival payload = raw frame bytes, `payload_len` = RX_LEN — matches §7.2; device-internal RX-buffer writes produce no trace records (trace.md §2.3.2–§2.3.6: access records are per-instruction) |
+| devspec/boot.md §3.6 | device table NIC entry (type 4); params[0] carries the MAC in the boot.md §3.6 packing, identical to §2.5 (value 0x0000_5634_1200_5452 for the reference MAC, both documents) |
 
 Register offsets/widths and window layout are frozen in PLATFORM-SPEC §7;
 virtual-time rules are frozen in ISA-SPEC §4 and PLATFORM-SPEC §8. This

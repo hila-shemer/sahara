@@ -20,9 +20,9 @@ Ownership (per the devspec ownership matrix):
   ordering rules (ISA-SPEC §9.2); the synchronous event-queue model
   (ISA-SPEC §4, PLATFORM-SPEC §8).
 - **Referenced, never defined here:** trace EVENT payload encodings and
-  replay record semantics (per devspec/trace.md §EVENT); device table
-  entries (per devspec/boot.md); display WIDTH/HEIGHT/resize semantics
-  (per devspec/display.md).
+  replay record semantics (per devspec/trace.md §4.1–§4.2, §5); device
+  table entries (per devspec/boot.md §3.5); display WIDTH/HEIGHT/resize
+  semantics (per devspec/display.md).
 
 ---
 
@@ -286,9 +286,10 @@ and HEIGHT registers). At event-generation time the emulator clamps:
     x = min(max(pointer_x, 0), min(W - 1, 65535))
     y = min(max(pointer_y, 0), min(H - 1, 65535))
 
-The additional 65535 bound is forced by the 16-bit fields; on the
-reference platform display modes are not expected to exceed 65535 in
-either dimension (mode constraints per devspec/display.md).
+The additional 65535 bound is forced by the 16-bit fields; it is
+load-bearing, not theoretical: devspec/display.md (D-10) bounds mode
+dimensions only to 32 bits, so modes beyond 65535 are legal and the clamp
+is what keeps the event word well-formed (vector MV-07).
 
 Clamping interacts with resize as follows:
 
@@ -297,8 +298,8 @@ Clamping interacts with resize as follows:
    cycle of a display-resize event clamps against the post-resize mode;
    one at an earlier cycle clamps against the pre-resize mode. Relative
    ordering of a mouse event and a resize event assigned the *same*
-   cycle is defined by the trace's event ordering rules (per
-   devspec/trace.md §EVENT).
+   cycle is their application order, which is their order in the trace
+   (devspec/trace.md §3.3 rule 1, §5.2).
 2. Events already in the queue are never re-clamped. After a resize to a
    smaller mode, the guest may pop events whose coordinates exceed the
    new W-1/H-1; it must tolerate this (the events were valid when
@@ -329,8 +330,8 @@ dropped event:
 - does not contribute to EXTINT pending;
 - **is recorded in the trace** with its cycle and full payload, marked as
   dropped, so replay reproduces the drop exactly (encoding per
-  devspec/trace.md §EVENT — the trace document owns the drop-marker
-  representation);
+  devspec/trace.md §4.1/§4.2: the payload's flags byte, bit 0 =
+  dropped-on-arrival);
 - counts as generated for the keyboard alternation guarantee (§2.6) and
   as the comparison point for the mouse emission rule (§3.2).
 
@@ -352,8 +353,8 @@ reason other than a DATA pop; there is no flush operation.
   instruction's execution the visible queue state does not change.
 - Cycle *assignment* (which cycle an input gets in live mode, and its
   reproduction in replay) is governed by ISA-SPEC §4 and PLATFORM-SPEC
-  §8 as elaborated by devspec/trace.md; this document does not define
-  it.
+  §8 as elaborated by devspec/trace.md §3.2–§3.3 and §5.4; this document
+  does not define it.
 
 ---
 
@@ -388,9 +389,9 @@ makes the race benign. Delivery, masking, and epc semantics are ISA-SPEC
 Every generated event (including dropped ones, §4.2) is a trace EVENT
 record carrying (cycle, device table index, payload); the payload
 encoding for keyboard and mouse events is owned by devspec/trace.md
-§EVENT and is expected to embed the 64-bit event words of §2.1 and §3.1
-— this document defines the words, the trace document defines their
-framing. In replay mode the trace is the sole event source: the emulator
+§4.1/§4.2 and embeds the 64-bit event words of §2.1 and §3.1 verbatim
+(word at payload offset 0, flags byte at offset 8) — this document
+defines the words, the trace document defines their framing. In replay mode the trace is the sole event source: the emulator
 must not consult the host's real input devices, and identical (image,
 event trace) pairs must reproduce all register reads (DATA, STATUS)
 bit-identically (ISA-SPEC §4; PLATFORM-SPEC §8; TOOLING-SPEC §3.2).
@@ -458,7 +459,7 @@ are 64-bit unless stated.
 - **INPUT-18.** With 256 events enqueued on a device, a newly generated
   event for that device is dropped: STATUS stays 256, the queue contents
   are unchanged, and the drop appears in the trace as specified by
-  devspec/trace.md §EVENT.
+  devspec/trace.md §4.1/§4.2 (flags bit 0 set).
 - **INPUT-19.** A dropped event still advances the §2.6/§3.2 generation
   state: after a dropped keyboard press of key K, the next generated
   event for K is a release; after a dropped mouse event with triple T,
@@ -568,7 +569,7 @@ Expected observable sequence:
 | 2 | DATA pops 1–256 | alternating 0x0000_0001_0000_0004, 0x0000_0000_0000_0004 (128 pairs); the 257th press absent |
 | 3 | STATUS after 256 pops | 0 |
 | 4 | DATA pop 257 | 0xFFFF_FFFF_FFFF_FFFF |
-| 5 | trace | 257 generated events recorded; the 257th marked dropped (encoding per devspec/trace.md §EVENT) |
+| 5 | trace | 257 generated events recorded; the 257th marked dropped (flags bit 0 per devspec/trace.md §4.1) |
 | 6 | next generated event for key A after the drop | release (0x0000_0000_0000_0004), per INPUT-19 |
 
 ### 8.6 Resize-clamp scenario (INPUT-15/17)
