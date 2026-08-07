@@ -1,0 +1,8 @@
+# Sahara conformance suite manifest.
+# Format: NAME SRC [level=N] [extra emulator flags...]
+# run-tests.sh prepends tests/defs.s to every assembly and always passes
+# --check-invtp. difftest.sh forces trace level 1 (per toolchain-prompt).
+c0_smoke c0_smoke.s
+c3_atomics c3_atomics.s
+c5_base c5_base.s
+c6_control c6_control.s level=2
