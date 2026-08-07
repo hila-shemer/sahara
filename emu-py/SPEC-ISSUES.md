@@ -122,7 +122,16 @@ ruling most urgently.
     NV for 0×inf even when the addend is a quiet NaN; underflow flag
     uses tininess-after-rounding (result subnormal-or-zero and inexact);
     FCMPEQ never raises NV even for sNaN operands (spec's "FCMPEQ does
-    not" read as unconditional).
+    not" read as unconditional). *Added (iteration 7):* OF follows IEEE
+    7.4's unbounded-exponent rule — it fires iff the rounded result
+    *with unbounded exponent* would exceed maxfinite. Consequence at
+    the f32 overflow threshold (2-2^-24)*2^127: RTZ truncates to
+    exactly maxfinite and raises NX only (no OF), while RNE/RUP go to
+    inf with OF|NX; OF with a *finite* delivered result happens only
+    when even the truncated unbounded result exceeds maxfinite (e.g.
+    RTZ of 1e50 -> maxfinite, OF|NX). Directed vectors in test_fp.py
+    (test_f64_to_f32_near_halfway). **[cross-impl]** (a C side that
+    flags OF on every threshold clamp diverges in fcsr).
 
 20. **ISA-SPEC 9.2 / check-devorder — store-queue model details.**
     Chosen: ordinary stores enter a depth-N queue (oldest commits on

@@ -209,6 +209,50 @@ def test_int_to_f_and_f_to_f():
     assert got == f2b(float("inf")) and fl == (sf.OF | sf.NX)
 
 
+def test_f64_to_f32_near_halfway():
+    """Directed f64->f32 vectors at the rounding boundary. The exact
+    ties and the values one f64-ulp either side of them are where a
+    double-rounding implementation (round to some intermediate width
+    first) goes wrong; f_to_f rounds once from the exact Fraction.
+    Bit patterns spelled out rather than via f2b so a host libm that
+    itself double-rounds can't vacuously agree."""
+    def conv(x, rm):
+        return sf.f_to_f(sf.F64, sf.F32, d2b(x), rm)
+    tie = 1 + 2**-24                     # exactly between 1.0 and 1+2^-23
+    # RNE: tie to even mantissa, both directions
+    assert conv(tie, RNE) == (0x3F800000, sf.NX)              # down to 1.0
+    assert conv(1 + 3 * 2**-24, RNE) == (0x3F800002, sf.NX)   # up to even
+    # one f64-ulp off the tie: nearest wins, no tie-break involved
+    assert conv(tie + 2**-52, RNE) == (0x3F800001, sf.NX)
+    assert conv(tie - 2**-52, RNE) == (0x3F800000, sf.NX)
+    assert f2b(tie + 2**-52) == 0x3F800001                    # host agrees
+    # directed modes on the same tie
+    assert conv(tie, RTZ) == (0x3F800000, sf.NX)
+    assert conv(tie, RUP) == (0x3F800001, sf.NX)
+    assert conv(tie, RMM) == (0x3F800001, sf.NX)              # away from 0
+    assert conv(-tie, RDN) == (0xBF800001, sf.NX)
+    assert conv(-tie, RTZ) == (0xBF800000, sf.NX)
+    # subnormal boundary: half the min subnormal is a tie against zero
+    assert conv(2**-150, RNE) == (0x00000000, sf.UF | sf.NX)  # even = 0
+    assert conv((1 + 2**-52) * 2**-150, RNE) == (0x00000001, sf.UF | sf.NX)
+    assert conv(3 * 2**-150, RNE) == (0x00000002, sf.UF | sf.NX)
+    assert conv(-(2**-150), RDN) == (0x80000001, sf.UF | sf.NX)
+    # overflow threshold: (2 - 2^-24) * 2^127 is the exact halfway
+    # between f32max and 2^128 - RNE ties up to the power of two = inf.
+    # IEEE 7.4: OF fires iff the unbounded-exponent ROUNDED result
+    # exceeds maxfinite - so RTZ here truncates to exactly maxfinite
+    # and raises NX only, while RUP's unbounded result is 2^128 -> OF.
+    thr = (2 - 2**-24) * 2.0**127
+    assert conv(thr, RNE) == (0x7F800000, sf.OF | sf.NX)      # +inf
+    assert conv(thr - 2**-52 * 2.0**127, RNE) == (0x7F7FFFFF, sf.NX)
+    assert conv(thr, RTZ) == (0x7F7FFFFF, sf.NX)              # no OF
+    assert conv(thr, RUP) == (0x7F800000, sf.OF | sf.NX)
+    assert conv(-thr, RUP) == (0xFF7FFFFF, sf.NX)             # no OF
+    assert conv(-thr, RDN) == (0xFF800000, sf.OF | sf.NX)
+    # OF with a finite result: unbounded RTZ of 1e50 still has e > emax
+    assert conv(1e50, RTZ) == (0x7F7FFFFF, sf.OF | sf.NX)
+
+
 # ------------------------------------------------------ machine level
 def fpop(name, dst, src1, src2=0, src3=0, w=1, mod=0):
     return asm(name, dst=dst, src1=src1, src2=src2, src3=src3, width=w,
