@@ -24,3 +24,10 @@ c7_dev c7_dev.s level=2
 # same image under the weak-store check mode (ISA 9.2): the queue must
 # be semantics-neutral on a single CPU — identical pass, same checks
 c7_dev_ordq c7_dev.s level=2 --check-devorder 4
+# EVENT-fed tests (events=GEN.py): the feed generator emits a replay
+# trace (META + EVENT records) consumed via --replay — the CLI's only
+# headless event source. Skipped unless REPLAY=1 (they need the
+# emulator to implement --replay). level=2: their checks read MEMRs.
+c7_kbd c7_kbd.s level=2 events=c7_kbd.py
+c7_kbd_ovf c7_kbd_ovf.s level=2 events=c7_kbd_ovf.py
+c7_resize c7_resize.s level=2 events=c7_resize.py
