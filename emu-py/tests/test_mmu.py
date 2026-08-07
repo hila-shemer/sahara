@@ -379,3 +379,34 @@ def test_cyclic_table_walk_faults():
     m, _ = run_words(prog, data=data)
     assert m.regs[10] == E.CAUSES["PF_LOAD"]
     assert m.regs[11] == va
+
+
+# ------------- MMU enable while pc's own page is unfetchable: the MTSR
+# retires, the very NEXT fetch faults, baddr = epc = that pc.
+def test_mmu_enable_pc_page_noexec_perm_fetch_next_fetch():
+    handler_va, handler_pa = 0x10000, 0x30000
+    data = tree({0: leaf(0, r=1, w=1, x=0, u=1),        # code page: no X
+                 1: leaf(handler_pa, r=1, w=1, x=1)}) \
+        + [(handler_pa, wbytes(cause_handler()))]
+    prog = vbase_setup(handler_va) + enable() + [halt()]
+    m, out = run_words(prog, data=data)
+    assert out == "halt"
+    fault_pc = E.RESET_PC + 6 * 8              # insn right after the MTSR
+    assert m.regs[10] == E.CAUSES["PERM_FETCH"]
+    assert m.regs[11] == fault_pc              # baddr = fetch VA
+    assert m.regs[12] == fault_pc              # epc = same: nothing retired
+
+
+def test_mmu_enable_pc_page_unmapped_pf_fetch_next_fetch():
+    handler_va, handler_pa = 0x10000, 0x30000
+    data = [(ROOT_PA, node(8, 0, 0, {0: table(CHILD_PA)})),
+            (CHILD_PA, node(0, 0, VPN_MASK & ~0xFF,
+                            {1: leaf(handler_pa, r=1, w=1, x=1)})),
+            (handler_pa, wbytes(cause_handler()))]     # VPN 0 absent
+    prog = vbase_setup(handler_va) + enable() + [halt()]
+    m, out = run_words(prog, data=data)
+    assert out == "halt"
+    fault_pc = E.RESET_PC + 6 * 8
+    assert m.regs[10] == E.CAUSES["PF_FETCH"]
+    assert m.regs[11] == fault_pc
+    assert m.regs[12] == fault_pc
