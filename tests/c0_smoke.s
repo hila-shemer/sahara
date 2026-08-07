@@ -18,7 +18,7 @@ start:
 
         # store/readback through the sentinel box
         li r27, 2
-        st.64 r3, [r24 + 0x18]
+        st.64 [r24 + 0x18], r3
         lds.64 r5, [r24 + 0x18]
         cmpeq p1, r5, r4
         (!p1) b fail
@@ -40,6 +40,6 @@ pass:
         li r0, 0x600D
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt

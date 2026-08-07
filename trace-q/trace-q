@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""trace-q — Sahara execution-trace query tool (TOOLING-SPEC 3.3).
+"""trace-q — Sahara execution-trace query tool.
 
-Usage:
-  trace-q exec CYCLE TRACE [--sym FILE]
-  trace-q at PC TRACE [--sym FILE]
-  trace-q last-write ADDR [--before CYCLE] TRACE [--sym FILE]
-  trace-q reg R --at CYCLE TRACE
-  trace-q find (--pc X | --wrote-reg R=V | --touched A)
-               [--from C] [--to C] [--last] TRACE [--sym FILE]
-  trace-q diverge A.trc B.trc [--ignore-meta] [--sym FILE]
-  trace-q range C1 C2 TRACE [--sym FILE]
-  trace-q trapdump TRACE [--sym FILE]
-  trace-q events TRACE -o EVENTS.trc
+TOOLING-SPEC 3.3 as elaborated by devspec/trace.md 6 (CLI, exit codes,
+output line grammar, symbolization, disassembly canonical form — the
+trace.md 8 vectors are the acceptance data).
 
-`events` is a harness extension beyond the TOOLING-SPEC 3.3 query set:
-it extracts the EVENT subsequence (plus the leading META) into a valid
-.trc for the emulators' --replay mode (TOOLING-SPEC 3.2; SPEC-ISSUES
-26). Prints the extracted EVENT count.
+  trace-q [--sym FILE] exec CYCLE TRACE
+  trace-q [--sym FILE] at PC TRACE
+  trace-q [--sym FILE] last-write ADDR [--before CYCLE] TRACE
+  trace-q            reg R --at CYCLE TRACE
+  trace-q [--sym FILE] find (--pc X | --wrote-reg R=V | --touched A)
+                           [--from C] [--to C] TRACE
+  trace-q            diverge A.trc B.trc
+  trace-q [--sym FILE] range C1 C2 TRACE
+  trace-q [--sym FILE] trapdump TRACE
 
-Every output is plain text, one fact per line, symbolized when a .sym
-file is given. Register/predicate values are reconstructed from EXEC
-writebacks; `reg` reports the value AFTER the given cycle retires.
-Numbers accept decimal or 0x hex. Errors are fatal and named.
+Exit codes (trace.md 6.2): 0 = at least one output line; 1 = valid
+query, zero matching facts (empty stdout); 2 = error (bad usage,
+unreadable file, malformed trace or .sym, META validation failure).
+stdout carries only facts; every diagnostic goes to stderr. Every
+stdout line is space-separated key=value tokens; only the final token
+(asm=, a=, b=) may contain spaces. Absent values print as `-`.
+Numbers accept decimal, 0x hex, 0b binary.
 """
 
 import os
@@ -35,9 +35,15 @@ import encoding as E          # noqa: E402
 import disasm as D            # noqa: E402
 import tracefile as T         # noqa: E402
 
+CAUSE_NAMES = {v: k for k, v in E.CAUSES.items()}
+# trace.md 2.3.4: causes whose baddr is architecturally 0 print baddr=-
+BADDRLESS = {E.CAUSES[c] for c in ("TIMER", "EXTINT", "ILLEGAL",
+                                   "SYSCALL", "PRIV")}
+
 
 def die(msg):
-    sys.exit(f"trace-q: error: {msg}")
+    print(f"trace-q: error: {msg}", file=sys.stderr)
+    sys.exit(2)
 
 
 def num(text, what):
@@ -61,55 +67,48 @@ def take_opt(args, name, has_value=True):
     return None
 
 
-def hx(v):
-    return f"0x{v:x}"
+def h128(v):
+    return f"0x{v:032x}"
+
+
+def sym_str(addr, symtab):
+    if symtab is None:
+        return "-"
+    return symtab.lookup(addr) or "-"
 
 
 def render_exec(rec, symtab):
     f = rec.fields
-    parts = [f"cycle={f['cycle']}", f"pc={hx(f['pc'])}"]
-    if symtab:
-        s = symtab.lookup(f["pc"])
-        if s:
-            parts.append(f"sym={s}")
-    parts.append(f"insn=0x{f['insn']:016x}")
     flags = f["flags"]
-    if flags & T.FLAG_SQUASHED:
-        parts.append("squashed=1")
-    if flags & T.FLAG_WROTE_DST:
-        parts.append(f"wb={hx(f['wb'])}")
-    if flags & T.FLAG_WROTE_PRED:
-        parts.append(f"pred_wb=0b{f['pred_wb']:08b}")
-    parts.append(f'asm="{D.disasm(f["insn"], pc=f["pc"], symtab=symtab)}"')
-    return " ".join(parts)
+    squashed = 1 if flags & T.FLAG_SQUASHED else 0
+    wb = h128(f["wb"]) if flags & T.FLAG_WROTE_DST else "-"
+    pred = f"0x{f['pred_wb']:02x}" if flags & T.FLAG_WROTE_PRED else "-"
+    return (f"cycle={f['cycle']} pc={h128(f['pc'])} "
+            f"sym={sym_str(f['pc'], symtab)} insn=0x{f['insn']:016x} "
+            f"squashed={squashed} wb={wb} pred={pred} "
+            f"asm={D.disasm(f['insn'])}")
 
 
 def render_mem(rec, symtab):
     f = rec.fields
-    parts = [f"cycle={f['cycle']}", f"type={rec.name}",
-             f"ea={hx(f['ea'])}"]
-    if symtab:
-        s = symtab.lookup(f["ea"])
-        if s:
-            parts.append(f"sym={s}")
-    parts.append(f"size={f['size']}")
-    parts.append(f"val={hx(f['val'])}")
-    return " ".join(parts)
+    return (f"type={rec.name} cycle={f['cycle']} ea={h128(f['ea'])} "
+            f"sym={sym_str(f['ea'], symtab)} size={f['size']} "
+            f"val={h128(f['val'])}")
 
 
 def render_trap(rec, symtab):
     f = rec.fields
-    cause = {v: k for k, v in E.CAUSES.items()}.get(f["cause"],
-                                                    str(f["cause"]))
-    parts = [f"cycle={f['cycle']}", f"cause={cause}",
-             f"epc={hx(f['epc'])}"]
-    if symtab:
-        s = symtab.lookup(f["epc"])
-        if s:
-            parts.append(f"epc_sym={s}")
-    parts.append(f"baddr={hx(f['baddr'])}")
-    parts.append(f"tl_after={f['tl_after']}")
-    return " ".join(parts)
+    cause = CAUSE_NAMES.get(f["cause"], str(f["cause"]))
+    baddr = "-" if f["cause"] in BADDRLESS else h128(f["baddr"])
+    return (f"cycle={f['cycle']} cause={cause} epc={h128(f['epc'])} "
+            f"sym={sym_str(f['epc'], symtab)} baddr={baddr} "
+            f"tl={f['tl_after']}")
+
+
+def render_event(rec):
+    f = rec.fields
+    return (f"type=EVENT cycle={f['cycle']} device={f['device']} "
+            f"payload_len={len(f['bytes'])} data={f['bytes'].hex()}")
 
 
 def render(rec, symtab):
@@ -120,12 +119,8 @@ def render(rec, symtab):
     if rec.type == T.T_TRAP:
         return render_trap(rec, symtab)
     if rec.type == T.T_EVENT:
-        f = rec.fields
-        return (f"cycle={f['cycle']} type=EVENT device={f['device']} "
-                f"len={len(f['bytes'])} bytes={f['bytes'].hex()}")
-    if rec.type == T.T_META:
-        return "type=META " + " ".join(rec.fields["text"].split("\n"))
-    return f"type={rec.type}"
+        return render_event(rec)
+    return f"type={rec.name}"
 
 
 def load(path, symtab_path):
@@ -142,56 +137,57 @@ def insn_field(insn, name):
     return (insn >> lsb) & ((1 << width) - 1)
 
 
+def finish(nlines):
+    sys.exit(0 if nlines else 1)
+
+
 # ---------------------------------------------------------------- commands
 
 
-def cmd_exec(args):
-    sym = take_opt(args, "--sym")
+def cmd_exec(args, sym):
     if len(args) != 2:
-        die("usage: exec CYCLE TRACE [--sym FILE]")
+        die("usage: [--sym FILE] exec CYCLE TRACE")
     cycle = num(args[0], "cycle")
     recs, symtab = load(args[1], sym)
     for r in recs:
         if r.type == T.T_EXEC and r.fields["cycle"] == cycle:
             print(render_exec(r, symtab))
-            return
-    print("none")
+            finish(1)
+    finish(0)
 
 
-def cmd_at(args):
-    sym = take_opt(args, "--sym")
+def cmd_at(args, sym):
     if len(args) != 2:
-        die("usage: at PC TRACE [--sym FILE]")
+        die("usage: [--sym FILE] at PC TRACE")
     pc = num(args[0], "pc")
     recs, symtab = load(args[1], sym)
-    found = False
+    n = 0
     for r in recs:
         if r.type == T.T_EXEC and r.fields["pc"] == pc:
-            print(r.fields["cycle"])
-            found = True
-    if not found:
-        print("none")
+            print(render_exec(r, symtab))
+            n += 1
+    finish(n)
 
 
-def cmd_last_write(args):
-    sym = take_opt(args, "--sym")
+def cmd_last_write(args, sym):
     before = take_opt(args, "--before")
     if len(args) != 2:
-        die("usage: last-write ADDR [--before CYCLE] TRACE [--sym FILE]")
+        die("usage: [--sym FILE] last-write ADDR [--before CYCLE] TRACE")
     addr = num(args[0], "addr")
+    before_c = num(before, "--before") if before is not None else None
     recs, symtab = load(args[1], sym)
     best = None
     for r in recs:
         if r.type in (T.T_MEMW, T.T_DEVW):
             f = r.fields
-            if before is not None and f["cycle"] >= num(before, "--before"):
+            if before_c is not None and f["cycle"] >= before_c:
                 continue
             if f["ea"] <= addr < f["ea"] + f["size"]:
                 best = r
     if best is None:
-        print("none")
-    else:
-        print(render_mem(best, symtab))
+        finish(0)
+    print(render_mem(best, symtab))
+    finish(1)
 
 
 def parse_regname(text):
@@ -206,172 +202,154 @@ def parse_regname(text):
     die(f"bad register name {text!r}")
 
 
-def reconstruct_reg(recs, kind, idx, at_cycle):
-    """Register/predicate value after cycle `at_cycle` retires.
-
-    Reset state per ISA-SPEC 11: GPRs 0, p0=1, p1-p7=0.
-    """
-    if kind == "r" and idx == 31:
-        return 0
-    if kind == "p" and idx == 0:
-        return 1
-    val = 0
-    for r in recs:
-        if r.type != T.T_EXEC or r.fields["cycle"] > at_cycle:
-            continue
-        f = r.fields
-        if kind == "r" and f["flags"] & T.FLAG_WROTE_DST \
-                and insn_field(f["insn"], "dst") == idx:
-            val = f["wb"]
-        if kind == "p" and f["flags"] & T.FLAG_WROTE_PRED:
-            val = (f["pred_wb"] >> idx) & 1
-    return val
-
-
-def cmd_reg(args):
-    take_opt(args, "--sym")  # accepted, unused
+def cmd_reg(args, sym):
+    if sym is not None:
+        die("reg does not accept --sym")
     at = take_opt(args, "--at")
     if at is None or len(args) != 2:
         die("usage: reg R --at CYCLE TRACE")
     kind, idx = parse_regname(args[0])
+    at_cycle = num(at, "--at")
     recs, _ = load(args[1], None)
-    v = reconstruct_reg(recs, kind, idx, num(at, "--at"))
-    print(f"{kind}{idx}={hx(v)}" if kind == "r" else f"p{idx}={v}")
+    cycles = [r.fields["cycle"] for r in recs if "cycle" in r.fields]
+    if not cycles or at_cycle > max(cycles):
+        finish(0)  # trace.md 6.5.4: beyond the last record's cycle
+    # reset state (ISA-SPEC 11): GPRs 0; predicate file p0=1, p1-p7=0
+    if kind == "r" and idx == 31:
+        val = 0
+    elif kind == "p" and idx == 0:
+        val = 1
+    else:
+        val = 0 if kind == "r" else (1 if idx == 0 else 0)
+        for r in recs:
+            if r.type != T.T_EXEC or r.fields["cycle"] > at_cycle:
+                continue
+            f = r.fields
+            if kind == "r" and f["flags"] & T.FLAG_WROTE_DST \
+                    and insn_field(f["insn"], "dst") == idx:
+                val = f["wb"]
+            if kind == "p" and f["flags"] & T.FLAG_WROTE_PRED:
+                val = (f["pred_wb"] >> idx) & 1
+    vtxt = h128(val) if kind == "r" else str(val)
+    print(f"reg={kind}{idx} cycle={at_cycle} val={vtxt}")
+    finish(1)
 
 
-def cmd_find(args):
-    sym = take_opt(args, "--sym")
+def cmd_find(args, sym):
     pc = take_opt(args, "--pc")
     wrote = take_opt(args, "--wrote-reg")
     touched = take_opt(args, "--touched")
     frm = take_opt(args, "--from")
     to = take_opt(args, "--to")
-    last = take_opt(args, "--last", has_value=False)
     if sum(x is not None for x in (pc, wrote, touched)) != 1:
         die("find needs exactly one of --pc, --wrote-reg, --touched")
     if len(args) != 1:
-        die("usage: find (--pc X | --wrote-reg R=V | --touched A) "
-            "[--from C] [--to C] [--last] TRACE [--sym FILE]")
-    recs, symtab = load(args[0], sym)
-    frm_c = num(frm, "--from") if frm is not None else None
+        die("usage: [--sym FILE] find (--pc X | --wrote-reg R=V | "
+            "--touched A) [--from C] [--to C] TRACE")
+    frm_c = num(frm, "--from") if frm is not None else 0
     to_c = num(to, "--to") if to is not None else None
-
+    if pc is not None:
+        pc_v = num(pc, "--pc")
+    if touched is not None:
+        touched_v = num(touched, "--touched")
     if wrote is not None:
         if "=" not in wrote:
             die("--wrote-reg wants R=V")
         rname, vtext = wrote.split("=", 1)
         kind, idx = parse_regname(rname)
+        if kind != "r":
+            die("--wrote-reg takes a GPR")
         want = num(vtext, "--wrote-reg value")
+    recs, symtab = load(args[0], sym)
 
     def matches(r):
         f = r.fields
         c = f.get("cycle")
-        if c is None:
-            return False
-        if frm_c is not None and c < frm_c:
-            return False
-        if to_c is not None and c > to_c:
+        if c is None or c < frm_c or (to_c is not None and c > to_c):
             return False
         if pc is not None:
-            return r.type == T.T_EXEC and f["pc"] == num(pc, "--pc")
+            return r.type == T.T_EXEC and f["pc"] == pc_v
         if touched is not None:
-            a = num(touched, "--touched")
             return r.type in (T.T_MEMW, T.T_MEMR, T.T_DEVW) \
-                and f["ea"] <= a < f["ea"] + f["size"]
-        # wrote-reg
-        if r.type != T.T_EXEC:
-            return False
-        if kind == "r":
-            return bool(f["flags"] & T.FLAG_WROTE_DST) \
-                and insn_field(f["insn"], "dst") == idx and f["wb"] == want
-        return bool(f["flags"] & T.FLAG_WROTE_PRED) \
-            and ((f["pred_wb"] >> idx) & 1) == want
+                and f["ea"] <= touched_v < f["ea"] + f["size"]
+        return (r.type == T.T_EXEC
+                and bool(f["flags"] & T.FLAG_WROTE_DST)
+                and insn_field(f["insn"], "dst") == idx
+                and f["wb"] == want)
 
-    hit = None
     for r in recs:
         if matches(r):
-            hit = r
-            if not last:
-                break
-    if hit is None:
-        print("none")
-    else:
-        print(render(hit, symtab))
+            print(render(r, symtab))
+            finish(1)
+    finish(0)
 
 
-def cmd_diverge(args):
-    sym = take_opt(args, "--sym")
-    ignore_meta = take_opt(args, "--ignore-meta", has_value=False)
+def cmd_diverge(args, sym):
+    if sym is not None:
+        die("diverge does not accept --sym")
     if len(args) != 2:
-        die("usage: diverge A.trc B.trc [--ignore-meta] [--sym FILE]")
-    ra, symtab = load(args[0], sym)
-    rb, _ = load(args[1], sym)
-    if ignore_meta:
-        ra = [r for r in ra if r.type != T.T_META]
-        rb = [r for r in rb if r.type != T.T_META]
+        die("usage: diverge A.trc B.trc")
+    ra, _ = load(args[0], None)
+    rb, _ = load(args[1], None)
+
+    # record 0: META, compared key-by-key with run-variant keys excluded
+    ma, mb = ra[0].fields["meta"], rb[0].fields["meta"]
+    for key in T.META_KEYS:
+        if key in T.META_RUN_VARIANT:
+            continue
+        if ma.get(key) != mb.get(key):
+            print(f"record=0 key={key}")
+            print(f"a={ma.get(key, '-')}")
+            print(f"b={mb.get(key, '-')}")
+            finish(1)
+
     n = min(len(ra), len(rb))
-    for i in range(n):
-        if ra[i] != rb[i]:
-            print(f"diverge record={i}")
-            print(f"a: {render(ra[i], symtab)}")
-            print(f"b: {render(rb[i], symtab)}")
-            sys.exit(1)
+    for i in range(1, n):
+        x, y = ra[i], rb[i]
+        if (x.type, x.payload) != (y.type, y.payload):
+            print(f"record={i} offset_a={x.offset} offset_b={y.offset}")
+            print(f"a={render(x, None)}")
+            print(f"b={render(y, None)}")
+            finish(1)
     if len(ra) != len(rb):
-        longer, tag = (ra, "a") if len(ra) > len(rb) else (rb, "b")
-        print(f"diverge record={n} (length: a={len(ra)} b={len(rb)})")
-        print(f"{tag}: {render(longer[n], symtab)}")
-        print(f"{'b' if tag == 'a' else 'a'}: <end of trace>")
-        sys.exit(1)
-    print(f"identical ({n} records)")
+        if len(ra) > len(rb):
+            x = ra[n]
+            print(f"record={n} offset_a={x.offset} offset_b=-")
+            print(f"a={render(x, None)}")
+            print("b=eof")
+        else:
+            y = rb[n]
+            print(f"record={n} offset_a=- offset_b={y.offset}")
+            print("a=eof")
+            print(f"b={render(y, None)}")
+        finish(1)
+    finish(0)  # identical: no output, exit 1
 
 
-def cmd_range(args):
-    sym = take_opt(args, "--sym")
+def cmd_range(args, sym):
     if len(args) != 3:
-        die("usage: range C1 C2 TRACE [--sym FILE]")
+        die("usage: [--sym FILE] range C1 C2 TRACE")
     c1, c2 = num(args[0], "C1"), num(args[1], "C2")
     recs, symtab = load(args[2], sym)
-    found = False
+    n = 0
     for r in recs:
-        if r.type == T.T_EXEC and c1 <= r.fields["cycle"] <= c2:
-            print(render_exec(r, symtab))
-            found = True
-    if not found:
-        print("none")
+        if r.type in (T.T_EXEC, T.T_TRAP) \
+                and c1 <= r.fields["cycle"] <= c2:
+            print(render(r, symtab))
+            n += 1
+    finish(n)
 
 
-def cmd_trapdump(args):
-    sym = take_opt(args, "--sym")
+def cmd_trapdump(args, sym):
     if len(args) != 1:
-        die("usage: trapdump TRACE [--sym FILE]")
+        die("usage: [--sym FILE] trapdump TRACE")
     recs, symtab = load(args[0], sym)
-    found = False
+    n = 0
     for r in recs:
         if r.type == T.T_TRAP:
             print(render_trap(r, symtab))
-            found = True
-    if not found:
-        print("none")
-
-
-def cmd_events(args):
-    out = take_opt(args, "-o")
-    if out is None or len(args) != 1:
-        die("usage: events TRACE -o EVENTS.trc")
-    recs, _ = load(args[0], None)
-    n = 0
-    try:
-        with open(out, "wb") as fh:
-            # keep the original META so the replay input is a valid
-            # .trc (first record is META) and self-describing
-            T.write_record(fh, T.T_META, recs[0].payload)
-            for r in recs[1:]:
-                if r.type == T.T_EVENT:
-                    T.write_record(fh, r.type, r.payload)
-                    n += 1
-    except OSError as e:
-        die(f"cannot write {out}: {e}")
-    print(f"{n} events")
+            n += 1
+    finish(n)
 
 
 COMMANDS = {
@@ -383,17 +361,20 @@ COMMANDS = {
     "diverge": cmd_diverge,
     "range": cmd_range,
     "trapdump": cmd_trapdump,
-    "events": cmd_events,
 }
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    args = list(sys.argv[1:])
+    if not args or args[0] in ("-h", "--help"):
         sys.exit(__doc__.strip())
-    cmd = sys.argv[1]
+    sym = take_opt(args, "--sym")  # accepted before or after the command
+    if not args:
+        die("no query given")
+    cmd = args[0]
     if cmd not in COMMANDS:
         die(f"unknown query {cmd!r} (have: {', '.join(COMMANDS)})")
-    COMMANDS[cmd](list(sys.argv[2:]))
+    COMMANDS[cmd](args[1:], sym)
 
 
 if __name__ == "__main__":

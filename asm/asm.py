@@ -820,9 +820,9 @@ class Assembler:
                                    src2=src2, mod=mod, width=wc,
                                    imm=self.imm_signed(disp, pos,
                                                        "displacement"))]
-            else:                        # stores: rs3, [ea]
-                src3 = self.need_reg(stmt.operands[0], pos, "store value")
-                base, src2, mod, disp = self.parse_mem(stmt.operands[1], pos)
+            else:                        # stores: [ea], rs3 (asm.md 5.5)
+                src3 = self.need_reg(stmt.operands[1], pos, "store value")
+                base, src2, mod, disp = self.parse_mem(stmt.operands[0], pos)
                 return [self.build(opval, pred, src3=src3, src1=base,
                                    src2=src2, mod=mod, width=wc,
                                    imm=self.imm_signed(disp, pos,

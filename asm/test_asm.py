@@ -166,10 +166,10 @@ expect_fields("lds.64 r1, [r2 - 16]",
               width=widx("MEM", 64))
 expect_fields("ld128 r1, [r2 - 16]",
               opcode=opc("LD128"), dst=1, src1=2, src2=31, imm=simm(-16))
-expect_fields("st.16 r5, [r6 + 4]",
+expect_fields("st.16 [r6 + 4], r5",
               opcode=opc("ST"), src3=5, src1=6, src2=31, imm=4,
               width=widx("MEM", 16))
-expect_fields("st128 r5, [r6 + r7]",
+expect_fields("st128 [r6 + r7], r5",
               opcode=opc("ST128"), src3=5, src1=6, src2=7)
 # atomics
 expect_fields("cas.64 r1, [r2 + 8], r3, r4",

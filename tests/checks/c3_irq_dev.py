@@ -4,13 +4,13 @@
 The atomicity contract (ISA-SPEC 5.4: no other access ordered between
 an atomic's read and its write) is invisible to the .s test itself — a
 delivery inside an AMO would still add up. It IS visible in the trace:
-an AMO's MEMR and MEMW carry the instruction's cycle, and a delivery
-between them would interpose records with a different cycle
-(SPEC-ISSUES 25). Asserted here:
+devspec/trace.md 3.3/T-08 pins that an atomic's MEMR is IMMEDIATELY
+followed by its MEMW (no record of any kind between them, same cycle;
+SPEC-ISSUES 24 as resolved by trace.md). Asserted here:
 
-1. Exactly 32 MEMR@ATOMIC_BOX are AMO reads: each followed by the
-   matching MEMW@ATOMIC_BOX before any record with a different cycle
-   appears. Exactly 1 more is the test's plain readback (unpaired).
+1. Exactly 32 MEMR@ATOMIC_BOX are AMO reads: each with the matching
+   MEMW@ATOMIC_BOX as the immediately-next record, same cycle.
+   Exactly 1 more is the test's plain readback (unpaired).
 2. Exactly 8 TIMER TRAP records (one per armed iteration).
 3. Non-vacuity: at least 2 of those deliveries land strictly inside
    the AMO cycle span — the sweep really put deliveries near bursts.
@@ -59,15 +59,12 @@ def main():
                  f"touch the device")
         if r.type == T.T_MEMR and r.fields["ea"] == ATOMIC_BOX:
             c = r.fields["cycle"]
-            j = i + 1
-            found = False
-            while j < len(recs) and recs[j].fields.get("cycle") == c:
-                if (recs[j].type == T.T_MEMW
-                        and recs[j].fields["ea"] == ATOMIC_BOX):
-                    found = True
-                    break
-                j += 1
-            if found:
+            # trace.md T-08: the atomic's MEMW is the immediately-next
+            # record, same cycle — anything between is a split AMO.
+            nxt = recs[i + 1] if i + 1 < len(recs) else None
+            if (nxt is not None and nxt.type == T.T_MEMW
+                    and nxt.fields["ea"] == ATOMIC_BOX
+                    and nxt.fields["cycle"] == c):
                 paired += 1
                 amo_cycles.append(c)
             else:

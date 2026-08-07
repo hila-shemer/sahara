@@ -104,20 +104,17 @@ run_one() {
     # Reference-implementation replay check (CONFORMANCE.md: "bit-exact
     # replay of every test's trace"), REPLAY=1-gated so emulators that
     # have not built --replay yet still get the rest of the harness.
-    # The EVENT subsequence of run a is extracted and fed back; the
-    # replay must reproduce stdout and every non-META record
-    # (SPEC-ISSUES 26). checkfail runs are not replayed: what --replay
-    # does after an assertion is nobody's contract.
+    # Per devspec/trace.md 5.1 the --replay input is the recorded
+    # trace itself (the replayer consumes its EVENT records and
+    # validates META); the replay must reproduce stdout and, per
+    # trace.md 5.2/5.3, every post-META record byte-identically —
+    # which `diverge` checks (its META comparison already excludes the
+    # run-variant mode/image keys). checkfail runs are not replayed:
+    # what --replay does after an assertion is nobody's contract.
     if [ "${REPLAY:-0}" = "1" ] && [ "$expect" != "checkfail" ]; then
-        local ev="$OUT/$name.events.trc" rtrc="$OUT/$name.r.trc"
-        if ! python3 "$TRACEQ" events "$OUT/$name.a.trc" -o "$ev" \
-                > /dev/null 2>"$OUT/$name.ev.err"; then
-            echo "FAIL $name: event extraction failed:"
-            sed 's/^/    /' "$OUT/$name.ev.err"
-            return 1
-        fi
+        local rtrc="$OUT/$name.r.trc"
         out=$(HARNESS_EXPECT_R0="$expect" \
-              "$EMU" "$img" --replay "$ev" --trace "$rtrc" \
+              "$EMU" "$img" --replay "$OUT/$name.a.trc" --trace "$rtrc" \
               --trace-level "$level" --maxcycles "$MAXCYCLES" \
               --check-invtp "${flags[@]}" 2>"$OUT/$name.r.err")
         rc=$?
@@ -127,10 +124,18 @@ run_one() {
                 "$OUT/$name.r.err"
             return 1
         fi
-        if ! dv=$(python3 "$TRACEQ" diverge --ignore-meta \
-                  "$OUT/$name.a.trc" "$rtrc"); then
+        # trace-q diverge exit codes (trace.md 6.2): 1 = identical,
+        # 0 = divergence found, 2 = malformed/unreadable trace.
+        dv=$(python3 "$TRACEQ" diverge "$OUT/$name.a.trc" "$rtrc" \
+             2>"$OUT/$name.dv.err")
+        dv_rc=$?
+        if [ $dv_rc -eq 0 ]; then
             echo "FAIL $name: REPLAY DIVERGENCE from the recorded run:"
             echo "$dv" | sed 's/^/    /'
+            return 1
+        elif [ $dv_rc -ne 1 ]; then
+            echo "FAIL $name: trace-q diverge errored on the replay pair:"
+            sed 's/^/    /' "$OUT/$name.dv.err"
             return 1
         fi
     fi

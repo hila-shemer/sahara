@@ -8,11 +8,12 @@
 # delivery at TL=2 = triple fault: machine halts, no state written
 # (ISA-SPEC 7.2 step 1).
 #
-# checks/c1_triplefault.sh asserts from the trace that exactly two TRAP
-# records exist (tl_after 1 and 2) — the triple fault itself delivers
-# nothing (SPEC-ISSUES 17). "No sreg was modified" is not directly
-# observable post-halt (sregs are not trace records); the two-TRAP
-# shape and the exact marker in r0 are the observable consequences.
+# checks/c1_triplefault.sh asserts from the trace that exactly three
+# TRAP records exist: tl_after 1 and 2 for the two real deliveries,
+# then the diagnostic triple-fault record of devspec/trace.md 2.3.4
+# (tl_after=3, the cause/epc/baddr the third trap WOULD have delivered,
+# no sreg writes — SPEC-ISSUES 17 as revised by 27). The exact marker
+# in r0 is the other observable consequence.
 
         .equ TRIPLE_MARKER, 0x3F3F   # harness expects HALT r0=...3f3f
 

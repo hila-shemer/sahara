@@ -21,6 +21,7 @@ every test) so tests whose MANIFEST line carries expect= pass under the
 stub. Real emulators never read it.
 """
 
+import hashlib
 import os
 import struct
 import sys
@@ -85,8 +86,15 @@ def main():
         if replaying and os.environ.get("FAKE_REPLAY_WB"):
             wb = int(os.environ["FAKE_REPLAY_WB"])
         with open(trace_path, "wb") as f:
-            T.write_record(f, T.T_META, T.meta_payload(
-                f"image={image_path}\nlevel={level}\nstub=1\n"))
+            # Full 7-key v1 META (trace.md 2.3.7): the reconciled
+            # tracefile reader rejects anything less, and the replay
+            # diverge check exercises the run-variant `mode` exclusion.
+            T.write_record(f, T.T_META, T.meta_payload(T.meta_text(
+                level,
+                mode="replay" if replaying else "live",
+                image=image_path,
+                image_sha256=hashlib.sha256(img).hexdigest(),
+                encoding_version=E.SPEC_VERSION)))
             T.write_record(f, T.T_EXEC, T.exec_payload(
                 0, entry, word, wb,
                 T.FLAG_WROTE_DST if wb else 0))
@@ -115,12 +123,15 @@ def main():
                 T.write_record(f, T.T_MEMR,
                                T.mem_payload(cyc, 0x740, 8, 32))
             else:
-                # default: the UNALIGNED->ILLEGAL delivery pair that
-                # checks/c1_triplefault.sh greps for.
+                # default: the UNALIGNED->ILLEGAL->diagnostic shape
+                # that checks/c1_triplefault.sh greps for (the tl=3
+                # record is trace.md 2.3.4's triple-fault diagnostic).
                 T.write_record(f, T.T_TRAP, T.trap_payload(
                     1, E.CAUSES["UNALIGNED"], entry, 0x719, 1))
                 T.write_record(f, T.T_TRAP, T.trap_payload(
                     2, E.CAUSES["ILLEGAL"], entry, 0, 2))
+                T.write_record(f, T.T_TRAP, T.trap_payload(
+                    3, E.CAUSES["ILLEGAL"], entry, 0, 3))
 
     expect = os.environ.get("HARNESS_EXPECT_R0", "")
     if expect == "checkfail" and not os.environ.get("FAKE_R0"):

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Harness self-test — no emulator required. Validates:
+#   0. component unit tests (assembler, trace-q, trace.md 8 vectors)
 #   1. every MANIFEST source assembles (with tests/defs.s prepended)
 #   2. committed generated files match their generators byte-for-byte
 #   3. run-tests.sh passes against the stub, and FAILS when the stub
@@ -16,6 +17,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TESTS="$ROOT/tests"
 TMP=$(mktemp -d) || die mktemp
 trap 'rm -rf "$TMP"' EXIT
+
+echo "== 0. component unit tests =="
+for t in asm/test_asm.py trace-q/test_traceq.py trace-q/test_vectors.py; do
+    python3 "$ROOT/$t" > "$TMP/unit.out" 2>&1 \
+        || { cat "$TMP/unit.out"; die "$t failed"; }
+    echo "ok: $t"
+done
 
 echo "== 1. assembly of every manifest source =="
 while read -r name src rest; do
@@ -98,7 +106,8 @@ EMU="$TMP/fake-r0" "$TESTS/run-tests.sh" c2_noinvtp_remap \
     && { cat "$TMP/rt5.out"; die "run-tests must reject HALT where CHECKFAIL expected"; }
 echo "ok: expect=checkfail rejects a HALTing run"
 
-# REPLAY=1: extract-events + --replay re-run + diverge. The stub has
+# REPLAY=1: --replay re-run (fed the recorded trace, trace.md 5.1) +
+# diverge. The stub has
 # no EVENT records (0-event replay is still a meaningful determinism
 # re-run) and reproduces its trace, so this must pass...
 REPLAY=1 EMU="$FAKE" "$TESTS/run-tests.sh" c0_smoke > "$TMP/rt6.out" 2>&1 \

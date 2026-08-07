@@ -211,8 +211,8 @@ jt5:
         li r21, 7
         cmpeq p2, r21, 8          # p2 = 0 for this whole section
         li r19, 55
-        (p2) st.64 r21, [r25]     # squashed store: no access
-        (p2) st128 r21, [r25]
+        (p2) st.64 [r25], r21     # squashed store: no access
+        (p2) st128 [r25], r21
         (p2) lds.64 r19, [r25]    # squashed load: r19 unchanged
         (p2) ld128 r19, [r25]
         cmpeq p1, r19, 55
@@ -265,18 +265,18 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
         # -- trap handler: record bank-0 fields, skip the instruction --
 handler:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         add k0, k0, 8
         mtsr epc0, k0
         iret

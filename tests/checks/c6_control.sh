@@ -6,10 +6,13 @@
 set -u
 trc="$1"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-out=$(python3 "$ROOT/trace-q/trace-q" find --touched 0x710 "$trc") || {
-    echo "checks/c6_control: trace-q failed" >&2; exit 1; }
-if [ "$out" != "none" ]; then
-    echo "checks/c6_control: squashed access reached memory: $out" >&2
-    exit 1
-fi
-exit 0
+# trace-q exit codes (devspec/trace.md 6.2): 1 = zero matching facts
+# (what we want here), 0 = a record touched the box, 2 = harness error.
+out=$(python3 "$ROOT/trace-q/trace-q" find --touched 0x710 "$trc")
+rc=$?
+case $rc in
+    1) exit 0;;
+    0) echo "checks/c6_control: squashed access reached memory: $out" >&2
+       exit 1;;
+    *) echo "checks/c6_control: trace-q failed (rc=$rc)" >&2; exit 1;;
+esac

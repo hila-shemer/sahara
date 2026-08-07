@@ -84,7 +84,7 @@ a2_site:
 
         # -- A3: UNALIGNED store (4-byte at +2) ------------------------
         li r27, 8
-        st.32 r19, [r24 + SENTINEL_BOX + 2 - FAIL_ADDR]    # ea 0x71a
+        st.32 [r24 + SENTINEL_BOX + 2 - FAIL_ADDR], r19    # ea 0x71a
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r22, CAUSE_UNALIGNED
         (!p1) b fail
@@ -194,7 +194,7 @@ b3_site:
         li r21, h_rec
         mtsr vbase, r21
         li r19, 12345
-        st.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]  # sentinel
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], r19  # sentinel
         li r21, 1
         mtsr timecmp, r21         # cycle >= 1 already: pending, masked
         nop
@@ -266,13 +266,13 @@ t4_next:
         li r21, h_rec
         mtsr vbase, r21
         li r19, 12345
-        st.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]  # sentinel again
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], r19  # sentinel again
         li r21, 7
         cmpeq p2, r21, 8          # p2 = 0 for the squash block
         mfsr r19, cycle
         .quad RAW_ILLEGAL_P2      # (p2) ILLEGAL      — squashed
         (p2) lds.64 r22, [r24 + SENTINEL_BOX + 1 - FAIL_ADDR]  # unaligned
-        (p2) st.64 r22, [r24 + SENTINEL_BOX + 1 - FAIL_ADDR]   # unaligned
+        (p2) st.64 [r24 + SENTINEL_BOX + 1 - FAIL_ADDR], r22   # unaligned
         (p2) syscall              #                   — squashed
         (p2) mtsr cycle, r21      # would be PRIV     — squashed
         mfsr r20, cycle
@@ -292,7 +292,7 @@ t4_next:
         li r21, h_user
         mtsr vbase, r21
         li r19, 0
-        st.64 r19, [r24 + PRIV_COUNT_SLOT - FAIL_ADDR]
+        st.64 [r24 + PRIV_COUNT_SLOT - FAIL_ADDR], r19
         li r21, user_entry
         mtsr epc0, r21
         li r21, STATUS_S          # PS=0, PIE=0, TL=0
@@ -345,7 +345,7 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
@@ -354,13 +354,13 @@ fail:
         # record bank-0 fields + status, skip the faulting instruction
 h_rec:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + TRAP_STATUS_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_STATUS_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0
@@ -369,9 +369,9 @@ h_rec:
         # timer handler: record cause/epc, disarm, return
 h_timer:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mtsr timecmp, zero        # disarm: timecmp = 0 never pends
         iret                      # epc unchanged: resume where deferred
 
@@ -435,13 +435,13 @@ h_df2:
         # TL<-0, deliberately fault (handled by h_rec), restore, IRET.
 h_tl:
         mfsr k0, epc0
-        st.64 k0, [r24 + TLSAVE_EPC - FAIL_ADDR]
+        st.64 [r24 + TLSAVE_EPC - FAIL_ADDR], k0
         mfsr k0, cause0
-        st.64 k0, [r24 + TLSAVE_CAUSE - FAIL_ADDR]
+        st.64 [r24 + TLSAVE_CAUSE - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TLSAVE_BADDR - FAIL_ADDR]
+        st.64 [r24 + TLSAVE_BADDR - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + TLSAVE_STATUS - FAIL_ADDR]
+        st.64 [r24 + TLSAVE_STATUS - FAIL_ADDR], k0
         li k0, h_rec
         mtsr vbase, k0
         li k0, STATUS_S           # TL<-0 by software consent
@@ -471,16 +471,16 @@ h_user:
         li r26, PRIV_COUNT_SLOT
         lds.64 k0, [r26]
         add k0, k0, 1
-        st.64 k0, [r26]
+        st.64 [r26], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0
         iret
 h_user_sys:
         mfsr k0, epc0
-        st.64 k0, [r24 + USER_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + USER_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + USER_STATUS_SLOT - FAIL_ADDR]
+        st.64 [r24 + USER_STATUS_SLOT - FAIL_ADDR], k0
         li k0, STATUS_S           # supervisor, TL=0, IE=0
         mtsr status, k0
         b u_cont
