@@ -739,13 +739,13 @@ def test_trace_golden():
         check("replay-sha-mismatch-refused",
               p.returncode not in (0, 2, 3) and b"mismatch" in p.stderr,
               f"rc={p.returncode} err={p.stderr!r}")
-        # Triple fault trace: exactly two TRAP records, none with
-        # tl_after = 3 -- root SPEC-ISSUES 17's pinned reading, which
-        # checks/c1_triplefault.sh also asserts. devspec/trace.md 2.3.4
-        # requires a third diagnostic TRAP (tl_after = 3) instead; the
-        # conflict is emu-c/SPEC-ISSUES 33, and this check flips with
-        # it. vbase = dfbase = 0 turns one SYSCALL into the ILLEGAL
-        # cascade.
+        # Triple fault trace: exactly three TRAP records, the third the
+        # diagnostic tl_after = 3 record of devspec/trace.md 2.3.4 --
+        # the toolchain's devspec reconciliation overturned root
+        # SPEC-ISSUES 17's two-record reading, and the suite's
+        # checks/c1_triplefault.sh now asserts three (emu-c/SPEC-ISSUES
+        # 33, resolved). vbase = dfbase = 0 turns one SYSCALL into the
+        # ILLEGAL cascade.
         (dp / "tf.img").write_bytes(
             image({0x1000: [enc("LDI", dst=0, imm=77), enc("SYSCALL")]}))
         p = subprocess.run(
@@ -758,9 +758,9 @@ def test_trace_golden():
             if t[off] == 4:  # TRAP
                 traps.append(t[off + 8:off + 8 + plen])
             off += 8 + plen
-        check("triplefault-two-traps-no-diagnostic",
-              p.returncode == 0 and off == len(t) and len(traps) == 2
-              and [tp[48] for tp in traps] == [1, 2],
+        check("triplefault-diagnostic-trap",
+              p.returncode == 0 and off == len(t) and len(traps) == 3
+              and [tp[48] for tp in traps] == [1, 2, 3],
               f"rc={p.returncode} tl_afters={[tp[48] for tp in traps]}")
 
 

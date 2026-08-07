@@ -316,3 +316,15 @@ they need a spec ruling more urgently than the rest.
     a c1_triplefault update (toolchain's trace.md reconciliation) or a
     trace.md amendment; flagged for Hila. **[divergence risk]** — the
     Python implementation may follow trace.md here.
+    *RESOLVED (iteration 8): the toolchain's devspec reconciliation
+    (root SPEC-ISSUES 27, revising 17) flipped checks/c1_triplefault.sh
+    to assert exactly three TRAP records with the tl_after=3
+    diagnostic. deliver() now emits it (the documented one-line flip;
+    no cycle consumed, no sreg writes) and the harness check became
+    triplefault-diagnostic-trap. Divergence risk retired — trace.md
+    2.3.4 and the suite now agree. The 2.3.1/2.3.4 offset-column
+    arithmetic slips found independently this iteration (EXEC wb/flags/
+    pred_wb at 40/56/57, TRAP epc/baddr at 24/40 — inconsistent with
+    the fixed lengths 50/49 and TV-2's packed layout) are root
+    SPEC-ISSUES 28; the packed layout is what this emulator writes and
+    what --replay's strict reader checks against.*
