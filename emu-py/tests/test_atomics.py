@@ -109,6 +109,24 @@ def test_atomic_out_of_map_deverr():
     assert m.regs[10] == E.CAUSES["DEVERR"]
 
 
+def test_atomic_to_device_window_deverr_no_side_effect():
+    """An atomic aimed at a MAPPED device window traps DEVERR before
+    touching the device: the read-modify-write must not decompose into
+    a device load + store (QueueDevice's load drains its queue, so a
+    decomposed implementation would leave it empty). baddr = the ea."""
+    from helpers import QueueDevice
+    devbase = 0x100000
+    dev = QueueDevice(devbase)
+    prog = (vbase_setup() + [ldi(1, devbase),
+                             amo("AMOADD", 0, 1, 2, w=64), halt()])
+    m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))],
+                     devices=[dev], events=[(0, 0, b"q")])
+    assert m.regs[10] == E.CAUSES["DEVERR"]
+    assert m.regs[11] == devbase
+    assert dev.queue == [b"q"]           # never drained
+    assert dev.stores == []              # never written
+
+
 def test_all_amos():
     ops = {
         "AMOAND": 0b1100 & 0b1010,
