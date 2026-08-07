@@ -18,3 +18,4 @@ c3_irq_dev c3_irq_dev.s level=2
 c4_fp c4_fp.s
 c5_base c5_base.s
 c6_control c6_control.s level=2
+c7_mem c7_mem.s

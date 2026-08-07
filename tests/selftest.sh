@@ -29,7 +29,7 @@ echo "== 2. generated files match generators =="
 for pair in "gen_c5.py c5_base.s" "gen_c3.py c3_atomics.s" \
             "gen_c2.py c2_mmu.s" "gen_c2.py c2_noinvtp_remap.s" \
             "gen_c2.py c2_noinvtp_ptbase.s" "gen_c4.py c4_fp.s" \
-            "gen_defs.py defs.s"; do
+            "gen_c7.py c7_mem.s" "gen_defs.py defs.s"; do
     set -- $pair
     cp "$TESTS/$2" "$TMP/$2.committed"
     python3 "$TESTS/$1" >/dev/null || die "$1 failed"
