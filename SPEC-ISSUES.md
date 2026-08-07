@@ -14,11 +14,13 @@ Both emulator implementations must match the readings marked
    match)**
 
 2. **TOOLING-SPEC 3.2, META** — "key/value text" has no defined syntax.
-   Chosen: UTF-8 text, one `key=value` per newline-terminated line; keys
-   `image`, `level` at minimum. Two conforming emulators may still
-   legitimately differ (image path, implementation tag), so
-   `trace-q diverge` grew `--ignore-meta`, which difftest.sh uses. The
-   determinism double-run (same emulator twice) compares META too.
+   Originally chosen: `key=value` lines with `image`, `level` at
+   minimum, plus a `diverge --ignore-meta` flag. *Superseded by
+   devspec/trace.md 2.3.7 (entry 27): the closed 7-key v1 catalog is
+   now enforced by the tracefile reader, and `diverge` always excludes
+   exactly the run-variant keys `mode`/`image` (trace.md 6.5.6), so
+   `--ignore-meta` was removed. The determinism double-run (same
+   emulator twice) still compares whole files with `cmp`.*
 
 3. **emu-common-prompt CLI contract, `HALT r0=<32 hex digits>`** — digit
    case is unspecified. The harness requires **lowercase**. Recommend
@@ -61,9 +63,11 @@ Both emulator implementations must match the readings marked
    the address column.
 
 9. **TOOLING-SPEC 3.3, `find`** — the table says "first matching cycle"
-   while the reverse-continue note says "taking the last match". trace-q
-   prints the first match by default and adds `--last` so
-   reverse-continue is a single invocation.
+   while the reverse-continue note says "taking the last match".
+   Originally trace-q added a `--last` flag. *Superseded by
+   devspec/trace.md 6.1/6.5.5 (entry 27), which pins the closed CLI
+   without it: `find` prints the first match; reverse-continue is the
+   caller narrowing `--to`. `--last` was removed.*
 
 10. **TOOLING-SPEC 4.3, `lap` operand** — the primitive's assembly
     operand is unspecified. Chosen: a target *address* expression
@@ -121,10 +125,14 @@ Both emulator implementations must match the readings marked
     is "emitted for every retired instruction", and a faulting
     instruction does not retire (ISA-SPEC 4: no architectural effect).
     Chosen: a faulting instruction emits **no EXEC record**; the TRAP
-    record (whose epc points at it) is its only footprint. Consequence
-    for the triple fault: delivery at TL=2 delivers nothing, so **no
-    third TRAP record is written** — checks/c1_triplefault.sh asserts
-    exactly two. **(emulators must match)**
+    record (whose epc points at it) is its only footprint —
+    *confirmed by devspec/trace.md 3.3/T-06.* The original consequence
+    drawn here for the triple fault (no third record) is **overturned**
+    by trace.md 2.3.4: the triple fault emits a final DIAGNOSTIC TRAP
+    record carrying the cause/epc/baddr the third trap would have
+    delivered, `tl_after = 3`, corresponding to no sreg writes, and
+    the trace ends. checks/c1_triplefault.sh now asserts exactly three
+    TRAP records (tl 1, 2, 3). **(emulators must match)**
 
 18. **ISA-SPEC 10.4, FCVT `mod` bits 7:2 "must be zero"** — no
     consequence is stated for a violation. Chosen: traps ILLEGAL, like
@@ -190,36 +198,74 @@ Both emulator implementations must match the readings marked
 
 24. **TOOLING-SPEC 3.2, record order within one instruction** — the
     format fixes per-record fields but not the order of one
-    instruction's records relative to each other. Chosen: all records
-    of one retired instruction carry that instruction's cycle value,
-    and an atomic's MEMR is emitted before its MEMW with no record of
-    a *different* cycle between them (the trace-visible form of ISA
-    5.4's "no other access is ordered between its read and its
-    write"). checks/c3_irq_dev.py asserts exactly this; the relative
-    position of the EXEC record within its own cycle's records is NOT
-    pinned (both emulators just have to agree, which difftest
-    enforces anyway). **(emulators must match)**
+    instruction's records relative to each other. *Resolved by
+    devspec/trace.md 3.3/T-08 (entry 27), stricter than the original
+    choice here: access records precede their EXEC and share its
+    cycle; the EXEC is emitted LAST (the commit marker); an atomic's
+    MEMR is IMMEDIATELY followed by its MEMW (no record of any kind
+    between them); a failed CAS emits MEMR only; EVENTs applied at a
+    boundary precede the TRAP/EXEC of the same cycle in application
+    order. checks/c3_irq_dev.py asserts the atomic adjacency.*
+    **(emulators must match)**
 
 25. **PLATFORM-SPEC 1 vs ISA-SPEC 5.3, misaligned device access** —
     a misaligned non-64-bit access to a device register violates both
     the natural-alignment rule (UNALIGNED) and the register-size rule
-    (DEVERR), and neither document ranks them. C7 avoids the overlap:
-    every alignment case targets RAM, every device-size case is
-    naturally aligned. No test pins the priority until the spec picks
-    one; recommend UNALIGNED first (alignment is a property of the ea
-    itself, checkable before any address classification).
+    (DEVERR), and neither frozen document ranks them. *Resolved by
+    devspec (entry 27), matching the recommendation here: UNALIGNED
+    ranks first — display.md 1 rule 4 ("a misaligned access traps
+    UNALIGNED before any device semantics apply"), nic.md 5's check
+    precedence (alignment -> E7 -> E1 -> ...), NIC-C-10. The C7
+    device tranche pins it with a misaligned device-window access
+    expecting UNALIGNED.* **(emulators must match)**
 
 26. **TOOLING-SPEC 3.2 replay mode, input file format** — "re-run
     from an image plus EVENT records alone" never says what the
-    `--replay events.trc` file looks like. Chosen: a valid .trc — the
-    original trace's META record followed by the EVENT subsequence,
-    which `trace-q events` (a harness extension beyond the 3.3 query
-    set) extracts. The replay's output trace must match the recorded
-    run under `diverge --ignore-meta` (META may legitimately record
-    replay mode) and produce identical stdout. run-tests gates the
-    whole check behind REPLAY=1 so emulators without --replay still
-    get the rest of the harness; it becomes part of the required
-    reference-implementation checks once both emulators implement
-    --replay. A zero-EVENT replay file is valid and still meaningful
-    (a determinism re-run through the replay path). **(emulators must
-    match: accept the format, reproduce the records)**
+    `--replay events.trc` file looks like. *Resolved by
+    devspec/trace.md 5 (entry 27): the replay input is a recorded
+    .trc — the replayer consumes only its EVENT records, validates
+    META (`image_sha256`/`encoding`/`trace`, refusing on mismatch,
+    T-20), and must reproduce every post-META record byte-identically
+    at the same level (T-18). run-tests now feeds run a's own trace
+    to `--replay` and compares with `diverge` (whose META comparison
+    excludes the run-variant `mode`/`image` keys); the interim
+    `trace-q events` extraction subcommand was removed. Still
+    REPLAY=1-gated until both emulators implement --replay; a
+    zero-EVENT trace remains a meaningful replay (a determinism
+    re-run through the replay path).* **(emulators must match)**
+
+27. **devspec/ landed on main (INDEX.md present) — toolchain
+    reconciliation.** Per emu-common-prompt, devspec documents now
+    govern their surfaces; trace.md owns the trace format, replay,
+    EVENT payload encodings, and the trace-q CLI/output grammar.
+    trace-q, tracefile.py, and the disassembler were conformed to
+    trace.md 2-6 (exit codes 0/1/2; key=value line grammar; hex128
+    widths; `-` placeholders; sym resolution with smallest-name
+    tie-break and A-symbols excluded; canonical disassembly incl.
+    signed-decimal branch displacements and bare `invalid`; torn-tail
+    tolerance with stderr diagnostic; class-2 malformation rejection;
+    the 7-key META catalog). trace.md 8's vectors TV-1/TV-2/TV-7..10
+    are enforced byte-exactly by trace-q/test_vectors.py, including
+    the 12 TV-8 command fixtures and the assembler reproducing TV-1's
+    112 image bytes. Consequences for earlier entries: 1 and 16
+    confirmed; 2, 9, 24, 25, 26 resolved as noted; 17's triple-fault
+    consequence overturned (diagnostic tl=3 TRAP record).
+
+28. **devspec/trace.md 2.3.1/2.3.4 payload offset tables are
+    internally inconsistent** — EXEC lists insn at 24 then wb at 40 /
+    flags at 56 (payload is 50 bytes; correct: wb 32, flags 48,
+    pred_wb 49), and TRAP lists epc at 24 / baddr at 40 (payload is
+    49 bytes; correct: epc 16, baddr 32, tl_after 48). The TV-2 hex
+    dump and its field-by-field decode (record offsets, i.e. payload
+    offset + 8) are consistent with TOOLING-SPEC 3.2's field order
+    and payload lengths, so the toolchain follows the vectors; the
+    two offset tables need a doc fix.
+
+29. **TOOLING-SPEC 4.3 store operand order** — 4.3 shows load syntax
+    only (`lds.32 rd, [ea]`) and never a store. The assembler
+    originally accepted `st.W rs, [ea]`; devspec/asm.md 5.5 pins
+    `st.W [ea], rs` (and trace.md 6.4's canonical disassembly plus
+    TV-8's `st.64 [r2 + 0x4], r1` agree). The assembler and every
+    test source/generator were flipped to `[ea], rs`; all 13 suite
+    images were verified byte-identical before/after the flip
+    (operand order is surface syntax only).

@@ -54,19 +54,22 @@ live there; record-level logic sits in a sibling `checks/NAME.py`
 importing `trace-q/tracefile.py`.
 
 `REPLAY=1` additionally re-runs each passing test with `--replay` fed
-by `trace-q events` (the EVENT subsequence of run a) and requires
-identical stdout plus diverge-clean records — the reference-
-implementation "bit-exact replay" check, env-gated until both
-emulators implement `--replay` (SPEC-ISSUES 26). Event-queue
-determinism has no separate apparatus: the double-run plus replay
-cover it while the headless suite generates no EVENT records.
+the recorded trace of run a (per devspec/trace.md 5.1 the replayer
+consumes its EVENT records and validates META) and requires identical
+stdout plus a diverge-clean trace pair — the reference-implementation
+"bit-exact replay" check (trace.md 5.2/5.3, T-18), env-gated until
+both emulators implement `--replay` (SPEC-ISSUES 26 as resolved by
+trace.md). Event-queue determinism has no separate apparatus: the
+double-run plus replay cover it while the headless suite generates no
+EVENT records.
 
     tests/difftest.sh path/to/emu-A path/to/emu-B [test names...]
 
 Cross-implementation diff: full suite on both at trace level 1,
-`trace-q diverge --ignore-meta` per pair, first divergence reported.
-A test failing *identically* on both is reported as a shared failure,
-not a divergence.
+`trace-q diverge` per pair (run-variant META keys `mode`/`image`
+excluded per trace.md 6.5.6), first divergence reported. A test
+failing *identically* on both is reported as a shared failure, not a
+divergence.
 
 `MANIFEST` line format:
 `NAME SRC [level=N] [expect=<hex32>|expect=checkfail] [flags...]`
