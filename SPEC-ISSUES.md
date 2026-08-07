@@ -199,3 +199,12 @@ Both emulator implementations must match the readings marked
     position of the EXEC record within its own cycle's records is NOT
     pinned (both emulators just have to agree, which difftest
     enforces anyway). **(emulators must match)**
+
+25. **PLATFORM-SPEC 1 vs ISA-SPEC 5.3, misaligned device access** —
+    a misaligned non-64-bit access to a device register violates both
+    the natural-alignment rule (UNALIGNED) and the register-size rule
+    (DEVERR), and neither document ranks them. C7 avoids the overlap:
+    every alignment case targets RAM, every device-size case is
+    naturally aligned. No test pins the priority until the spec picks
+    one; recommend UNALIGNED first (alignment is a property of the ea
+    itself, checkable before any address classification).
