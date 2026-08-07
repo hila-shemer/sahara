@@ -253,6 +253,47 @@ def cause_check_handler(want_cause, ok=111, bad=222):
     ]
 
 
+def test_devspace():
+    """PLATFORM-SPEC 1 device windows carve device space out of the RAM
+    span (emu-c/platform.h, SPEC-ISSUES 32). No device behavior exists
+    yet, so every access -- not just atomics -- traps DEVERR; the
+    boundary addresses on both sides stay ordinary RAM. The shared
+    suite (c3_irq_dev) owns the atomic cases."""
+    KBD = 0x0F010000       # keyboard window base
+    BELOW = 0x0EFFFFF8     # last 8 RAM bytes below the windows
+    ABOVE = 0x0F060000     # first RAM byte after the NIC window
+    TOP = 0x0F05FFF8       # last 8 bytes inside the NIC window
+    expect_halt("dev-load-deverr",
+                handler_img(li64(1, KBD) +
+                            [enc("LDS", dst=2, src1=1, width=3)],
+                            cause_check_handler(E.CAUSES["DEVERR"])), 111)
+    expect_halt("dev-store-deverr",
+                handler_img(li64(1, KBD) +
+                            [enc("LDI", dst=2, imm=7),
+                             enc("ST", src1=1, src3=2, width=3)],
+                            cause_check_handler(E.CAUSES["DEVERR"])), 111)
+    expect_halt("dev-window-top-deverr",
+                handler_img(li64(1, TOP) +
+                            [enc("LDS", dst=2, src1=1, width=3)],
+                            cause_check_handler(E.CAUSES["DEVERR"])), 111)
+    expect_halt("dev-fetch-deverr",
+                handler_img(li64(1, KBD) +
+                            [enc("JALR", dst=29, src1=1)],
+                            cause_check_handler(E.CAUSES["DEVERR"])), 111)
+    expect_halt("dev-below-window-ram",
+                {0x1000: li64(1, BELOW) +
+                 [enc("LDI", dst=2, imm=7),
+                  enc("ST", src1=1, src3=2, width=3),
+                  enc("LDS", dst=0, src1=1, width=3),
+                  HALT]}, 7)
+    expect_halt("dev-above-window-ram",
+                {0x1000: li64(1, ABOVE) +
+                 [enc("LDI", dst=2, imm=9),
+                  enc("ST", src1=1, src3=2, width=3),
+                  enc("LDS", dst=0, src1=1, width=3),
+                  HALT]}, 9)
+
+
 def test_traps():
     expect_halt("syscall-cause",
                 handler_img([enc("SYSCALL")],
@@ -660,6 +701,8 @@ def main():
     test_memory()
     print("traps:")
     test_traps()
+    print("device-space decode:")
+    test_devspace()
     print("interrupts:")
     test_interrupts()
     print("mulh vs bigint:")

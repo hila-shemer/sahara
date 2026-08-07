@@ -17,6 +17,7 @@ rw_c_library(
         "hostmem.h",
         "image.h",
         "mem.h",
+        "platform.h",
         "trace.h",
         "u128.h",
         "gen/sahara_isa.h",

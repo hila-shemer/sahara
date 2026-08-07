@@ -227,3 +227,26 @@ they need a spec ruling more urgently than the rest.
     entry[0] 0x1e -> 0x3e, matching the patched copy verified above)
     plus the two assertion-side images root entry 22 owed; after the
     merge the shared suite is 10/10 green here, c2_mmu included.*
+
+32. **PLATFORM-SPEC 1 — the device windows lie numerically inside the
+    default 256 MB RAM region.** RAM region 0 spans `0x0 .. ram_len`
+    (default 0x1000_0000) and the register windows sit at
+    0x0F00_0000..0x0F05_FFFF, inside that span. Chose **carve-out**:
+    "everything at 0x0F00_0000 and above in this map is device space"
+    is normative classification, so device-space decode wins over RAM
+    backing (emu-c/platform.h; checked before every RAM access: data,
+    atomic, fetch, and page-table-node reads). Three sub-readings,
+    each of which the other implementation could take differently:
+    (a) plain loads/stores to the windows before the device phase trap
+    DEVERR -- no device backs the address (device_count=0 in the table
+    this emulator writes), extending entry 3's "no such physical
+    address" reading; these accesses stop trapping per-device once
+    devspec behavior lands, atomics keep trapping per ISA 5.4. (b) A
+    page-table node inside a window is malformed (PF_*, entry 2), not
+    DEVERR. (c) The display pixel buffer (0x1000_0000, size "per
+    table") is NOT classified until a display table entry defines its
+    length: under default RAM its base is already out-of-RAM (DEVERR
+    via entry 3), but with `--ram` > 256 MB an atomic there would NOT
+    trap yet -- and ram_len > 0x1000_0000 makes the spec's own map
+    self-overlapping, which needs a ruling anyway. **[divergence
+    risk]** (a) and (c) are observable in traces and exit paths.

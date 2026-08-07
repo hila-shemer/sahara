@@ -6,6 +6,7 @@
 #include "fp.h"
 #include "gen/sahara_isa.h"
 #include "hostmem.h"
+#include "platform.h"
 #include "rw/status.h"
 
 /* ------------------------------------------------------------- status */
@@ -151,7 +152,9 @@ typedef struct WalkR {
 
 static bool ram_read(SeCpu *c, se_u128 pa, unsigned size, se_u128 *out)
 {
-    if (!SeMem_in_ram(c->mem, pa, size))
+    /* A page-table node inside a device window is not RAM: the walk
+     * treats it as malformed, same as a node beyond ram_len. */
+    if (se_plat_in_dev_window(pa, size) || !SeMem_in_ram(c->mem, pa, size))
         return false;
     *out = SeMem_read(c->mem, pa, size);
     return true;
@@ -271,10 +274,12 @@ typedef struct AccR {
     se_u128 val;
 } AccR;
 
-/* Load or store of size bytes at va. Device windows are not populated
- * yet (device phase, CONFORMANCE C7); the dispatch seam is the branch
- * below. A physical address outside RAM (and outside every device
- * window) raises DEVERR with baddr = va (see SPEC-ISSUES.md). */
+/* Load or store of size bytes at va. The device windows of
+ * PLATFORM-SPEC 1 are classified (carved out of the RAM span) but have
+ * no behavior yet: device internals are the device phase, and until it
+ * lands no device backs those addresses, so any access there raises
+ * DEVERR -- the same "no such physical address" reading as out-of-RAM
+ * (SPEC-ISSUES.md entries 3 and 32). */
 static AccR data_access(SeCpu *c, se_u128 va, unsigned size, int acc,
                         se_u128 wval)
 {
@@ -294,8 +299,10 @@ static AccR data_access(SeCpu *c, se_u128 va, unsigned size, int acc,
         a.baddr = x.baddr;
         return a;
     }
-    /* MMIO dispatch seam: device windows get checked here before RAM. */
-    if (!SeMem_in_ram(c->mem, x.pa, size)) {
+    /* MMIO dispatch seam: device space decodes before the RAM check,
+     * because the windows lie inside the default RAM span. */
+    if (se_plat_in_dev_window(x.pa, size) ||
+        !SeMem_in_ram(c->mem, x.pa, size)) {
         a.fault = true;
         a.cause = CAUSE_DEVERR;
         a.baddr = va;
@@ -577,9 +584,12 @@ static void exec_insn(SeCpu *c, uint64_t insn)
             deliver(c, xl.cause, pc, xl.baddr);
             return;
         }
-        /* Device space traps DEVERR for atomics (5.4); with no device
-         * windows yet, out-of-RAM is the same DEVERR path. */
-        if (!SeMem_in_ram(c->mem, xl.pa, size)) {
+        /* Device space traps DEVERR for atomics (5.4) -- always, even
+         * once devices have behavior; out-of-RAM takes the same path
+         * (SPEC-ISSUES.md entry 3). Checked before the read so a
+         * DEVERR'd atomic leaves no MEMR footprint in the trace. */
+        if (se_plat_in_dev_window(xl.pa, size) ||
+            !SeMem_in_ram(c->mem, xl.pa, size)) {
             deliver(c, CAUSE_DEVERR, pc, ea);
             return;
         }
@@ -887,7 +897,10 @@ void SeCpu_step(SeCpu *c)
         deliver(c, f.cause, c->pc, f.baddr);
         return;
     }
-    if (!SeMem_in_ram(c->mem, f.pa, 8u)) {
+    /* Fetch from a device window: no cause is specified; DEVERR by the
+     * same "no such physical address" reading as out-of-RAM fetches
+     * (SPEC-ISSUES.md entries 3 and 32). */
+    if (se_plat_in_dev_window(f.pa, 8u) || !SeMem_in_ram(c->mem, f.pa, 8u)) {
         deliver(c, CAUSE_DEVERR, c->pc, c->pc);
         return;
     }
