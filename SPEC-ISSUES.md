@@ -324,3 +324,43 @@ Both emulator implementations must match the readings marked
     future test WFIs across a feed cycle (the 7.6 jump can skip
     values), that equality no longer holds; revisit then. **(emulators
     must match)**
+
+33. **asm.md 8.2's file_len trim parenthetical contradicts both T4
+    and trace.md TV-1: instruction bytes are never trimmed.** 8.2
+    says `file_len` = "mem_len minus the trailing run of zero bytes
+    (i.e. index of the last non-zero byte + 1)". Applied literally to
+    T4's first segment (which ends in `halt` = byte FE then seven
+    zero bytes) that gives file_len 25 — but the normative T4 dump
+    says 32 (whole halt word kept, image 162 bytes not 155), and
+    trace.md's TV-1 reference image agrees (file_len = mem_len = 32
+    for a code segment ending in halt; TV-1's sha256 is embedded in
+    TV-2's META, so every emulator will re-derive it). The dump's
+    second segment ("Hi\0" -> file_len 2, ASM-21) shows the trim IS
+    real for data bytes. Chosen reading, implemented in asm.py and
+    pinned byte-exactly by asm/test_asmmd.py (T4) and
+    trace-q/test_vectors.py (TV-1): trim the trailing zero run but
+    never into instruction-emitted bytes. Fix suggestion for asm.md
+    8.2: "index of the last non-zero byte + 1, but not below the end
+    of the segment's last emitted instruction". **(emulators
+    unaffected; loaders reproduce either encoding)**
+
+34. **asm.md ambiguities resolved while building the E-catalog
+    conformance suite** (asm/test_asmmd.py pins each choice):
+    (a) *Line attribution for whole-image errors* — ASM-11 demands
+    "the correct 1-based line number" but E042/E045-E049 have no
+    single triggering line. Chosen: E042 -> the later segment's
+    `.org` line; E045 -> the empty segment's `.org` line;
+    E046/E047/E048 -> the `.entry` line; E049 -> the first `.org`
+    line. (b) *.equ cycles* — `.equ a, b` / `.equ b, a` is no
+    catalog row; the catalog is "complete and closed", so the cycle
+    reports E030 (the chain never resolves to a value). (c) *Bytes
+    >= 0x80 in comments* — 2.1 makes them E001 "outside string and
+    character literals", but comments are an ignored region; the
+    assembler checks after comment stripping, so comments tolerate
+    them. (d) *`la` with a CONST target* — 6.2 says "any ADDR-valued
+    expression" but no error code covers a CONST one, and 5.7 branch
+    targets explicitly allow both; `la` accepts both. (e) *sreg CONST
+    bound* — 5.9/E026 say [0, 2^21-1] although the imm field is 22
+    bits; enforced as written. (f) *Default output name* — "the first
+    input's basename with the extension replaced" keeps the
+    directory (splitext), not a path-stripping basename.

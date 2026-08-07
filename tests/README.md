@@ -117,3 +117,10 @@ against the stub in `harness-selftest/` (prints the HALT contract line
 and emits a trivial fixed trace — it executes nothing and is not an
 emulator). Validates plumbing only: the real semantic expectations are
 first exercised when a real emulator arrives.
+
+Step 0 runs the component unit suites, including `asm/test_asmmd.py` —
+the devspec/asm.md conformance pass: T1-T5 vectors parsed out of the
+spec itself, the closed E001-E049 error catalog with exact codes and
+line numbers, and the testable ASM-1..22 requirements. Consequence for
+suite sources: `li` on a label is E029 (asm.md 6.1) — label addresses
+use `la`/`la.abs`.
