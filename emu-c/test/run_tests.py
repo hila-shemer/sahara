@@ -896,6 +896,53 @@ def test_replay_reader():
               == by_level["0"][_post_meta(by_level["0"]):])
 
 
+def test_replay_fuzz():
+    """Arbitrary bytes fed to --replay must terminate cleanly: either
+    the strict reader accepts a well-formed (possibly torn-tail) file
+    and the run reaches HALT, or it rejects with exit 1 and a stderr
+    diagnostic. Never a crash (signal), never a silent nonzero, never
+    a hang (subprocess timeout would throw)."""
+    rng = random.Random(20260807)
+    bad = 0
+    with tempfile.TemporaryDirectory() as d:
+        dp = pathlib.Path(d)
+        (dp / "example.img").write_bytes(TV1_IMG)
+
+        def one(tag, data):
+            nonlocal bad
+            (dp / "fuzz.trc").write_bytes(data)
+            p = subprocess.run(
+                [str(EMU), "example.img", "--replay", "fuzz.trc"],
+                capture_output=True, timeout=60, cwd=d)
+            ok = (p.returncode == 0 and p.stdout.startswith(b"HALT r0=")) \
+                or (p.returncode == 1 and p.stderr != b"")
+            if not ok:
+                bad += 1
+                print(f"    replay fuzz {tag}: rc={p.returncode} "
+                      f"len={len(data)} out={p.stdout[:80]!r} "
+                      f"err={p.stderr[:200]!r}")
+
+        # Pure random bytes at assorted lengths (incl. empty).
+        for i in range(60):
+            one(f"random #{i}", rng.randbytes(rng.randrange(0, 2500)))
+        # Random byte mutations of a valid trace (1..8 corruptions):
+        # exercises every reader path past the META gate.
+        for i in range(90):
+            data = bytearray(TV2_TRC)
+            for _ in range(rng.randrange(1, 9)):
+                data[rng.randrange(len(data))] = rng.randrange(256)
+            one(f"mutate #{i}", bytes(data))
+        # Every truncation point is either a clean prefix or a torn
+        # tail -- both accepted, neither may crash.
+        for i in range(40):
+            one(f"truncate #{i}", TV2_TRC[:rng.randrange(len(TV2_TRC))])
+        # Valid trace + random garbage appended (torn/malformed tail).
+        for i in range(40):
+            one(f"append #{i}",
+                TV2_TRC + rng.randbytes(rng.randrange(1, 600)))
+    check("replay-fuzz", bad == 0, f"{bad} runs crashed/misbehaved")
+
+
 def test_fuzz():
     rng = random.Random(1234)
     bad = 0
@@ -957,6 +1004,8 @@ def main():
     test_cli_contract()
     print("fuzz:")
     test_fuzz()
+    print("replay-file fuzz:")
+    test_replay_fuzz()
     if failures:
         print(f"\n{len(failures)} FAILURES: {failures}")
         return 1
