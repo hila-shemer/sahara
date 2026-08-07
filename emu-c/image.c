@@ -28,33 +28,54 @@ static se_u128 get_u128(const uint8_t *p)
     return v;
 }
 
-const char *se_image_load(SeMem *m, const char *path, se_u128 *entry_out,
-                          uint64_t *fnv64_out)
+/* Read the whole file into a fresh se_host_alloc buffer. On success
+ * *buf_out and *len_out are set (len >= IMG_HDR_BYTES); on error nothing is
+ * allocated. Either way the FILE is closed exactly once, here. */
+static const char *slurp_image(const char *path, uint8_t **buf_out,
+                               uint64_t *len_out)
 {
+    const char *err = NULL;
+    uint8_t *buf = NULL;
+    uint64_t flen = 0;
     FILE *f = fopen(path, "rb");
     if (!f)
         return "cannot open image file";
     if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return "cannot seek image file";
+        err = "cannot seek image file";
+        goto out;
     }
     long endpos = ftell(f);
     if (endpos < 0 || fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return "cannot size image file";
+        err = "cannot size image file";
+        goto out;
     }
-    uint64_t flen = (uint64_t)endpos;
+    flen = (uint64_t)endpos;
     if (flen < IMG_HDR_BYTES) {
-        fclose(f);
-        return "image too short for header";
+        err = "image too short for header";
+        goto out;
     }
-    uint8_t *buf = se_host_alloc(flen);
-    size_t got = fread(buf, 1u, flen, f);
-    fclose(f);
-    if (got != flen) {
+    buf = se_host_alloc(flen);
+    if (fread(buf, 1u, flen, f) != flen) {
         se_host_free(buf, flen);
-        return "short read of image file";
+        buf = NULL;
+        err = "short read of image file";
+        goto out;
     }
+    *buf_out = buf;
+    *len_out = flen;
+out:
+    fclose(f);
+    return err;
+}
+
+const char *se_image_load(SeMem *m, const char *path, se_u128 *entry_out,
+                          uint64_t *fnv64_out)
+{
+    uint8_t *buf;
+    uint64_t flen;
+    const char *serr = slurp_image(path, &buf, &flen);
+    if (serr)
+        return serr;
 
     uint64_t fnv = 0xcbf29ce484222325ull;
     for (uint64_t i = 0; i < flen; i++)
