@@ -8,5 +8,6 @@ c0_smoke c0_smoke.s
 c1_traps c1_traps.s
 c1_triplefault c1_triplefault.s expect=00000000000000000000000000003f3f
 c3_atomics c3_atomics.s
+c4_fp c4_fp.s
 c5_base c5_base.s
 c6_control c6_control.s level=2

@@ -53,8 +53,14 @@ not a divergence.
 
 `MANIFEST` line format:
 `NAME SRC [level=N] [expect=<32 lowercase hex>] [extra emulator flags...]`
-(`#` comments). Generated sources (`c5_base.s`) are committed; their
-generators are deterministic — regenerate and diff if in doubt.
+(`#` comments). Generated sources (`c3_atomics.s`, `c4_fp.s`,
+`c5_base.s`, `defs.s`) are committed; their generators are
+deterministic — regenerate and diff if in doubt. C4's FP expectations
+come from `fpvec/fpvec.c` (host C, IEEE hardware, build-time — its
+output `fpvec.dat` is committed and re-verified by selftest) plus
+exact bigint/logic computations in `gen_c4.py` for the paths where
+host C is the wrong tool (F->I saturation, 754-2019 FMIN/FMAX, RMM,
+inexact i128 sources); provenance notes in both files' headers.
 
 The harness sets `HARNESS_EXPECT_R0` in the emulator's environment; it
 is not part of the CLI contract and real emulators must ignore it —
