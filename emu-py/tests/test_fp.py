@@ -285,3 +285,52 @@ def test_machine_fcvt_int128():
                halt()])
     m, _ = run_words(prog)
     assert m.regs[0] == d2b(float(1 << 100))  # nearest double
+
+
+def b2f(b):
+    return struct.unpack("<f", struct.pack("<I", b))[0]
+
+
+def test_f32_ops_vs_host():
+    """binary32 add/sub/mul/div/sqrt via the host: compute in binary64,
+    round to binary32 with struct.pack. Double rounding is innocuous
+    here because 53 >= 2*24 + 2, so the composite is correctly rounded
+    - an independent check the f64 crosscheck can't give us."""
+    rng = random.Random(4321)
+    checked = 0
+    for _ in range(1500):
+        ab, bb = rng.getrandbits(32), rng.getrandbits(32)
+        a, b = b2f(ab), b2f(bb)
+        cases = [("add", sf.fadd(sf.F32, ab, bb, RNE), a + b),
+                 ("sub", sf.fsub(sf.F32, ab, bb, RNE), a - b),
+                 ("mul", sf.fmul(sf.F32, ab, bb, RNE), a * b)]
+        if b != 0:
+            cases.append(("div", sf.fdiv(sf.F32, ab, bb, RNE), a / b))
+        for name, (got, _fl), want in cases:
+            if math.isnan(want) or math.isnan(b2f(got)):
+                assert math.isnan(want) and math.isnan(b2f(got)), name
+                checked += 1
+                continue
+            try:
+                want32 = struct.unpack(
+                    "<I", struct.pack("<f", want))[0]
+            except OverflowError:
+                # host refuses to round to inf; softfloat must give inf
+                assert got & 0x7FFFFFFF == 0x7F800000, (name, a, b)
+                checked += 1
+                continue
+            assert got == want32, (name, a, b)
+            checked += 1
+    assert checked > 4000
+
+
+def test_f32_sqrt_vs_host():
+    rng = random.Random(31)
+    for _ in range(500):
+        ab = rng.getrandbits(31)              # non-negative patterns
+        a = b2f(ab)
+        if math.isnan(a):
+            continue
+        got, _fl = sf.fsqrt(sf.F32, ab, RNE)
+        want32 = struct.unpack("<I", struct.pack("<f", math.sqrt(a)))[0]
+        assert got == want32, a

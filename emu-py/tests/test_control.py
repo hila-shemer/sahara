@@ -134,3 +134,24 @@ def test_pred_wb_compare_to_p0_discarded():
     prog = [cmpi("CMPEQ", 0, 31, 0), halt()]  # dst p0: write discarded
     run_words(prog, tracer=t)
     assert not any(fl & trc.F_WROTE_PRED for _, fl, _ in t.execs)
+
+
+def test_all_16_pred_encodings():
+    # C6: every (index, polarity) pair. File set to 0b10101011 via PWR,
+    # then 16 predicated ADDs each contribute a distinct bit to r1;
+    # exactly one of each +/- pair must fire, per polarity semantics.
+    file = 0b10101010                          # p0 forced 1 -> 0b10101011
+    prog = [ldi(3, file), asm("PWR", src1=3), ldi(1, 0)]
+    for idx in range(8):
+        prog.append(alui("ADD", 1, 1, 1 << (2 * idx), p=pred(idx)))
+        prog.append(alui("ADD", 1, 1, 1 << (2 * idx + 1),
+                         p=pred(idx, negate=True)))
+    prog.append(halt())
+    m, out = run_words(prog)
+    assert out == "halt"
+    want = 0
+    effective = file | 1
+    for idx in range(8):
+        want |= 1 << (2 * idx) if (effective >> idx) & 1 \
+            else 1 << (2 * idx + 1)
+    assert m.regs[1] == want
