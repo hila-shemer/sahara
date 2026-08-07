@@ -92,8 +92,16 @@ def main():
             T.write_record(f, T.T_TRAP, T.trap_payload(
                 2, E.CAUSES["ILLEGAL"], entry, 0, 2))
 
+    expect = os.environ.get("HARNESS_EXPECT_R0", "")
+    if expect == "checkfail" and not os.environ.get("FAKE_R0"):
+        # Expected-CHECKFAIL manifest class (SPEC-ISSUES 22/23): the
+        # correct outcome is exit 3 + a CHECKFAIL first word. FAKE_R0
+        # overrides so selftest can prove the harness rejects a HALT
+        # where a CHECKFAIL was required.
+        print("CHECKFAIL stub assertion (harness-selftest, not real)")
+        sys.exit(3)
     r0 = int(os.environ.get("FAKE_R0")
-             or os.environ.get("HARNESS_EXPECT_R0")
+             or (expect if expect != "checkfail" else "")
              or "600d", 16)
     line = f"HALT r0={r0:032x}"
     if os.environ.get("FAKE_CASE") == "upper":
