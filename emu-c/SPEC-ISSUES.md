@@ -223,3 +223,7 @@ they need a spec ruling more urgently than the rest.
     toolchain fixes the generator, c2_mmu fails on any emulator that
     implements entry 21 faithfully — arguably on both. **(toolchain
     fix needed; test unchanged here per the no-edits rule)**
+    *Resolved: toolchain 8f31564 adds exactly that U bit (c2_mmu.s
+    entry[0] 0x1e -> 0x3e, matching the patched copy verified above)
+    plus the two assertion-side images root entry 22 owed; after the
+    merge the shared suite is 10/10 green here, c2_mmu included.*
