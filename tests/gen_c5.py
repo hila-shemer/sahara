@@ -452,7 +452,7 @@ def generate():
     emit("        li r0, 0x600D")
     emit("        halt")
     emit("fail:")
-    emit("        st.64 r27, [r24]")
+    emit("        st.64 [r24], r27")
     emit("        mov r0, r27")
     emit("        halt")
     emit()

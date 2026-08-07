@@ -119,7 +119,7 @@ def check_r19(expected):
 
 def seed_box():
     emit("        li r19, " + hexv(SEED))
-    emit("        st128 r19, [r25]")
+    emit("        st128 [r25], r19")
 
 
 def sfx(w):
@@ -154,14 +154,14 @@ def gen_stores():
                   f"{off}..{off + w // 8 - 1}")
             seed_box()
             emit(f"        li r21, {hexv(v)}")
-            emit(f"        st{sfx(w)} r21, [r25 + {off}]")
+            emit(f"        st{sfx(w)} [r25 + {off}], r21")
             emit("        ld128 r19, [r25]")
             check_r19(exp)
     v = 0x0123_4567_89AB_CDEF_1122_3344_5566_7788
     begin("st128 replaces the whole box")
     seed_box()
     emit(f"        li r21, {hexv(v)}")
-    emit("        st128 r21, [r25]")
+    emit("        st128 [r25], r21")
     emit("        ld128 r19, [r25]")
     check_r19(v)
     # cross-width overlap pins byte order: ISA-SPEC 1 says the machine
@@ -171,7 +171,7 @@ def gen_stores():
     begin("little-endian: st.64 then ldz.8 at each byte")
     seed_box()
     emit(f"        li r21, {hexv(q)}")
-    emit("        st.64 r21, [r25]")
+    emit("        st.64 [r25], r21")
     emit("        ldz.8 r19, [r25 + 3]")
     check_r19((q >> 24) & 0xFF)
     begin("little-endian: st.64 then ldz.16 at offset 6")
@@ -216,7 +216,7 @@ def gen_ea():
     begin("store through a composed ea, plain readback")
     emit("        li r22, 6")
     emit("        li r23, 0x51DE")
-    emit("        st.64 r23, [r21 + r22 shl 3 + 8]   # slot 7")
+    emit("        st.64 [r21 + r22 shl 3 + 8], r23   # slot 7")
     emit("        lds.64 r19, [r21 + 56]")
     check_r19(0x51DE)
 
@@ -257,7 +257,7 @@ def gen_align():
     for mnem, off in [("st.16", 1), ("st.32", 2), ("st.64", 4),
                       ("st128", 8)]:
         trap_case(f"{mnem} [box+{off}] traps UNALIGNED",
-                  [f"{mnem} r19, [r25 + {off}]"], BOX + off)
+                  [f"{mnem} [r25 + {off}], r19"], BOX + off)
     # atomics: natural alignment required at 32/64/128 (ISA-SPEC 5.4);
     # the C3 generator's bounded-coverage bullet lands here.
     for mnem, off in [("amoadd.32", 2), ("amoadd.64", 4),
@@ -276,7 +276,7 @@ def gen_align():
     seed_box()
     begin("st.8 / ldz.8 at odd offsets succeed")
     emit("        li r21, 0xC7")
-    emit("        st.8 r21, [r25 + 3]")
+    emit("        st.8 [r25 + 3], r21")
     emit("        ldz.8 r19, [r25 + 3]")
     check_r19(0xC7)
     begin("lds.8 at offset 9 (0x80 seeded: sign-extends)")
@@ -313,7 +313,7 @@ def gen_devsize():
     for mnem in ("st.8", "st.16", "st.32", "st128"):
         begin(f"{mnem} on a device register traps DEVERR")
         emit("        li r22, 0x11")
-        emit(f"        {mnem} r22, [r21]")
+        emit(f"        {mnem} [r21], r22")
         emit("        lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]")
         check_r19_named("CAUSE_DEVERR")
 
@@ -343,20 +343,20 @@ def generate():
     emit("        li r0, PASS_MAGIC")
     emit("        halt")
     emit("fail:")
-    emit("        st.64 r27, [r24]")
+    emit("        st.64 [r24], r27")
     emit("        mov r0, r27")
     emit("        halt")
     emit()
     emit("        # record cause/baddr/epc/status, skip the faulter")
     emit("h_rec:")
     emit("        mfsr k0, cause0")
-    emit("        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, baddr0")
-    emit("        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, epc0")
-    emit("        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, status")
-    emit("        st.64 k0, [r24 + TRAP_STATUS_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_STATUS_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, epc0")
     emit("        add k0, k0, 8")
     emit("        mtsr epc0, k0")

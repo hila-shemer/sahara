@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
 """Sahara disassembler — all encoding facts from encoding.py metadata.
 
-Renders in the assembler's syntax (TOOLING-SPEC 4.3) so disassembly is
-directly re-assemblable where the instruction is valid. Never raises on
-malformed words: renders `invalid <reason>` instead (traces may contain
-fuzzed or trapping words).
+Renders the canonical form of devspec/trace.md 6.4 (surface syntax per
+TOOLING-SPEC 4.3, agreed with devspec/asm.md):
+
+- mnemonics/registers lowercase, always rN/pN (never aliases);
+- immediates lowercase hex 0x... (minimal digits), negative
+  sign-extended imm22 as -0x<magnitude>; exceptions: B/JAL
+  displacements print as signed DECIMAL instruction counts, SHORI's
+  zero-extended immediate as unsigned hex;
+- memory operand [rB + rI shl N + 0xD] with the index term omitted iff
+  src2=31 and mod=0, the displacement iff imm=0; atomics have no index
+  term;
+- any encoding that would trap ILLEGAL un-squashed renders as exactly
+  `invalid` (unknown/odd-reserved opcode, reserved width, mod kind 0
+  with nonzero amount, reserved FCVT combination, out-of-range sreg
+  index, INVTP with imm != 0).
+
+Never raises on malformed words (traces contain fuzzed or squashed
+words).
 """
 
 import os
@@ -21,12 +35,12 @@ for _name, (_val, _fam, _ops) in E.OPCODES.items():
         OPC_TABLE[_val + 1] = (_name, True, _fam, _ops)
 
 SREG_NAMES = {v: k for k, v in E.SREGS.items()}
-CAUSE_NAMES = {v: k for k, v in E.CAUSES.items()}
 
-REG_ALIAS = {28: "sp", 29: "ra", 30: "k0", 31: "zero"}
 MOD_KIND_NAMES = {1: "shl", 2: "sxt", 3: "zxt"}
 
 IMM_BITS = E.IMM_BITS
+
+INVALID = "invalid"
 
 
 def field(word, name):
@@ -43,12 +57,14 @@ def reg(n):
 
 
 def imm_str(v):
-    return str(v) if -4096 < v < 4096 else hex(v) if v >= 0 \
-        else f"-0x{-v:x}"
+    """trace.md 6.4 rule 3: lowercase hex, minimal digits, -0x... for
+    negatives."""
+    return f"0x{v:x}" if v >= 0 else f"-0x{-v:x}"
 
 
 def mod_operand(word):
-    """Render `rN [shl|sxt|zxt AMOUNT]` from src2+mod; None if malformed."""
+    """Render `rN [shl|sxt|zxt AMOUNT]` from src2+mod; None if the mod
+    encoding is ILLEGAL (kind 0 with nonzero amount)."""
     src2, mod = field(word, "src2"), field(word, "mod")
     kind, amount = mod & 3, mod >> 2
     if kind == 0:
@@ -94,16 +110,13 @@ INT_FMT = {0: "32", 1: "64", 2: "128"}
 FP_FMT = {0: "f32", 1: "f64"}
 
 
-def target_str(addr, symtab):
-    s = symtab.lookup(addr) if symtab else None
-    return f"0x{addr:x}" + (f" <{s}>" if s else "")
-
-
 def disasm(word, pc=None, symtab=None):
+    """Canonical disassembly (pc/symtab accepted for compatibility and
+    ignored: the canonical form renders displacements, not targets)."""
     opval = field(word, "opcode")
     entry = OPC_TABLE.get(opval)
     if entry is None:
-        return f"invalid opcode=0x{opval:02x}"
+        return INVALID
     name, iform, fam, ops = entry
     mnem = name.lower()
     pred = field(word, "pred")
@@ -119,14 +132,14 @@ def disasm(word, pc=None, symtab=None):
     if fam in ("ALU", "CMP"):
         sfx = width_suffix(fam, wc)
         if sfx is None:
-            return f"invalid {mnem} width={wc}"
+            return INVALID
         d = f"p{dst & 7}" if ops.startswith("p") else reg(dst)
         if iform:
             b = imm_str(imm)
         else:
             b = mod_operand(word)
             if b is None:
-                return f"invalid {mnem} mod=0x{field(word, 'mod'):02x}"
+                return INVALID
         tail = f", {reg(src3)}" if "3" in ops else ""
         return f"{prefix}{mnem}{sfx} {d}, {reg(src1)}, {b}{tail}"
 
@@ -134,23 +147,23 @@ def disasm(word, pc=None, symtab=None):
         sfx = width_suffix(fam, wc)
         m = mem_operand(word)
         if m is None:
-            return f"invalid {mnem} mod=0x{field(word, 'mod'):02x}"
+            return INVALID
         if ops == "dm":
             return f"{prefix}{mnem}{sfx} {reg(dst)}, {m}"
-        return f"{prefix}{mnem}{sfx} {reg(src3)}, {m}"
+        return f"{prefix}{mnem}{sfx} {m}, {reg(src3)}"
 
     if fam == "MEM128":
         m = mem_operand(word)
         if m is None:
-            return f"invalid {mnem} mod=0x{field(word, 'mod'):02x}"
+            return INVALID
         if ops == "dm":
             return f"{prefix}{mnem} {reg(dst)}, {m}"
-        return f"{prefix}{mnem} {reg(src3)}, {m}"
+        return f"{prefix}{mnem} {m}, {reg(src3)}"
 
     if fam == "ATOMIC":
         sfx = width_suffix(fam, wc)
         if sfx is None:
-            return f"invalid {mnem} width={wc}"
+            return INVALID
         m = mem_operand(word, with_index=False)
         if ops == "da23":
             return (f"{prefix}{mnem}{sfx} {reg(dst)}, {m}, {reg(src2)}, "
@@ -159,13 +172,9 @@ def disasm(word, pc=None, symtab=None):
 
     if fam == "CTRL":
         if name == "B":
-            if pc is not None:
-                return f"{prefix}b {target_str(pc + imm * 8, symtab)}"
-            return f"{prefix}b .{imm:+d}"
+            return f"{prefix}b {imm}"
         if name == "JAL":
-            t = target_str(pc + imm * 8, symtab) if pc is not None \
-                else f".{imm:+d}"
-            return f"{prefix}jal {reg(dst)}, {t}"
+            return f"{prefix}jal {reg(dst)}, {imm}"
         return f"{prefix}jalr {reg(dst)}, {reg(src1)}, {imm_str(imm)}"
 
     if fam == "CONST":
@@ -173,10 +182,7 @@ def disasm(word, pc=None, symtab=None):
             return f"{prefix}ldi {reg(dst)}, {imm_str(imm)}"
         if name == "SHORI":
             return f"{prefix}shori {reg(dst)}, {reg(src1)}, 0x{imm_u:x}"
-        # LAP
-        if pc is not None:
-            return f"{prefix}lap {reg(dst)}, {target_str(pc + imm, symtab)}"
-        return f"{prefix}lap {reg(dst)}, .{imm:+d}"
+        return f"{prefix}lap {reg(dst)}, {imm_str(imm)}"
 
     if fam == "PREDF":
         if name == "PRD":
@@ -185,17 +191,23 @@ def disasm(word, pc=None, symtab=None):
 
     if fam == "SYS":
         if name == "MFSR":
-            nm = SREG_NAMES.get(imm_u, str(imm_u))
+            nm = SREG_NAMES.get(imm_u)
+            if nm is None:
+                return INVALID
             return f"{prefix}mfsr {reg(dst)}, {nm}"
         if name == "MTSR":
-            nm = SREG_NAMES.get(imm_u, str(imm_u))
+            nm = SREG_NAMES.get(imm_u)
+            if nm is None:
+                return INVALID
             return f"{prefix}mtsr {nm}, {reg(src1)}"
+        if name == "INVTP" and imm_u != 0:
+            return INVALID
         return f"{prefix}{mnem}"
 
     if fam == "FP":
         sfx = width_suffix(fam, wc)
         if sfx is None:
-            return f"invalid {mnem} width={wc}"
+            return INVALID
         d = f"p{dst & 7}" if ops.startswith("p") else reg(dst)
         srcs = [reg(src1)]
         if "2" in ops:
@@ -214,7 +226,7 @@ def disasm(word, pc=None, symtab=None):
         else:  # FCVTFF
             dfmt, sfmt = FP_FMT.get(wc), FP_FMT.get(sf)
         if dfmt is None or sfmt is None:
-            return f"invalid {mnem} width={wc} srcfmt={sf}"
+            return INVALID
         return f"{prefix}{mnem}.{dfmt} {reg(dst)}, {reg(src1)}, {sfmt}"
 
-    return f"invalid family {fam}"
+    return INVALID

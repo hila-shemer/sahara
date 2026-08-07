@@ -4,9 +4,10 @@
 #
 # Runs the full conformance suite on both emulators at trace level 1
 # (per toolchain-prompt) and reports the first trace divergence per
-# test via `trace-q diverge --ignore-meta`. Every divergence is either
-# a bug in one implementation or a spec ambiguity — this output is the
-# project's product, treat it accordingly.
+# test via `trace-q diverge` (which excludes the run-variant META keys
+# per devspec/trace.md 6.5.6). Every divergence is either a bug in one
+# implementation or a spec ambiguity — this output is the project's
+# product, treat it accordingly.
 #
 # stdout ("HALT r0=...") is compared too. A test failing *identically*
 # on both is a shared failure, reported but distinct from a divergence.
@@ -104,9 +105,10 @@ while read -r name src rest; do
         continue
     fi
 
-    dv=$(python3 "$TRACEQ" diverge --ignore-meta \
-         "$OUT/$name.A.trc" "$OUT/$name.B.trc" --sym "$OUT/$name.sym" \
-         2>"$OUT/$name.dv.err")
+    # trace-q diverge exit codes (devspec/trace.md 6.2): 1 = identical,
+    # 0 = first divergence printed, 2 = malformed/unreadable trace.
+    dv=$(python3 "$TRACEQ" diverge \
+         "$OUT/$name.A.trc" "$OUT/$name.B.trc" 2>"$OUT/$name.dv.err")
     dv_rc=$?
     if [ $dv_rc -gt 1 ]; then
         echo "BROKEN $name: trace-q diverge failed:"
@@ -114,12 +116,12 @@ while read -r name src rest; do
         broken=$((broken+1))
         continue
     fi
-    if [ $dv_rc -eq 1 ] || [ "$out_a" != "$out_b" ] \
+    if [ $dv_rc -eq 0 ] || [ "$out_a" != "$out_b" ] \
         || [ "$rc_a" != "$rc_b" ]; then
         echo "DIVERGE $name:"
         [ "$out_a" != "$out_b" ] || [ "$rc_a" != "$rc_b" ] && \
             echo "    stdout/rc: A rc=$rc_a '$out_a' | B rc=$rc_b '$out_b'"
-        [ $dv_rc -eq 1 ] && echo "$dv" | sed 's/^/    /'
+        [ $dv_rc -eq 0 ] && echo "$dv" | sed 's/^/    /'
         diverged=$((diverged+1))
         continue
     fi

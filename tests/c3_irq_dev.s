@@ -33,9 +33,9 @@ start:
         li r21, h_timer
         mtsr vbase, r21
         li r25, ATOMIC_BOX
-        st128 zero, [r25]
-        st.64 zero, [r24 + TIMER_COUNT_SLOT - FAIL_ADDR]
-        st.64 zero, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st128 [r25], zero
+        st.64 [r24 + TIMER_COUNT_SLOT - FAIL_ADDR], zero
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], zero
         li r23, 1                 # AMO addend
         li r21, STATUS_S + STATUS_IE
         mtsr status, r21          # interrupts on
@@ -270,7 +270,7 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
@@ -284,24 +284,24 @@ fail:
 h_timer:
         mfsr k0, cause0
         li r26, TRAP_CAUSE_SLOT
-        st.64 k0, [r26]
+        st.64 [r26], k0
         li r26, TIMER_COUNT_SLOT
         lds.64 k0, [r26]
         add k0, k0, 1
-        st.64 k0, [r26]
+        st.64 [r26], k0
         mtsr timecmp, zero        # disarm: 0 never pends
         iret                      # epc untouched: resume where deferred
 
         # record cause/baddr/epc/status, skip the faulting instruction
 h_rec:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + TRAP_STATUS_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_STATUS_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0

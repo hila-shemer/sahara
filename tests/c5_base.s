@@ -5858,7 +5858,7 @@ pass:
         li r0, 0x600D
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
