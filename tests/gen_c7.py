@@ -223,7 +223,7 @@ def gen_ea():
 
 def gen_align():
     emit("        # ---- C7.4 alignment: UNALIGNED, baddr = ea --------")
-    emit("        li r21, h_rec")
+    emit("        la.abs r21, h_rec")
     emit("        mtsr vbase, r21")
     emit()
 
@@ -241,7 +241,7 @@ def gen_align():
         if check_epc:
             begin("...epc = the faulting access")
             emit("        lds.64 r19, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]")
-            emit(f"        li r20, {site}")
+            emit(f"        la.abs r20, {site}")
             emit("        cmpeq p1, r19, r20")
             emit("        (!p1) b fail")
             emit()

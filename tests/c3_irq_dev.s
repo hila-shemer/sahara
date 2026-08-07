@@ -30,7 +30,7 @@
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_timer
+        la.abs r21, h_timer
         mtsr vbase, r21
         li r25, ATOMIC_BOX
         st128 [r25], zero
@@ -192,7 +192,7 @@ w8:
 # recording handler pattern from c1 takes over. Each faulting atomic is
 # skipped (epc+8) and must leave dst untouched and no MEM record.
 
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # -- 10: amoadd.32 on a device register: cause --------------
@@ -210,7 +210,7 @@ c3d_site:
         (!p1) b fail
         li r27, 12                # epc = the atomic itself
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r19, c3d_site
+        la.abs r19, c3d_site
         cmpeq p1, r22, r19
         (!p1) b fail
         li r27, 13                # dst not written by a faulting AMO

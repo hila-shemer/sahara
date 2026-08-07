@@ -207,7 +207,7 @@ start:
         # ---- 5. faults: precedence and direction/offset/value
         #         DEVERRs. Census: 3 UNALIGNED + 10 DEVERR (the
         #         checker counts them — change both together). -------
-        li r26, h_rec
+        la.abs r26, h_rec
         mtsr vbase, r26
         li r26, DEV_KBD_BASE
 

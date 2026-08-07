@@ -878,7 +878,7 @@ start:
         (!p1) b fail
 
         # ---- C7.4 alignment: UNALIGNED, baddr = ea --------
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # test 104: lds.16 [box+1] traps UNALIGNED
@@ -899,7 +899,7 @@ c7a_104:
         # test 106: ...epc = the faulting access
         li r27, 106
         lds.64 r19, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, c7a_104
+        la.abs r20, c7a_104
         cmpeq p1, r19, r20
         (!p1) b fail
 

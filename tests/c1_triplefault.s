@@ -19,9 +19,9 @@
 
         .org 0x1000
 start:
-        li r21, h_bad
+        la.abs r21, h_bad
         mtsr vbase, r21
-        li r21, h_dfbad
+        la.abs r21, h_dfbad
         mtsr dfbase, r21
         li r22, SENTINEL_BOX + 1
         li r0, TRIPLE_MARKER      # survives: triple fault writes nothing

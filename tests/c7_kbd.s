@@ -130,7 +130,7 @@ mwait:
         li r16, EVT_SLOTS
         li r17, DEV_MOUSE_BASE
         li r18, 0                      # drain count
-        li r19, h_ext
+        la.abs r19, h_ext
         mtsr vbase, r19
         li r19, STATUS_S + STATUS_IE
         mtsr status, r19               # EXTINT delivers HERE

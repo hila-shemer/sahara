@@ -39,7 +39,7 @@
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_die             # no trap is legitimate in this image
+        la.abs r21, h_die             # no trap is legitimate in this image
         mtsr vbase, r21
         li r21, ROOT_PA
         mtsr ptbase, r21

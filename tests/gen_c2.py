@@ -251,7 +251,7 @@ CODE = r"""
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # -- [1] enable mid-stream: ptbase/asid, INVTP, MMU_EN on ------
@@ -337,7 +337,7 @@ c2_pf_site:
         (!p1) b fail
         li r27, 11
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, c2_pf_site
+        la.abs r20, c2_pf_site
         cmpeq p1, r22, r20
         (!p1) b fail
 
@@ -421,9 +421,9 @@ c2_pf_site:
 
         # -- [23] PERM_FETCH: jump into an RW-noX page -----------------
         li r27, 23
-        li r21, h_fetch
+        la.abs r21, h_fetch
         mtsr vbase, r21
-        li r21, c2_after_nox
+        la.abs r21, c2_after_nox
         st.64 [r24 + SENTINEL_BOX - FAIL_ADDR], r21   # h_fetch target
         li r25, VA_NOX
         jalr zero, r25, 0
@@ -442,7 +442,7 @@ c2_after_nox:
 
         # -- [26] PF_FETCH: jump into an unmapped page -----------------
         li r27, 26
-        li r21, c2_after_pff
+        la.abs r21, c2_after_pff
         st.64 [r24 + SENTINEL_BOX - FAIL_ADDR], r21
         li r25, VA_UNMAPPED
         jalr zero, r25, 0
@@ -450,7 +450,7 @@ c2_after_pff:
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r22, CAUSE_PF_FETCH
         (!p1) b fail
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # -- [27] atomics report load-before-store order (C3 bullet) ---
@@ -530,11 +530,11 @@ c2_after_pff:
 
         # ==== U-bit gating in user mode ===============================
         li r27, 34
-        li r21, h_user
+        la.abs r21, h_user
         mtsr vbase, r21
         li r19, 0
         st.64 [r24 + PRIV_COUNT_SLOT - FAIL_ADDR], r19
-        li r21, user_entry
+        la.abs r21, user_entry
         mtsr epc0, r21
         li r21, STATUS_MMU_ON     # PS=0 -> IRET drops to user, MMU on
         mtsr status, r21
@@ -619,7 +619,7 @@ CODE_NOINVTP_REMAP = r"""
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_die             # no trap is legitimate in this image
+        la.abs r21, h_die             # no trap is legitimate in this image
         mtsr vbase, r21
         li r21, ROOT_PA
         mtsr ptbase, r21
@@ -654,7 +654,7 @@ CODE_NOINVTP_PTBASE = r"""
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_die             # no trap is legitimate in this image
+        la.abs r21, h_die             # no trap is legitimate in this image
         mtsr vbase, r21
         li r21, ROOT_PA
         mtsr ptbase, r21

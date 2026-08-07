@@ -137,7 +137,7 @@ mwait2:
         # geometry (the 6.4 race-free pattern, V5 steps 12-13),
         # stores it in EVT_SLOTS, sets EVT_FLAG.
         li r27, 11
-        li r19, h_ext
+        la.abs r19, h_ext
         mtsr vbase, r19
         li r19, STATUS_S + STATUS_IE
         mtsr status, r19
