@@ -14,6 +14,7 @@ c2_mmu c2_mmu.s
 c2_noinvtp_remap c2_noinvtp_remap.s expect=checkfail
 c2_noinvtp_ptbase c2_noinvtp_ptbase.s expect=checkfail
 c3_atomics c3_atomics.s
+c3_irq_dev c3_irq_dev.s level=2
 c4_fp c4_fp.s
 c5_base c5_base.s
 c6_control c6_control.s level=2
