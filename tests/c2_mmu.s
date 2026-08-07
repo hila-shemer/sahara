@@ -467,7 +467,7 @@ h_user_sys:
         .oct 0x0   # prefix
         .oct 0xffffffffffffffffffffffffff00   # prefix_mask
         .space 24   # reserved, zero
-        .oct 0x1e   # entry[0]
+        .oct 0x3e   # entry[0]
         .oct 0x10000e   # entry[1]
         .space 4064
 

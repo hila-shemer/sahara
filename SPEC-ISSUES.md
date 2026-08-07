@@ -170,4 +170,20 @@ Both emulator implementations must match the readings marked
     manifest extension (e.g. `expect=checkfail`, comparing exit code +
     first word only) — planned, not yet built. Until then the
     assertion side of C2's INVTP contract is unexercised (bounded
-    coverage, noted in gen_c2.py).
+    coverage, noted in gen_c2.py). *Resolved by entry 23's harness
+    class; the assertion-side images are c2_noinvtp_remap.s and
+    c2_noinvtp_ptbase.s.*
+
+23. **Expected-CHECKFAIL harness class (`expect=checkfail`)** — the
+    CLI contract fixes only `CHECKFAIL <one-line reason>` + exit 3;
+    the reason wording is implementation-defined, and where exactly
+    the trace ends relative to the asserting access is unspecified.
+    Chosen: a MANIFEST line may carry `expect=checkfail`; run-tests
+    then requires exit 3 and a stdout line whose FIRST WORD is
+    CHECKFAIL (reason text ignored), still runs twice and requires
+    byte-identical traces (one implementation's assertion point and
+    reason must be deterministic); difftest compares only the outcome
+    class for such tests and does not diff their traces or reasons
+    (neither is comparison-stable across implementations).
+    **(emulators must match the class: both must assert on the
+    c2_noinvtp_* images, at the load marked in each file)**

@@ -75,6 +75,29 @@ while read -r name src rest; do
         ${flags[@]+"${flags[@]}"}
     out_b="$run_out" rc_b=$run_rc
 
+    if [ "$expect" = "checkfail" ]; then
+        # Expected-CHECKFAIL class (SPEC-ISSUES 22/23): compare only the
+        # outcome class — exit 3 + first stdout word CHECKFAIL. Reason
+        # text is implementation-worded and traces near the assertion
+        # point are not comparison-stable, so neither is diffed.
+        cf_a=0; cf_b=0
+        [ $rc_a -eq 3 ] && case "$out_a" in CHECKFAIL\ *|CHECKFAIL) cf_a=1;; esac
+        [ $rc_b -eq 3 ] && case "$out_b" in CHECKFAIL\ *|CHECKFAIL) cf_b=1;; esac
+        if [ $cf_a -ne $cf_b ]; then
+            echo "DIVERGE $name (checkfail class):"
+            echo "    A rc=$rc_a '$out_a' | B rc=$rc_b '$out_b'"
+            diverged=$((diverged+1))
+        elif [ $cf_a -eq 0 ]; then
+            echo "SHARED-FAIL $name: neither emulator CHECKFAILed" \
+                 "(A rc=$rc_a '$out_a' | B rc=$rc_b '$out_b')"
+            shared_fail=$((shared_fail+1))
+        else
+            echo "IDENTICAL $name (checkfail class; reasons not compared)"
+            identical=$((identical+1))
+        fi
+        continue
+    fi
+
     if [ ! -f "$OUT/$name.A.trc" ] || [ ! -f "$OUT/$name.B.trc" ]; then
         echo "BROKEN $name: missing trace (rc_a=$rc_a rc_b=$rc_b)"
         broken=$((broken+1))

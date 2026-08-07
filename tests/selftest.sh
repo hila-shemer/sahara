@@ -27,7 +27,8 @@ done < "$TESTS/MANIFEST"
 
 echo "== 2. generated files match generators =="
 for pair in "gen_c5.py c5_base.s" "gen_c3.py c3_atomics.s" \
-            "gen_c2.py c2_mmu.s" "gen_c4.py c4_fp.s" \
+            "gen_c2.py c2_mmu.s" "gen_c2.py c2_noinvtp_remap.s" \
+            "gen_c2.py c2_noinvtp_ptbase.s" "gen_c4.py c4_fp.s" \
             "gen_defs.py defs.s"; do
     set -- $pair
     cp "$TESTS/$2" "$TMP/$2.committed"
@@ -89,6 +90,14 @@ EMU="$TMP/fake-r0" "$TESTS/run-tests.sh" c1_triplefault > "$TMP/rt4.out" 2>&1 \
     && { cat "$TMP/rt4.out"; die "run-tests must enforce expect="; }
 echo "ok: expect= mismatch detected"
 
+# expect=checkfail enforcement: a HALTing run (FAKE_R0 forces the stub
+# onto the HALT path) must FAIL a test whose correct outcome is the
+# check-mode assertion (exit 3 + CHECKFAIL — SPEC-ISSUES 22/23).
+EMU="$TMP/fake-r0" "$TESTS/run-tests.sh" c2_noinvtp_remap \
+    > "$TMP/rt5.out" 2>&1 \
+    && { cat "$TMP/rt5.out"; die "run-tests must reject HALT where CHECKFAIL expected"; }
+echo "ok: expect=checkfail rejects a HALTing run"
+
 echo "== 4. difftest.sh =="
 "$TESTS/difftest.sh" "$FAKE" "$FAKE" > "$TMP/dt.out" 2>&1 \
     || { cat "$TMP/dt.out"; die "difftest identical stubs should pass"; }
@@ -104,6 +113,15 @@ chmod +x "$TMP/fake-wb"
 grep -q "DIVERGE" "$TMP/dt2.out" \
     || { cat "$TMP/dt2.out"; die "no DIVERGE in difftest output"; }
 echo "ok: wb divergence reported"
+
+# checkfail-class divergence: A CHECKFAILs, B (FAKE_R0) HALTs — the
+# class comparison, not the reason text, must flag it.
+"$TESTS/difftest.sh" "$FAKE" "$TMP/fake-r0" c2_noinvtp_remap \
+    > "$TMP/dt3.out" 2>&1 \
+    && { cat "$TMP/dt3.out"; die "difftest must diverge on checkfail class"; }
+grep -q "DIVERGE c2_noinvtp_remap (checkfail class)" "$TMP/dt3.out" \
+    || { cat "$TMP/dt3.out"; die "no checkfail-class DIVERGE reported"; }
+echo "ok: checkfail class divergence reported"
 
 echo
 echo "selftest: all harness checks passed"
