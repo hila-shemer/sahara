@@ -58,7 +58,12 @@ def simm(v):
 
 
 def asm_words(source, org=0x1000):
-    """Assemble a snippet; return (words, asm object, image bytes)."""
+    """Assemble a snippet; return (words, asm object, image bytes).
+
+    Prepends `.org 0x1000` unless the snippet already opens with .org
+    (asm.md 7.1: emission before the first .org is E040)."""
+    if not source.lstrip().startswith(".org"):
+        source = f".org {org:#x}\n" + source
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, "t.s")
         img = os.path.join(td, "t.img")
@@ -92,7 +97,14 @@ def expect_fields(line, **want):
               f"{line!r}: field {k} = {got[k]:#x}, want {full[k]:#x}")
 
 
+import re as _re
+
+ERRFMT = _re.compile(r"^[^\n]+:\d+: E\d{3}: ", _re.M)
+
+
 def expect_error(source, why):
+    if not source.lstrip().startswith(".org"):
+        source = ".org 0x1000\n" + source
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, "t.s")
         with open(src, "w") as f:
@@ -101,10 +113,12 @@ def expect_error(source, why):
             [sys.executable, os.path.join(HERE, "asm.py"), "-o",
              os.path.join(td, "t.img"), src],
             capture_output=True, text=True)
-        check(r.returncode != 0, f"{why}: assembler accepted bad input")
-        if r.returncode != 0:
-            check("error" in r.stderr and ":" in r.stderr,
-                  f"{why}: error not in file:line form: {r.stderr!r}")
+        check(r.returncode == 1, f"{why}: assembler accepted bad input "
+                                 f"(rc={r.returncode})")
+        if r.returncode == 1:
+            check(ERRFMT.search(r.stderr) is not None,
+                  f"{why}: error not in FILE:LINE: Ennn: form: "
+                  f"{r.stderr!r}")
 
 
 # ------------------------------------------------- 1. field-level round-trip
@@ -340,11 +354,9 @@ words, _, _, _ = asm_words("    la.abs r1, far\n"
 got = run_chain([w for w in words[:-1]]).get(1, 0)
 check(got == 0x400000, f"la.abs builds {got:#x} != 0x400000")
 
-# forward-reference li reserves the full 6-word chain (documented policy)
-words, _, _, _ = asm_words("    li r1, fwd\nfwd:\n    nop\n")
-check(len(words) == 7, f"forward li: {len(words)-1} chain words, want 6")
-got = run_chain(words[:-1]).get(1, 0)
-check(got == 0x1000 + 48, f"forward li builds {got:#x}")
+# li on a label is E029 — the operand is an assembly-time constant
+# (asm.md 6.1); la/la.abs are the address-materializing forms.
+expect_error("    li r1, fwd\nfwd:\n    nop\n", "li on a label")
 
 # ------------------------------------------- 3. image + sym byte formats
 
@@ -460,7 +472,7 @@ expect_error('    .ascii "bad\\q"\n', "unknown string escape")
 with tempfile.TemporaryDirectory() as td:
     p1, p2 = os.path.join(td, "a.s"), os.path.join(td, "b.s")
     with open(p1, "w") as f:
-        f.write("start:\n    jal r5, other\n")
+        f.write("    .org 0x1000\nstart:\n    jal r5, other\n")
     with open(p2, "w") as f:
         f.write("other:\n    halt\n")
     a5 = A.assemble([p1, p2], os.path.join(td, "o.img"),

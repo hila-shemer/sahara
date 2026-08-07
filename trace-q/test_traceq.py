@@ -417,7 +417,8 @@ start:
 def assemble_words(source):
     src = os.path.join(td, "rt.s")
     with open(src, "w") as f:
-        f.write(source)
+        # asm.md 7.1: emission before the first .org is E040
+        f.write(".org 0x1000\n" + source)
     a = A.assemble([src], os.path.join(td, "rt.img"),
                    os.path.join(td, "rt.sym"))
     data = bytes(a.segments[0].data)
