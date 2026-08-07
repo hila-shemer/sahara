@@ -56,6 +56,8 @@ L.append("        # NV is bit 0; see SPEC-ISSUES.md entry 15)")
 for name, b in E.FCSR_FLAG_BITS.items():
     L.append(f"        .equ FCSR_{name}, {1 << b}")
 L.append(f"        .equ FCSR_RM_LSB, {E.FCSR_RM_LSB}")
+L.append(f"        .equ RM_UNIT, {1 << E.FCSR_RM_LSB}   "
+         f"# rm value n encodes as n * RM_UNIT")
 for name, v in E.ROUNDING.items():
     L.append(f"        .equ RM_{name}, {v}")
 L.append("")
