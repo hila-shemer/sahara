@@ -40,12 +40,14 @@ printf '#!/usr/bin/env bash\nexec python3 "%s" "$@"\n' \
     "$TESTS/harness-selftest/fake-emu.py" > "$FAKE"
 chmod +x "$FAKE"
 
+NTESTS=$(grep -cv '^\s*\(#\|$\)' "$TESTS/MANIFEST")
+
 echo "== 3. run-tests.sh against the stub =="
 EMU="$FAKE" "$TESTS/run-tests.sh" > "$TMP/rt.out" 2>&1 \
     || { cat "$TMP/rt.out"; die "run-tests should pass with the stub"; }
-grep -q "4 passed, 0 failed" "$TMP/rt.out" \
+grep -q "$NTESTS passed, 0 failed" "$TMP/rt.out" \
     || { cat "$TMP/rt.out"; die "unexpected run-tests summary"; }
-echo "ok: stub passes"
+echo "ok: stub passes ($NTESTS tests)"
 
 printf '#!/usr/bin/env bash\nFAKE_RC=7 exec python3 "%s" "$@"\n' \
     "$TESTS/harness-selftest/fake-emu.py" > "$TMP/fake-rc"
@@ -61,10 +63,19 @@ EMU="$TMP/fake-case" "$TESTS/run-tests.sh" c0_smoke > "$TMP/rt3.out" 2>&1 \
     && { cat "$TMP/rt3.out"; die "run-tests must reject uppercase hex"; }
 echo "ok: uppercase HALT line rejected"
 
+# expect= enforcement: FAKE_R0 overrides the stub's HALT value even for
+# tests carrying expect=; a wrong r0 must fail the test.
+printf '#!/usr/bin/env bash\nFAKE_R0=badbad exec python3 "%s" "$@"\n' \
+    "$TESTS/harness-selftest/fake-emu.py" > "$TMP/fake-r0"
+chmod +x "$TMP/fake-r0"
+EMU="$TMP/fake-r0" "$TESTS/run-tests.sh" c1_triplefault > "$TMP/rt4.out" 2>&1 \
+    && { cat "$TMP/rt4.out"; die "run-tests must enforce expect="; }
+echo "ok: expect= mismatch detected"
+
 echo "== 4. difftest.sh =="
 "$TESTS/difftest.sh" "$FAKE" "$FAKE" > "$TMP/dt.out" 2>&1 \
     || { cat "$TMP/dt.out"; die "difftest identical stubs should pass"; }
-grep -q "4 identical, 0 diverged" "$TMP/dt.out" \
+grep -q "$NTESTS identical, 0 diverged" "$TMP/dt.out" \
     || { cat "$TMP/dt.out"; die "unexpected difftest summary"; }
 echo "ok: identical stubs identical"
 

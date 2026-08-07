@@ -13,6 +13,12 @@ Knobs for exercising the harness's failure paths:
                  must fail the test)
   FAKE_CASE=upper  print the HALT line in uppercase hex (harness must
                  reject it — SPEC-ISSUES entry 3)
+  FAKE_R0=<hex>  print this r0 value regardless of everything (lets
+                 selftest prove the harness enforces expect=)
+
+The stub honors HARNESS_EXPECT_R0 (set by run-tests.sh/difftest.sh for
+every test) so tests whose MANIFEST line carries expect= pass under the
+stub. Real emulators never read it.
 """
 
 import os
@@ -22,7 +28,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "trace-q"))
+sys.path.insert(0, ROOT)
 import tracefile as T  # noqa: E402
+import encoding as E  # noqa: E402
 
 
 def main():
@@ -75,8 +83,18 @@ def main():
             T.write_record(f, T.T_EXEC, T.exec_payload(
                 0, entry, word, wb,
                 T.FLAG_WROTE_DST if wb else 0))
+            # Generic trace furniture: an UNALIGNED->ILLEGAL delivery
+            # pair, so trace-level checks/*.sh that assert TRAP-record
+            # shapes (c1_triplefault) run their real grep logic against
+            # the stub instead of being skipped. Not an execution claim.
+            T.write_record(f, T.T_TRAP, T.trap_payload(
+                1, E.CAUSES["UNALIGNED"], entry, 0x719, 1))
+            T.write_record(f, T.T_TRAP, T.trap_payload(
+                2, E.CAUSES["ILLEGAL"], entry, 0, 2))
 
-    r0 = 0x600D
+    r0 = int(os.environ.get("FAKE_R0")
+             or os.environ.get("HARNESS_EXPECT_R0")
+             or "600d", 16)
     line = f"HALT r0={r0:032x}"
     if os.environ.get("FAKE_CASE") == "upper":
         line = f"HALT r0={r0:032X}"

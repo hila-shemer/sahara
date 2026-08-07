@@ -9,7 +9,10 @@ committed generator scripts — never by running an emulator under test).
 
 - **Success:** HALT with `r0 = 0x600D`. The harness expects stdout
   `HALT r0=0000000000000000000000000000600d` exactly (lowercase hex —
-  SPEC-ISSUES.md entry 3).
+  SPEC-ISSUES.md entry 3). Tests that end in an architectural halt that
+  is not the HALT instruction (triple fault, WFI deadlock — SPEC-ISSUES
+  entry 12) put a marker in r0 instead and carry
+  `expect=<32 lowercase hex>` on their MANIFEST line.
 - **Failure:** store the failing test ID as u64 to **PA 0x700**, then
   HALT with `r0 = <test ID>`. Diagnose with
   `trace-q last-write 0x700 out.trc` and
@@ -19,12 +22,16 @@ committed generator scripts — never by running an emulator under test).
   - `0x700` failing test ID (u64)
   - `0x710` squash box — no access may ever touch it (checked from the
     trace by `checks/*.sh`)
-  - `0x718` sentinel box — general readback scratch
-  - `0x720`-`0x738` trap record slots (cause/baddr/epc; c6, later c1)
+  - `0x718` sentinel box — general readback scratch (odd offsets
+    `0x719`/`0x71a`/`0x71b` double as UNALIGNED fault targets in c1)
+  - `0x720`-`0x738` trap record slots (cause/baddr/epc/status; c1, c6)
   - `0x740` atomic box (16-byte aligned; c3)
-  - `0x750`-`0x7f8` free for later groups
+  - `0x750`-`0x760` c1 user-mode slots (PRIV count, user epc/status)
+  - `0x768`-`0x780` c1 TL-lowering save area (epc/cause/baddr/status)
+  - `0x788`-`0x7f8` free for later groups
 - **Register conventions inside tests:** r24 = 0x700, r27 = current
-  test ID, r19-r23 vector scratch. Nothing else is reserved.
+  test ID, r19-r23 vector scratch, r26 handler scratch where a handler
+  needs more than k0. Nothing else is reserved.
 
 ## Running
 
@@ -44,9 +51,15 @@ Cross-implementation diff: full suite on both at trace level 1,
 A test failing *identically* on both is reported as a shared failure,
 not a divergence.
 
-`MANIFEST` line format: `NAME SRC [level=N] [extra emulator flags...]`
+`MANIFEST` line format:
+`NAME SRC [level=N] [expect=<32 lowercase hex>] [extra emulator flags...]`
 (`#` comments). Generated sources (`c5_base.s`) are committed; their
 generators are deterministic — regenerate and diff if in doubt.
+
+The harness sets `HARNESS_EXPECT_R0` in the emulator's environment; it
+is not part of the CLI contract and real emulators must ignore it —
+only the selftest stub reads it (so `expect=` plumbing is testable
+without an emulator).
 
 ## Harness self-test (no emulator needed)
 

@@ -39,6 +39,22 @@
         .equ STATUS_S, 8
         .equ STATUS_PS, 16
         .equ STATUS_TL_LSB, 5
+        .equ STATUS_TL_UNIT, 32
+        .equ STATUS_TL_MASK, 96
+
+        # fcsr layout (encoding.py FCSR_FLAG_BITS / ROUNDING —
+        # NV is bit 0; see SPEC-ISSUES.md entry 15)
+        .equ FCSR_NV, 1
+        .equ FCSR_DZ, 2
+        .equ FCSR_OF, 4
+        .equ FCSR_UF, 8
+        .equ FCSR_NX, 16
+        .equ FCSR_RM_LSB, 5
+        .equ RM_RNE, 0
+        .equ RM_RTZ, 1
+        .equ RM_RDN, 2
+        .equ RM_RUP, 3
+        .equ RM_RMM, 4
 
         # suite conventions (tests/README.md)
         .equ PASS_MAGIC, 0x600D
@@ -48,5 +64,24 @@
         .equ TRAP_CAUSE_SLOT, 0x720
         .equ TRAP_BADDR_SLOT, 0x728
         .equ TRAP_EPC_SLOT, 0x730
+        .equ TRAP_STATUS_SLOT, 0x738
         .equ ATOMIC_BOX, 0x740      # 16-byte aligned
+        .equ PRIV_COUNT_SLOT, 0x750
+        .equ USER_EPC_SLOT, 0x758
+        .equ USER_STATUS_SLOT, 0x760
+        .equ TLSAVE_EPC, 0x768
+        .equ TLSAVE_CAUSE, 0x770
+        .equ TLSAVE_BADDR, 0x778
+        .equ TLSAVE_STATUS, 0x780
+
+        # raw instruction words (built from encoding.py field
+        # positions; the assembler refuses to emit these, which
+        # is the point — they exercise decode paths). Emitted
+        # with `.quad NAME`.
+        .equ RAW_ILLEGAL, 0x0000000000000000   # ILLEGAL, unpredicated
+        .equ RAW_ILLEGAL_P2, 0x0000000000000400   # (p2) ILLEGAL — squashed while p2=0
+        .equ RAW_MFSR_SREG16, 0x00004000000130F0   # mfsr r19, <sreg 16: unlisted> — ILLEGAL
+        .equ RAW_FCVTFF_F32F32, 0x000000000027307E   # fcvtff f32->f32 — ILLEGAL
+        .equ RAW_FADD_W2, 0x0000020004E73060   # fadd width=2 (reserved) — ILLEGAL
+        .equ RAW_FCVT_BADMOD, 0x000001040027307A   # fcvtif with mod junk — ILLEGAL
 
