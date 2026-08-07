@@ -74,6 +74,15 @@
         .equ TLSAVE_CAUSE, 0x770
         .equ TLSAVE_BADDR, 0x778
         .equ TLSAVE_STATUS, 0x780
+        .equ TIMER_COUNT_SLOT, 0x788
+
+        # device windows (PLATFORM-SPEC section 1 — the fixed
+        # reference-platform addresses; everything at
+        # 0x0F00_0000 and above is device space per ISA 9.2)
+        .equ DEV_DISPLAY_BASE, 0x0F000000
+        .equ DEV_KBD_BASE, 0x0F010000
+        .equ DEV_MOUSE_BASE, 0x0F020000
+        .equ DEV_NIC_BASE, 0x0F030000
 
         # raw instruction words (built from encoding.py field
         # positions; the assembler refuses to emit these, which

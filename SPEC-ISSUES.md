@@ -187,3 +187,15 @@ Both emulator implementations must match the readings marked
     (neither is comparison-stable across implementations).
     **(emulators must match the class: both must assert on the
     c2_noinvtp_* images, at the load marked in each file)**
+
+24. **TOOLING-SPEC 3.2, record order within one instruction** — the
+    format fixes per-record fields but not the order of one
+    instruction's records relative to each other. Chosen: all records
+    of one retired instruction carry that instruction's cycle value,
+    and an atomic's MEMR is emitted before its MEMW with no record of
+    a *different* cycle between them (the trace-visible form of ISA
+    5.4's "no other access is ordered between its read and its
+    write"). checks/c3_irq_dev.py asserts exactly this; the relative
+    position of the EXEC record within its own cycle's records is NOT
+    pinned (both emulators just have to agree, which difftest
+    enforces anyway). **(emulators must match)**

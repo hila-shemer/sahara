@@ -83,14 +83,37 @@ def main():
             T.write_record(f, T.T_EXEC, T.exec_payload(
                 0, entry, word, wb,
                 T.FLAG_WROTE_DST if wb else 0))
-            # Generic trace furniture: an UNALIGNED->ILLEGAL delivery
-            # pair, so trace-level checks/*.sh that assert TRAP-record
-            # shapes (c1_triplefault) run their real grep logic against
-            # the stub instead of being skipped. Not an execution claim.
-            T.write_record(f, T.T_TRAP, T.trap_payload(
-                1, E.CAUSES["UNALIGNED"], entry, 0x719, 1))
-            T.write_record(f, T.T_TRAP, T.trap_payload(
-                2, E.CAUSES["ILLEGAL"], entry, 0, 2))
+            # Trace furniture so checks/*.sh run their real record
+            # logic against the stub instead of being skipped. Keyed
+            # on the image basename because different checks assert
+            # CONFLICTING record shapes (exactly-2 traps vs exactly-8
+            # timers). Not an execution claim.
+            name = os.path.basename(image_path)
+            name = name[:-4] if name.endswith(".img") else name
+            if name == "c3_irq_dev":
+                # what checks/c3_irq_dev.py demands: 32 paired
+                # MEMR/MEMW at the atomic box, 8 TIMER deliveries
+                # (several inside the AMO cycle span), 1 unpaired
+                # readback MEMR, nothing in device space.
+                cyc = 100
+                for k in range(32):
+                    T.write_record(f, T.T_MEMR,
+                                   T.mem_payload(cyc, 0x740, 8, k))
+                    T.write_record(f, T.T_MEMW,
+                                   T.mem_payload(cyc, 0x740, 8, k + 1))
+                    if k % 4 == 3:
+                        T.write_record(f, T.T_TRAP, T.trap_payload(
+                            cyc + 1, E.CAUSES["TIMER"], entry, 0, 1))
+                    cyc += 2
+                T.write_record(f, T.T_MEMR,
+                               T.mem_payload(cyc, 0x740, 8, 32))
+            else:
+                # default: the UNALIGNED->ILLEGAL delivery pair that
+                # checks/c1_triplefault.sh greps for.
+                T.write_record(f, T.T_TRAP, T.trap_payload(
+                    1, E.CAUSES["UNALIGNED"], entry, 0x719, 1))
+                T.write_record(f, T.T_TRAP, T.trap_payload(
+                    2, E.CAUSES["ILLEGAL"], entry, 0, 2))
 
     expect = os.environ.get("HARNESS_EXPECT_R0", "")
     if expect == "checkfail" and not os.environ.get("FAKE_R0"):
