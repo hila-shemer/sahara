@@ -226,8 +226,9 @@ static const struct {
 int main(void)
 {
     for (unsigned i = 0; i < sizeof ARITH / sizeof ARITH[0]; i++) {
-        SeFpRes r = se_fp_arith(ARITH[i].op, ARITH[i].w, ARITH[i].a,
-                                ARITH[i].b, ARITH[i].c, ARITH[i].rm);
+        SeFpRes r = se_fp_arith(ARITH[i].op, SeFpFmtW_t_of(ARITH[i].w),
+                                ARITH[i].a, ARITH[i].b, ARITH[i].c,
+                                SeFpRm_t_of(ARITH[i].rm));
         if (r.bits != ARITH[i].want || r.flags != ARITH[i].flags) {
             (void)fprintf(stderr,
                           "ARITH[%u] op=%02x w=%u: got %016llx/%02x "
@@ -241,8 +242,8 @@ int main(void)
     }
     for (unsigned i = 0; i < sizeof CMPS / sizeof CMPS[0]; i++) {
         uint8_t fl = 0;
-        bool t = se_fp_cmp(CMPS[i].op, CMPS[i].w, CMPS[i].a, CMPS[i].b,
-                           &fl);
+        bool t = se_fp_cmp(CMPS[i].op, SeFpFmtW_t_of(CMPS[i].w),
+                           CMPS[i].a, CMPS[i].b, &fl);
         if (t != CMPS[i].want || fl != CMPS[i].flags) {
             (void)fprintf(stderr, "CMPS[%u]: got %d/%02x want %d/%02x\n",
                           i, (int)t, fl, (int)CMPS[i].want,
@@ -251,8 +252,8 @@ int main(void)
         }
     }
     for (unsigned i = 0; i < sizeof F2I / sizeof F2I[0]; i++) {
-        SeFpInt r = se_fp_to_int(F2I[i].srcw, F2I[i].a, F2I[i].dstw,
-                                 F2I[i].uns);
+        SeFpInt r = se_fp_to_int(SeFpFmtW_t_of(F2I[i].srcw), F2I[i].a,
+                                 SeIntW_t_of(F2I[i].dstw), F2I[i].uns);
         se_u128 want = se_make128(F2I[i].want_hi, F2I[i].want_lo);
         if (r.val != want || r.flags != F2I[i].flags) {
             (void)fprintf(stderr,
@@ -268,8 +269,9 @@ int main(void)
     }
     for (unsigned i = 0; i < sizeof I2F / sizeof I2F[0]; i++) {
         SeFpRes r = se_fp_from_int(se_make128(I2F[i].v_hi, I2F[i].v_lo),
-                                   I2F[i].srcw, I2F[i].uns, I2F[i].dstw,
-                                   I2F[i].rm);
+                                   SeIntW_t_of(I2F[i].srcw), I2F[i].uns,
+                                   SeFpFmtW_t_of(I2F[i].dstw),
+                                   SeFpRm_t_of(I2F[i].rm));
         if (r.bits != I2F[i].want || r.flags != I2F[i].flags) {
             (void)fprintf(stderr,
                           "I2F[%u]: got %016llx/%02x want %016llx/%02x\n",
@@ -279,8 +281,9 @@ int main(void)
         }
     }
     for (unsigned i = 0; i < sizeof F2F / sizeof F2F[0]; i++) {
-        SeFpRes r = se_fp_to_fp(F2F[i].srcw, F2F[i].a, F2F[i].dstw,
-                                F2F[i].rm);
+        SeFpRes r = se_fp_to_fp(SeFpFmtW_t_of(F2F[i].srcw), F2F[i].a,
+                                SeFpFmtW_t_of(F2F[i].dstw),
+                                SeFpRm_t_of(F2F[i].rm));
         if (r.bits != F2F[i].want || r.flags != F2F[i].flags) {
             (void)fprintf(stderr,
                           "F2F[%u]: got %016llx/%02x want %016llx/%02x\n",

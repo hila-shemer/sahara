@@ -778,14 +778,16 @@ static void exec_insn(SeCpu *c, uint64_t insn)
         }
         uint8_t fl = 0;
         if (is_cmp) {
-            bool t = se_fp_cmp((uint8_t)opcode, w, se_lo64(c->r[src1]),
+            bool t = se_fp_cmp((uint8_t)opcode, SeFpFmtW_t_of(w),
+                               se_lo64(c->r[src1]),
                                se_lo64(c->r[src2]), &fl);
             wr_pred(c, (unsigned)(dst & 7u), t, &o);
         } else {
-            SeFpRes fr = se_fp_arith((uint8_t)opcode, w,
+            SeFpRes fr = se_fp_arith((uint8_t)opcode, SeFpFmtW_t_of(w),
                                      se_lo64(c->r[src1]),
                                      se_lo64(c->r[src2]),
-                                     se_lo64(c->r[src3]), rm);
+                                     se_lo64(c->r[src3]),
+                                     SeFpRm_t_of(rm));
             fl = fr.flags;
             wr_reg(c, dst, se_canon(fr.bits, w), &o);
         }
@@ -822,17 +824,22 @@ static void exec_insn(SeCpu *c, uint64_t insn)
         }
         uint8_t fl;
         if (opcode == OPC_FCVTFI || opcode == OPC_FCVTFIU) {
-            SeFpInt ir = se_fp_to_int(srcw, se_lo64(c->r[src1]), dstw,
+            SeFpInt ir = se_fp_to_int(SeFpFmtW_t_of(srcw),
+                                      se_lo64(c->r[src1]),
+                                      SeIntW_t_of(dstw),
                                       opcode == OPC_FCVTFIU);
             fl = ir.flags;
             wr_reg(c, dst, ir.val, &o);
         } else {
             SeFpRes fr;
             if (opcode == OPC_FCVTFF)
-                fr = se_fp_to_fp(srcw, se_lo64(c->r[src1]), dstw, rm);
+                fr = se_fp_to_fp(SeFpFmtW_t_of(srcw),
+                                 se_lo64(c->r[src1]),
+                                 SeFpFmtW_t_of(dstw), SeFpRm_t_of(rm));
             else
-                fr = se_fp_from_int(c->r[src1], srcw,
-                                    opcode == OPC_FCVTUIF, dstw, rm);
+                fr = se_fp_from_int(c->r[src1], SeIntW_t_of(srcw),
+                                    opcode == OPC_FCVTUIF,
+                                    SeFpFmtW_t_of(dstw), SeFpRm_t_of(rm));
             fl = fr.flags;
             wr_reg(c, dst, se_canon(fr.bits, dstw), &o);
         }

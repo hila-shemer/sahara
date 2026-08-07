@@ -14,10 +14,11 @@ typedef struct Fmt {
 static const Fmt FMT32 = { 32u, 24u, 127 };
 static const Fmt FMT64 = { 64u, 53u, 1023 };
 
-static const Fmt *fmt_of(unsigned fmtw)
+static const Fmt *fmt_of(SeFpFmtW_t fmtw)
 {
-    RW_ASSERT(fmtw == 32u || fmtw == 64u);
-    return (fmtw == 32u) ? &FMT32 : &FMT64;
+    unsigned w = SeFpFmtW_t_val(fmtw);
+    RW_ASSERT(w == 32u || w == 64u);
+    return (w == 32u) ? &FMT32 : &FMT64;
 }
 
 static uint64_t low_bits(const Fmt *f, uint64_t v)
@@ -492,10 +493,11 @@ static SeFpRes fp_minmax(const Fmt *f, uint64_t ab, uint64_t bb, bool is_max)
     return res_bits(low_bits(f, (a_lt == is_max) ? bb : ab));
 }
 
-SeFpRes se_fp_arith(uint8_t op, unsigned fmtw, uint64_t a, uint64_t b,
-                    uint64_t c, unsigned rm)
+SeFpRes se_fp_arith(uint8_t op, SeFpFmtW_t fmtw, uint64_t a, uint64_t b,
+                    uint64_t c, SeFpRm_t rm_)
 {
     const Fmt *f = fmt_of(fmtw);
+    unsigned rm = SeFpRm_t_val(rm_);
     switch (op) {
     case OPC_FADD:  return fp_addsub(f, a, b, false, rm);
     case OPC_FSUB:  return fp_addsub(f, a, b, true, rm);
@@ -510,7 +512,7 @@ SeFpRes se_fp_arith(uint8_t op, unsigned fmtw, uint64_t a, uint64_t b,
     }
 }
 
-bool se_fp_cmp(uint8_t op, unsigned fmtw, uint64_t a, uint64_t b,
+bool se_fp_cmp(uint8_t op, SeFpFmtW_t fmtw, uint64_t a, uint64_t b,
                uint8_t *flags)
 {
     const Fmt *f = fmt_of(fmtw);
@@ -534,9 +536,11 @@ bool se_fp_cmp(uint8_t op, unsigned fmtw, uint64_t a, uint64_t b,
 
 /* ------------------------------------------------------- conversions */
 
-SeFpInt se_fp_to_int(unsigned srcfmtw, uint64_t a, unsigned dstw, bool uns)
+SeFpInt se_fp_to_int(SeFpFmtW_t srcfmtw, uint64_t a, SeIntW_t dstw_,
+                     bool uns)
 {
     const Fmt *f = fmt_of(srcfmtw);
+    unsigned dstw = SeIntW_t_val(dstw_);
     SeFpInt r = { .val = 0u, .flags = 0u };
     Uf u = fp_unpack(f, a);
     se_u128 umax = se_zext(~(se_u128)0, dstw);          /* 2^w - 1 */
@@ -599,10 +603,12 @@ SeFpInt se_fp_to_int(unsigned srcfmtw, uint64_t a, unsigned dstw, bool uns)
     return r;
 }
 
-SeFpRes se_fp_from_int(se_u128 v, unsigned srcw, bool uns, unsigned dstfmtw,
-                       unsigned rm)
+SeFpRes se_fp_from_int(se_u128 v, SeIntW_t srcw_, bool uns,
+                       SeFpFmtW_t dstfmtw, SeFpRm_t rm_)
 {
     const Fmt *f = fmt_of(dstfmtw);
+    unsigned srcw = SeIntW_t_val(srcw_);
+    unsigned rm = SeFpRm_t_val(rm_);
     SeFpRes r = res_bits(0u);
     bool sign = false;
     se_u128 mag;
@@ -621,10 +627,11 @@ SeFpRes se_fp_from_int(se_u128 v, unsigned srcw, bool uns, unsigned dstfmtw,
     return r;
 }
 
-SeFpRes se_fp_to_fp(unsigned srcfmtw, uint64_t a, unsigned dstfmtw,
-                    unsigned rm)
+SeFpRes se_fp_to_fp(SeFpFmtW_t srcfmtw, uint64_t a, SeFpFmtW_t dstfmtw,
+                    SeFpRm_t rm_)
 {
     const Fmt *fs = fmt_of(srcfmtw), *fd = fmt_of(dstfmtw);
+    unsigned rm = SeFpRm_t_val(rm_);
     Uf u = fp_unpack(fs, a);
     SeFpRes r = res_bits(0u);
     switch (u.kind) {
