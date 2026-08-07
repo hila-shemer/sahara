@@ -204,13 +204,15 @@ def test_wfi_timer_jump_and_delivery():
 
 
 def test_wfi_ie0_continues_after_jump():
+    # root SPEC-ISSUES 20 freeze: jump to timecmp (50), then +1 for
+    # WFI's own retire -> resume at 51; HALT retires -> 52
     prog = [ldi(1, 50), mtsr("timecmp", 1), asm("WFI"), halt()]
     m, out = run_words(prog)
     assert out == "halt"
-    assert m.cycle == 51                      # jump to 50, HALT retires
+    assert m.cycle == 52
 
 
-def test_wfi_deadlock_halts():
+def test_wfi_deadlock_cycle_is_wfi_retire():
     m, out = run_words([asm("WFI"), halt()])
     assert out == "halt"
     assert m.cycle == 1                       # nothing after the WFI retire

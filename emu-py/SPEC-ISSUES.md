@@ -128,11 +128,15 @@ ruling most urgently.
     emitted at execution time, not commit time, so traces match
     non-check-mode runs. **[cross-impl]** (only in check mode).
 
-21. **ISA-SPEC 7.6 — WFI cycle accounting.** Chosen: WFI retires
-    normally (+1 cycle), then, if nothing is pending, cycle jumps
-    directly to the earliest cycle at which an interrupt condition
-    becomes true (timecmp value, or the next event's cycle). Delivery
-    then costs its usual +1. **[cross-impl]**
+21. **ISA-SPEC 7.6 — WFI cycle accounting.** Originally chosen:
+    WFI retires (+1), then cycle jumps to the earliest pending cycle T
+    (post-stall cycle = T). **Superseded by root SPEC-ISSUES 20**,
+    which freezes the other order — jump to T first, then +1 for WFI's
+    retire (post-stall cycle = T+1) — and is marked "emulators must
+    match". emu-py now implements T+1 (machine.py wfi_stall). If an
+    interrupt is already pending at WFI's own cycle c, T = c and the
+    post-WFI cycle is c+1, identical to a plain retire. Delivery then
+    costs its usual +1 either way. **[cross-impl]**
 
 22. **PLATFORM/TOOLING — replay event application point.** Chosen: an
     EVENT with cycle C is applied (device queue fed, EVENT record

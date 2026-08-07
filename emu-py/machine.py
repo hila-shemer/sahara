@@ -707,23 +707,28 @@ class Machine:
         raise AssertionError(name)
 
     def wfi_stall(self):
-        """ISA-SPEC 7.6. Runs after WFI has retired. If nothing is
-        pending, jump virtual time to the next cycle at which an
-        interrupt becomes pending; if no such cycle can exist, halt
-        (deadlock is loud)."""
-        if self.pending_interrupt() is not None:
-            return
+        """ISA-SPEC 7.6 with the freeze from root SPEC-ISSUES 20: from
+        WFI's own cycle c, virtual time jumps to T — the first cycle
+        >= c at which an interrupt can become pending — and WFI's
+        retire increment lands after the jump, so execution resumes at
+        cycle T+1. step() already added the retire increment before
+        calling here (cycle == c+1), so we compute T from c and land on
+        T+1 directly. If no future cycle can make an interrupt pending,
+        halt (deadlock is loud)."""
+        c = self.cycle - 1               # WFI's own cycle
         candidates = []
         timecmp = self.sregs[E.SREGS["timecmp"]]
-        if timecmp != 0 and timecmp > self.cycle:
-            candidates.append(timecmp)
+        if timecmp != 0:
+            candidates.append(max(timecmp, c))
+        if self.phys.any_device_pending():
+            candidates.append(c)
         for ecycle, _d, _p in self.events:
-            candidates.append(max(ecycle, self.cycle))
+            candidates.append(max(ecycle, c))
             break                        # events sorted; first is enough
         if not candidates:
             self.halted = True           # WFI deadlock: machine halts
             return
-        self.cycle = min(candidates)
+        self.cycle = min(candidates) + 1
         self.process_events()
 
     # -------------------------------------------------------------- run
