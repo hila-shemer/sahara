@@ -416,3 +416,34 @@ def test_wfi_deadlock_halts():
     assert out == "halt"
     assert not m.triple_fault
     assert m.regs[0] == 0x2BAD                 # never reached the ldi after
+
+
+# ------------------------------------------- root SPEC-ISSUES 16 and 17
+
+def test_mfsr_cycle_reads_before_own_increment():
+    """Root SPEC-ISSUES 16: MFSR of cycle sees the count of instructions
+    retired *before* it - its own increment lands after the read. The
+    first instruction therefore reads 0, the second reads 1."""
+    prog = [mfsr(0, "cycle"), mfsr(1, "cycle"), halt()]
+    m, out = run_words(prog)
+    assert out == "halt"
+    assert m.regs[0] == 0
+    assert m.regs[1] == 1
+
+
+def test_faulting_insn_emits_no_exec_record():
+    """Root SPEC-ISSUES 17: a faulting instruction does not retire, so it
+    emits no EXEC record - the TRAP record (epc pointing at it) is its
+    only trace footprint."""
+    from helpers import OrderedTracer
+    tr = OrderedTracer()
+    prog = vbase_setup() + [asm("ILLEGAL"), halt()]
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))],
+                       tracer=tr)
+    assert out == "halt"
+    fault_pc = E.RESET_PC + 2 * 8
+    assert m.regs[10] == E.CAUSES["ILLEGAL"]
+    exec_pcs = [r[2] for r in tr.recs if r[0] == "exec"]
+    assert fault_pc not in exec_pcs
+    traps = [r for r in tr.recs if r[0] == "trap"]
+    assert len(traps) == 1 and traps[0][3] == fault_pc   # epc = faulting pc

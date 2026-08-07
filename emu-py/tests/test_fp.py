@@ -362,3 +362,13 @@ def test_uf_tininess_detected_after_rounding():
     got3, fl3 = sf.fmadd(f32, a32, nb32, minn32, RNE)
     assert got3 == minn32
     assert fl3 == sf.NX
+
+
+def test_machine_fcvt_badmod_illegal():
+    """Root SPEC-ISSUES 18: FCVT mod bits 7:2 nonzero traps ILLEGAL like
+    the section's other reserved encodings - even when bits 1:0 alone
+    would name a valid source format."""
+    prog = (vbase_setup() + li128(1, d2b(1.0))
+            + [asm("FCVTFI", dst=0, src1=1, width=0, mod=4), halt()])
+    m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))])
+    assert m.regs[10] == E.CAUSES["ILLEGAL"]
