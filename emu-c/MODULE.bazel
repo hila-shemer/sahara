@@ -1,0 +1,7 @@
+module(name = "sahara-emu-c", version = "0.1.0")
+
+bazel_dep(name = "rightwayc", version = "0.1.0")
+local_path_override(module_name = "rightwayc", path = "../../rightwayc")
+
+bazel_dep(name = "rules_shell", version = "0.3.0")
+

@@ -1,0 +1,8 @@
+test --test_output=errors
+build --color=yes
+
+# Same workaround as rightwayc's own .bazelrc: the short-test tier runs
+# at build time via _rw_run_on_build; without this, Bazel 7's
+# test-config trimming produces a second configuration for each short
+# cc_test and the two collide (ActionConflict).
+build --notrim_test_configuration

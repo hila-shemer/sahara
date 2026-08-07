@@ -1,0 +1,74 @@
+load("@rightwayc//bzl:rw.bzl", "rw_c_binary", "rw_c_library", "rw_c_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+rw_c_library(
+    name = "core",
+    srcs = [
+        "cpu.c",
+        "hostmem.c",
+        "image.c",
+        "mem.c",
+        "trace.c",
+    ],
+    hdrs = [
+        "cpu.h",
+        "hostmem.h",
+        "image.h",
+        "mem.h",
+        "trace.h",
+        "u128.h",
+        "gen/sahara_isa.h",
+    ],
+)
+
+rw_c_binary(
+    name = "sahara-emu",
+    srcs = ["main.c"],
+    deps = [":core"],
+)
+
+rw_c_test(
+    name = "test_core",
+    srcs = ["test_core.c"],
+    tier = "short",
+    deps = [":core"],
+)
+
+# Post-build audits (doctrine 2.2), hand-wired: rw_audit would also wire
+# the worst-case-stack audit, which needs hand-checked bounds for this
+# binary's libc callees (fopen/fread/strtoull/...) added to rightwayc's
+# audit/libc_stack.tsv -- a rightwayc change this repo must not make
+# unilaterally. Until those rows land upstream, wire the four audits
+# that stand on their own.
+AUDIT_SRCS = glob(["*.c", "*.h", "gen/*.h"])
+
+sh_test(
+    name = "audit_banned_syms",
+    srcs = ["@rightwayc//audit:banned_syms.sh"],
+    args = ["$(rootpath :sahara-emu)"],
+    data = [":sahara-emu"],
+    tags = ["no_coverage"],
+)
+
+sh_test(
+    name = "audit_tls",
+    srcs = ["@rightwayc//audit:tls_check.sh"],
+    args = ["$(rootpath :sahara-emu)"],
+    data = [":sahara-emu"],
+    tags = ["no_coverage"],
+)
+
+sh_test(
+    name = "audit_ctx",
+    srcs = ["@rightwayc//audit:ctx_check.sh"],
+    args = ["$(rootpaths %s)" % s for s in AUDIT_SRCS],
+    data = AUDIT_SRCS,
+)
+
+sh_test(
+    name = "audit_with",
+    srcs = ["@rightwayc//audit:with_wrapper.sh"],
+    args = ["$(rootpath @rightwayc//audit:with_check.py)"] +
+           ["$(rootpaths %s)" % s for s in AUDIT_SRCS],
+    data = AUDIT_SRCS + ["@rightwayc//audit:with_check.py"],
+)
