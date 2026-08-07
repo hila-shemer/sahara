@@ -149,3 +149,25 @@ Both emulator implementations must match the readings marked
     surface any disagreement loudly. Recommend freezing: jump to
     exactly the pending cycle, then +1 for WFI's retire. **(emulators
     must match)**
+
+21. **emu-common-prompt, INVTP check mode: what "served stale" means**
+    — the phantom translation cache "assert[s] if a translation would
+    have been served stale". Chosen: stale = the cached (asid, VA)
+    entry's *result* (frame and permissions) differs from a fresh walk
+    at use time; serving a cached entry whose result still matches is
+    not an assertion, even if tables were touched or ptbase changed in
+    between. c2's ptbase/asid switch relies on this: both roots map
+    the code page identically, so the two fetches inside the switch
+    window translate to the same frame under either table.
+    **(emulators must match, or c2_mmu CHECKFAILs on one of them)**
+
+22. **CONFORMANCE C2, the assertion-firing side of the INVTP check** —
+    "change ptbase alone without INVTP (illegal — check-mode assertion
+    fires)" describes a run that *ends* in CHECKFAIL exit 3 with an
+    implementation-worded reason line; the current harness has no
+    expected-CHECKFAIL test class, and difftest compares stdout
+    byte-for-byte (reason lines will legitimately differ). Needs a
+    manifest extension (e.g. `expect=checkfail`, comparing exit code +
+    first word only) — planned, not yet built. Until then the
+    assertion side of C2's INVTP contract is unexercised (bounded
+    coverage, noted in gen_c2.py).
