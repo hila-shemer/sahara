@@ -20,6 +20,9 @@ ROOT = EMU_DIR.parent
 sys.path.insert(0, str(ROOT))
 import encoding as E  # noqa: E402
 
+sys.path.insert(0, str(EMU_DIR / "test"))
+import fp_oracle as O  # noqa: E402
+
 EMU = EMU_DIR / "bazel-bin" / "sahara-emu"
 IMM_MASK = (1 << E.IMM_BITS) - 1
 W128 = 2  # ALU/CMP/ATOMIC width-field value for 128-bit
@@ -363,6 +366,229 @@ def test_mulh_bigint():
             expect_halt(f"{op.lower()}128-vec{i}", {0x1000: words}, want)
 
 
+def _canon_low64(bits, w):
+    """Low 64 bits of the canonical (sign-extended) register value."""
+    if w == 32 and (bits >> 31) & 1:
+        bits |= 0xFFFFFFFF00000000
+    return bits & ((1 << 64) - 1)
+
+
+def _fp_epilogue():
+    """r0 <- (fcsr << 64) | low64(r0)."""
+    return [
+        enc("MFSR", dst=5, imm=E.SREGS["fcsr"]),
+        enc("SHL", dst=0, src1=0, width=W128, imm=64, iform=True),
+        enc("SHR", dst=0, src1=0, width=W128, imm=64, iform=True),
+        enc("SHL", dst=5, src1=5, width=W128, imm=64, iform=True),
+        enc("OR", dst=0, src1=0, src2=5, width=W128),
+        HALT,
+    ]
+
+
+def _set_rm(rm):
+    return [
+        enc("LDI", dst=4, imm=rm << E.FCSR_RM_LSB),
+        enc("MTSR", src1=4, imm=E.SREGS["fcsr"]),
+    ]
+
+
+_FP_ORACLE = {
+    "FADD": O.fadd, "FSUB": O.fsub, "FMUL": O.fmul, "FDIV": O.fdiv,
+    "FMIN": O.fmin, "FMAX": O.fmax,
+}
+
+
+def fp_arith_vec(name, opname, w, rm, a, b, c=None):
+    f = O.fmt_of(w)
+    if opname == "FSQRT":
+        want, fl = O.fsqrt(f, a, rm)
+    elif opname == "FMADD":
+        want, fl = O.ffma(f, a, b, c, rm)
+    else:
+        want, fl = _FP_ORACLE[opname](f, a, b, rm)
+    wf = 0 if w == 32 else 1
+    words = li64(1, a) + li64(2, b) + (li64(3, c) if c is not None else [])
+    words += _set_rm(rm)
+    words += [enc(opname, dst=0, src1=1, src2=2, src3=3, width=wf)]
+    words += _fp_epilogue()
+    exp = ((fl | (rm << E.FCSR_RM_LSB)) << 64) | _canon_low64(want, w)
+    expect_halt(name, {0x1000: words}, exp)
+
+
+def fp_cmp_vec(name, opname, w, a, b):
+    f = O.fmt_of(w)
+    want, fl = O.fcmp(f, {"FCMPEQ": "eq", "FCMPLT": "lt",
+                          "FCMPLE": "le"}[opname], a, b)
+    wf = 0 if w == 32 else 1
+    words = li64(1, a) + li64(2, b) + _set_rm(0)
+    words += [enc(opname, dst=1, src1=1, src2=2, width=wf),
+              enc("PRD", dst=0)]
+    words += _fp_epilogue()
+    exp = (fl << 64) | (1 | (int(want) << 1))  # p0 stays 1
+    expect_halt(name, {0x1000: words}, exp)
+
+
+def _rand_fp_bits(rng, w):
+    f = O.fmt_of(w)
+    p = f["p"]
+    emask = ((1 << (w - p)) - 1) << (p - 1)
+    sign = rng.getrandbits(1) << (w - 1)
+    r = rng.random()
+    if r < 0.06:
+        return sign  # zero
+    if r < 0.11:
+        return sign | emask  # inf
+    if r < 0.16:  # NaN, quiet or signaling
+        return sign | emask | (1 << (p - 2) if rng.random() < 0.5 else 1)
+    if r < 0.30:
+        return sign | rng.getrandbits(p - 1)  # subnormal or small
+    return sign | rng.getrandbits(w - 1)
+
+
+def test_fp():
+    # RMM tie-away vs RNE tie-even, through the instruction path
+    one64 = 0x3FF0000000000000
+    tie64 = 0x3C90000000000000  # 2^-53, half-ulp of 1.0
+    fp_arith_vec("fadd64-tie-rne", "FADD", 64, O.RNE, one64, tie64)
+    fp_arith_vec("fadd64-tie-rmm", "FADD", 64, O.RMM, one64, tie64)
+    fp_arith_vec("fadd64-tie-rup", "FADD", 64, O.RUP, one64, tie64)
+    # FMADD is fused: (1+2^-52)^2 - (1+2^-51) == 2^-104 only unrounded
+    fp_arith_vec("fmadd64-fused", "FMADD", 64, O.RNE,
+                 0x3FF0000000000001, 0x3FF0000000000001,
+                 0xBFF0000000000002)
+    fp_arith_vec("fdiv64-dz", "FDIV", 64, O.RNE, one64, 0)
+    fp_arith_vec("fsqrt64-nv", "FSQRT", 64, O.RNE, one64 | (1 << 63), 0)
+    fp_arith_vec("fmin-zeros", "FMIN", 64, O.RNE, 0, 1 << 63)
+
+    # randomized differential vectors against the exact-rational oracle
+    rng = random.Random(0xF10A7)
+    modes = (O.RNE, O.RTZ, O.RDN, O.RUP, O.RMM)
+    for w in (32, 64):
+        for opname in ("FADD", "FSUB", "FMUL", "FDIV", "FSQRT", "FMADD",
+                       "FMIN", "FMAX"):
+            for i in range(10):
+                a = _rand_fp_bits(rng, w)
+                b = _rand_fp_bits(rng, w)
+                c = _rand_fp_bits(rng, w) if opname == "FMADD" else None
+                rm = modes[rng.randrange(5)]
+                fp_arith_vec(f"rnd-{opname.lower()}{w}-{i}", opname, w,
+                             rm, a, b, c)
+        for opname in ("FCMPEQ", "FCMPLT", "FCMPLE"):
+            for i in range(5):
+                fp_cmp_vec(f"rnd-{opname.lower()}{w}-{i}", opname, w,
+                           _rand_fp_bits(rng, w), _rand_fp_bits(rng, w))
+
+    # flags are sticky until fcsr is rewritten (10.3)
+    words = li64(1, one64) + _set_rm(0) + [
+        enc("FDIV", dst=2, src1=1, src2=31, width=1),   # DZ
+        enc("FADD", dst=3, src1=1, src2=1, width=1),    # exact: no flags
+        enc("MFSR", dst=0, imm=E.SREGS["fcsr"]),
+        HALT]
+    expect_halt("fcsr-sticky", {0x1000: words},
+                1 << E.FCSR_FLAG_BITS["DZ"])
+
+    # reserved rounding mode: traps at the next op that rounds, not at
+    # MTSR and not at FMIN/FCMP/FCVTFI (SPEC-ISSUES.md)
+    expect_halt("reserved-rm-traps-at-round",
+                handler_img(_set_rm(5) + [
+                    enc("FMIN", dst=2, src1=1, src2=1, width=1),
+                    enc("FCMPLT", dst=1, src1=1, src2=1, width=1),
+                    enc("FCVTFI", dst=2, src1=1, width=1, mod=1),
+                    enc("FADD", dst=2, src1=1, src2=1, width=1)],
+                    cause_check_handler(E.CAUSES["ILLEGAL"])), 111)
+    # ... and MTSR of a good mode afterwards unwedges it
+    fp_arith_vec("rm-rewrite-recovers", "FADD", 64, O.RTZ,
+                 0x3FF0000000000000, 0x3CA0000000000000)
+
+    # ILLEGAL format encodings (3.4, 10.4)
+    for name, word in (
+            ("fp-width2-illegal",
+             enc("FADD", dst=0, src1=1, src2=2, width=2)),
+            ("fcvtff-same-fmt-illegal",
+             enc("FCVTFF", dst=0, src1=1, width=1, mod=1)),
+            ("fcvt-mod-hi-illegal",
+             enc("FCVTFI", dst=0, src1=1, width=1, mod=(1 << 2) | 1)),
+            ("fcvtif-fp128-illegal",
+             enc("FCVTIF", dst=0, src1=1, width=2, mod=2)),
+            ("fcvtfi-src128-illegal",
+             enc("FCVTFI", dst=0, src1=1, width=1, mod=2)),
+            ("fcvtfi-dst-w3-illegal",
+             enc("FCVTFI", dst=0, src1=1, width=3, mod=1)),
+    ):
+        expect_halt(name, handler_img(
+            [word], cause_check_handler(E.CAUSES["ILLEGAL"])), 111)
+
+
+def _cvt_words(op, wf, mod, rm, load_words):
+    return load_words + _set_rm(rm) + \
+        [enc(op, dst=0, src1=1, width=wf, mod=mod)]
+
+
+def test_fp_cvt():
+    rng = random.Random(0xC47)
+    modes = (O.RNE, O.RTZ, O.RDN, O.RUP, O.RMM)
+    # FP -> int, dst 32/64: pack (fcsr, low64(canonical))
+    for sw in (32, 64):
+        for dw, wf in ((32, 0), (64, 1)):
+            for uns in (False, True):
+                for i in range(3):
+                    a = _rand_fp_bits(rng, sw)
+                    want, fl = O.fcvt_f_to_i(O.fmt_of(sw), a, dw, uns)
+                    op = "FCVTFIU" if uns else "FCVTFI"
+                    words = _cvt_words(op, wf, 0 if sw == 32 else 1,
+                                       0, li64(1, a)) + _fp_epilogue()
+                    exp = (fl << 64) | (want & ((1 << 64) - 1))
+                    expect_halt(f"f2i-{sw}-{dw}-{int(uns)}-{i}",
+                                {0x1000: words}, exp)
+    # FP -> int128: full canonical value, then flags separately
+    for a, uns in ((0x47E0000000000000, False), (0x47E0000000000000, True),
+                   (0xFFF0000000000000, False), (0xC3E0000000000001, True)):
+        want, fl = O.fcvt_f_to_i(O.F64, a, 128, uns)
+        op = "FCVTFIU" if uns else "FCVTFI"
+        words = _cvt_words(op, 2, 1, 0, li64(1, a)) + [HALT]
+        expect_halt(f"f2i128-{a:x}-{int(uns)}", {0x1000: words}, want)
+        words = _cvt_words(op, 2, 1, 0, li64(1, a)) + [
+            enc("MFSR", dst=0, imm=E.SREGS["fcsr"]), HALT]
+        expect_halt(f"f2i128-flags-{a:x}-{int(uns)}", {0x1000: words}, fl)
+    # int -> FP at every source width, incl. the u128->fp32 overflow
+    for sw, sfmt in ((32, 0), (64, 1), (128, 2)):
+        for dw, wf in ((32, 0), (64, 1)):
+            for uns in (False, True):
+                for i in range(3):
+                    v = rng.getrandbits(sw)
+                    rm = modes[rng.randrange(5)]
+                    want, fl = O.fcvt_i_to_f(O.fmt_of(dw), v, sw, uns, rm)
+                    op = "FCVTUIF" if uns else "FCVTIF"
+                    load = li128(1, v) if sw == 128 else li64(1, v)
+                    words = _cvt_words(op, wf, sfmt, rm, load) + \
+                        _fp_epilogue()
+                    exp = ((fl | (rm << E.FCSR_RM_LSB)) << 64) | \
+                        _canon_low64(want, dw)
+                    expect_halt(f"i2f-{sw}-{dw}-{int(uns)}-{i}",
+                                {0x1000: words}, exp)
+    for rm, tag in ((O.RNE, "rne"), (O.RTZ, "rtz")):
+        want, fl = O.fcvt_i_to_f(O.F32, (1 << 128) - 1, 128, True, rm)
+        words = _cvt_words("FCVTUIF", 0, 2, rm,
+                           li128(1, (1 << 128) - 1)) + _fp_epilogue()
+        exp = ((fl | (rm << E.FCSR_RM_LSB)) << 64) | _canon_low64(want, 32)
+        expect_halt(f"u128max-to-f32-{tag}", {0x1000: words}, exp)
+    # FP <-> FP both directions
+    for i in range(8):
+        a = _rand_fp_bits(rng, 64)
+        rm = modes[rng.randrange(5)]
+        want, fl = O.fcvt_f_to_f(O.F64, O.F32, a, rm)
+        words = _cvt_words("FCVTFF", 0, 1, rm, li64(1, a)) + _fp_epilogue()
+        exp = ((fl | (rm << E.FCSR_RM_LSB)) << 64) | _canon_low64(want, 32)
+        expect_halt(f"f64-to-f32-{i}", {0x1000: words}, exp)
+    for i in range(4):
+        a = _rand_fp_bits(rng, 32)
+        want, fl = O.fcvt_f_to_f(O.F32, O.F64, a, O.RNE)
+        words = _cvt_words("FCVTFF", 1, 0, O.RNE, li64(1, a)) + \
+            _fp_epilogue()
+        exp = (fl << 64) | _canon_low64(want, 64)
+        expect_halt(f"f32-to-f64-{i}", {0x1000: words}, exp)
+
+
 def test_determinism():
     words = {0x1000: [
         enc("LDI", dst=2, imm=200),
@@ -438,6 +664,10 @@ def main():
     test_interrupts()
     print("mulh vs bigint:")
     test_mulh_bigint()
+    print("fp vs oracle:")
+    test_fp()
+    print("fp conversions:")
+    test_fp_cvt()
     print("determinism:")
     test_determinism()
     print("cli:")

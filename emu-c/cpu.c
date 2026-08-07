@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "fp.h"
 #include "gen/sahara_isa.h"
 #include "hostmem.h"
 #include "rw/status.h"
@@ -757,12 +758,90 @@ static void exec_insn(SeCpu *c, uint64_t insn)
             break;
         }
         break;
+    case FAM_FP: {
+        unsigned w = sahara_width[FAM_FP][wf];
+        if (w == 0u) {
+            deliver(c, CAUSE_ILLEGAL, pc, 0u); /* reserved width (3.4) */
+            return;
+        }
+        unsigned rm = (unsigned)((se_lo64(c->sreg[SREG_FCSR])
+                                  >> FCSR_RM_LSB) & 7u);
+        bool is_cmp = (opcode == OPC_FCMPEQ || opcode == OPC_FCMPLT ||
+                       opcode == OPC_FCMPLE);
+        bool consults_rm = !is_cmp && opcode != OPC_FMIN &&
+                           opcode != OPC_FMAX;
+        if (consults_rm && rm > RM_RMM) {
+            /* reserved rounding mode traps at the next op that rounds,
+             * not at the MTSR that wrote it (10.3) */
+            deliver(c, CAUSE_ILLEGAL, pc, 0u);
+            return;
+        }
+        uint8_t fl = 0;
+        if (is_cmp) {
+            bool t = se_fp_cmp((uint8_t)opcode, w, se_lo64(c->r[src1]),
+                               se_lo64(c->r[src2]), &fl);
+            wr_pred(c, (unsigned)(dst & 7u), t, &o);
+        } else {
+            SeFpRes fr = se_fp_arith((uint8_t)opcode, w,
+                                     se_lo64(c->r[src1]),
+                                     se_lo64(c->r[src2]),
+                                     se_lo64(c->r[src3]), rm);
+            fl = fr.flags;
+            wr_reg(c, dst, se_canon(fr.bits, w), &o);
+        }
+        c->sreg[SREG_FCSR] |= fl; /* flags are sticky (10.3) */
+        break;
+    }
+    case FAM_FCVT: {
+        unsigned rm = (unsigned)((se_lo64(c->sreg[SREG_FCSR])
+                                  >> FCSR_RM_LSB) & 7u);
+        unsigned sfmt = (unsigned)(mod & 3u);
+        /* mod bits 7:2 must be zero; format codes 0/1/2 = 32/64/128,
+         * 128-bit FP does not exist (10.4) */
+        bool ok = (mod >> 2) == 0u;
+        bool consults_rm = false;
+        unsigned srcw = 32u << sfmt, dstw = 32u << wf;
+        switch (opcode) {
+        case OPC_FCVTFI:
+        case OPC_FCVTFIU:
+            /* FP (32/64) -> int (32/64/128); truncation, fcsr ignored */
+            ok = ok && sfmt <= 1u && wf <= 2u;
+            break;
+        case OPC_FCVTIF:
+        case OPC_FCVTUIF:
+            ok = ok && sfmt <= 2u && wf <= 1u;
+            consults_rm = true;
+            break;
+        default: /* OPC_FCVTFF: 32 <-> 64 only (SPEC-ISSUES.md) */
+            ok = ok && sfmt <= 1u && wf <= 1u && sfmt != wf;
+            consults_rm = true;
+            break;
+        }
+        if (!ok || (consults_rm && rm > RM_RMM)) {
+            deliver(c, CAUSE_ILLEGAL, pc, 0u);
+            return;
+        }
+        uint8_t fl;
+        if (opcode == OPC_FCVTFI || opcode == OPC_FCVTFIU) {
+            SeFpInt ir = se_fp_to_int(srcw, se_lo64(c->r[src1]), dstw,
+                                      opcode == OPC_FCVTFIU);
+            fl = ir.flags;
+            wr_reg(c, dst, ir.val, &o);
+        } else {
+            SeFpRes fr;
+            if (opcode == OPC_FCVTFF)
+                fr = se_fp_to_fp(srcw, se_lo64(c->r[src1]), dstw, rm);
+            else
+                fr = se_fp_from_int(c->r[src1], srcw,
+                                    opcode == OPC_FCVTUIF, dstw, rm);
+            fl = fr.flags;
+            wr_reg(c, dst, se_canon(fr.bits, dstw), &o);
+        }
+        c->sreg[SREG_FCSR] |= fl;
+        break;
+    }
     default:
-        /* FAM_FP / FAM_FCVT: TODO(build-order step 4) -- FP per ISA-SPEC
-         * section 10. Until implemented, FP opcodes trap ILLEGAL so the
-         * decoder-fuzz contract (execute or trap, never crash) holds;
-         * CONFORMANCE C4 fails until this lands. */
-        deliver(c, CAUSE_ILLEGAL, pc, 0u);
+        RW_ASSERT(0); /* every valid family is handled above */
         return;
     }
 

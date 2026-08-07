@@ -121,3 +121,66 @@ they need a spec ruling more urgently than the rest.
     what C3's "width-33 garbage" test wants). Implemented exactly that;
     noting because 3.4's canonical-form rule might tempt a stricter
     reading.
+
+21. **ISA-SPEC 10.3 / emu-c-prompt — RMM has no C99 fenv equivalent.**
+    fcsr rounding mode 4 (RMM, ties away from zero) cannot be set via
+    `fesetround` (C99 defines only RNE/RTZ/RDN/RUP), so the prompt's
+    "host float/double + fesetround + fetestexcept" recipe cannot
+    implement the full fcsr contract. Deviation: FP is implemented as
+    an integer softfloat (fp.c) — exact mantissa arithmetic in a
+    128-bit window, one software rounding per operation, all five
+    modes, flags computed exactly. No host-FP dependence at all, which
+    also strengthens the determinism guarantee. Verified against an
+    independent exact-rational oracle (test/fp_oracle.py, itself
+    checked against host-hardware IEEE doubles at RNE).
+
+22. **ISA-SPEC 10.3 — which ops are "the next FP operation that
+    rounds"?** Chose: the ops that *consult* the fcsr rounding mode
+    trap on a reserved mode (FADD FSUB FMUL FDIV FSQRT FMADD FCVTIF
+    FCVTUIF FCVTFF); FCVTFI/FCVTFIU (RTZ always, 10.4), FMIN/FMAX and
+    FCMP* execute normally. Arguable the other way for FCVTFI ("rounds
+    toward zero" is still rounding). **[divergence risk]**
+
+23. **ISA-SPEC 10.4 — FCVTFF with source format == destination
+    format.** "FP -> FP (32 <-> 64)" plus "illegal format combinations
+    trap ILLEGAL". Chose: same-format FCVTFF traps ILLEGAL (the spec
+    names only the two cross conversions); the permissive reading is a
+    canonicalization no-op. **[divergence risk]**
+
+24. **ISA-SPEC 10.3 — underflow flag definition.** 754 leaves tininess
+    detection (before vs after rounding) to the implementation and the
+    spec is silent. Chose **tininess after rounding**, UF raised only
+    when the result is also inexact (the x86-SSE convention; RISC-V
+    uses the same pair). **[divergence risk]** — a before-rounding
+    implementation differs on results that round up to the smallest
+    normal.
+
+25. **ISA-SPEC 10.2 — signaling NaN vs FCMPEQ.** "FCMPLT and FCMPLE
+    with a NaN operand raise NV, FCMPEQ does not" — read literally:
+    FCMPEQ never raises NV, *even for an sNaN operand*, diverging from
+    754's compareQuietEqual (which signals on sNaN). Implemented the
+    literal spec. Everywhere else any sNaN operand raises NV (FMIN/
+    FMAX included, per 754-2019 minimum/maximum). **[divergence risk]**
+
+26. **ISA-SPEC 10.2 — FMADD of (0, inf, c).** 754-2008/2019 makes NV
+    for fusedMultiplyAdd(0, inf, qNaN) implementation-defined. Chose:
+    0 x inf raises NV and returns the canonical qNaN regardless of c
+    (the RISC-V choice). **[divergence risk]**
+
+27. **ISA-SPEC 10.4 — NX on inexact conversions.** 10.4 mentions only
+    NV (saturation) explicitly; standard 754 also raises NX on inexact
+    F->I truncation and inexact I->F / F->F rounding. Implemented the
+    standard behavior: NX accumulates for inexact conversions, and is
+    *not* raised alongside a saturating NV. **[divergence risk]**
+
+28. **ISA-SPEC 10.3 — exact overflow raises NX.** A result exactly
+    representable at an out-of-range exponent (e.g. maxfin + maxfin at
+    RNE has no fraction bits lost) still raises OF|NX per 754's
+    overflow definition. Noting because "flags = what was lost" would
+    suggest OF alone.
+
+29. **ISA-SPEC 10.2 — zero-result sign rules.** Not spelled out in the
+    spec; implemented 754-2019: exact cancellation x + (-x) gives +0
+    except -0 under RDN; sums of like-signed zeros keep the sign;
+    FMADD applies the same rule between the product sign and the
+    addend; FMIN/FMAX order -0 < +0.
