@@ -148,6 +148,70 @@ static void invtp_clear(SeInvtpCache *ic)
     ic->count = 0;
 }
 
+/* ------------------------------------- --check-devorder store queue */
+
+/* Ordinary-store FIFO of depth N (ISA-SPEC 9.2). Pushing into a full
+ * queue retires the oldest store to memory; device accesses and atomics
+ * drain everything (rules 1-2). Loads read memory and then overlay the
+ * queued bytes oldest-to-newest -- exact store-to-load forwarding, so
+ * the mode is semantics-neutral by construction on one CPU. Trace
+ * records are emitted at execution time, never at drain, so traces are
+ * byte-identical with the mode off. */
+
+static void ordq_flush(SeCpu *c)
+{
+    for (uint64_t i = 0; i < c->ordq_count; i++) {
+        const SeOrdEnt *e =
+            &c->ordq[(c->ordq_head + i) % c->devorder_depth];
+        SeMem_write(c->mem, e->pa, e->size, e->val);
+    }
+    c->ordq_head = 0;
+    c->ordq_count = 0;
+}
+
+static void ordq_store(SeCpu *c, se_u128 pa, unsigned size, se_u128 val)
+{
+    if (c->devorder_depth == 0u) {
+        SeMem_write(c->mem, pa, size, val);
+        return;
+    }
+    if (c->ordq_count == c->devorder_depth) {
+        const SeOrdEnt *e = &c->ordq[c->ordq_head];
+        SeMem_write(c->mem, e->pa, e->size, e->val);
+        c->ordq_head = (c->ordq_head + 1u) % c->devorder_depth;
+        c->ordq_count--;
+    }
+    uint64_t idx = (c->ordq_head + c->ordq_count) % c->devorder_depth;
+    c->ordq[idx] =
+        (SeOrdEnt){ .pa = pa, .val = val, .size = (uint8_t)size };
+    c->ordq_count++;
+}
+
+/* Read that sees queued stores: fetches, page-table walks, and data
+ * loads all come through here so no consumer can observe a stale byte. */
+static se_u128 mem_read_fwd(SeCpu *c, se_u128 pa, unsigned size)
+{
+    se_u128 v = SeMem_read(c->mem, pa, size);
+    if (c->ordq_count == 0u)
+        return v;
+    uint8_t b[16];
+    for (unsigned i = 0; i < size; i++)
+        b[i] = (uint8_t)se_lo64(v >> (8u * i));
+    for (uint64_t j = 0; j < c->ordq_count; j++) {
+        const SeOrdEnt *e =
+            &c->ordq[(c->ordq_head + j) % c->devorder_depth];
+        for (unsigned i = 0; i < size; i++) {
+            se_u128 ad = pa + i;
+            if (ad >= e->pa && ad < e->pa + e->size)
+                b[i] = (uint8_t)se_lo64(e->val >> (8u * (unsigned)(ad - e->pa)));
+        }
+    }
+    v = 0;
+    for (unsigned i = 0; i < size; i++)
+        v |= (se_u128)b[i] << (8u * i);
+    return v;
+}
+
 /* --------------------------------------------------------- MMU walk */
 
 /* Local permission bit encoding for walk results. */
@@ -161,11 +225,12 @@ typedef struct WalkR {
 
 static bool ram_read(SeCpu *c, se_u128 pa, unsigned size, se_u128 *out)
 {
-    /* A page-table node inside a device window is not RAM: the walk
-     * treats it as malformed, same as a node beyond ram_len. */
-    if (se_plat_in_dev_window(pa, size) || !SeMem_in_ram(c->mem, pa, size))
+    /* A page-table node inside device space is not RAM: the walk
+     * treats it as malformed, same as a node beyond region 0. */
+    if (se_plat_classify(pa) != SE_SPACE_RAM ||
+        !SeMem_in_ram(c->mem, pa, size))
         return false;
-    *out = SeMem_read(c->mem, pa, size);
+    *out = mem_read_fwd(c, pa, size);
     return true;
 }
 
@@ -283,12 +348,13 @@ typedef struct AccR {
     se_u128 val;
 } AccR;
 
-/* Load or store of size bytes at va. The device windows of
- * PLATFORM-SPEC 1 are classified (carved out of the RAM span) but have
- * no behavior yet: device internals are the device phase, and until it
- * lands no device backs those addresses, so any access there raises
- * DEVERR -- the same "no such physical address" reading as out-of-RAM
- * (SPEC-ISSUES.md entries 3 and 32). */
+/* Load or store of size bytes at va, dispatched by physical space:
+ * RAM (through the devorder queue when armed), memory-like device
+ * buffers (NIC TX/RX, pixel window -- all sizes, DEVW/MEMR traced),
+ * register windows (64-bit only, per-device semantics in dev.c), and
+ * holes (DEVERR, boot.md BOOT-15). Alignment outranks every DEVERR
+ * class (display.md 2 rule 4, nic.md 5.2): it is checked first. A
+ * faulting access has no device effect and leaves no access record. */
 static AccR data_access(SeCpu *c, se_u128 va, unsigned size, int acc,
                         se_u128 wval)
 {
@@ -308,22 +374,57 @@ static AccR data_access(SeCpu *c, se_u128 va, unsigned size, int acc,
         a.baddr = x.baddr;
         return a;
     }
-    /* MMIO dispatch seam: device space decodes before the RAM check,
-     * because the windows lie inside the default RAM span. */
-    if (se_plat_in_dev_window(x.pa, size) ||
-        !SeMem_in_ram(c->mem, x.pa, size)) {
-        a.fault = true;
-        a.cause = CAUSE_DEVERR;
-        a.baddr = va;
+    a.fault = true; /* every non-returning path below is DEVERR */
+    a.cause = CAUSE_DEVERR;
+    a.baddr = va;
+    SePlatSpace sp = se_plat_classify(x.pa);
+    if (sp == SE_SPACE_RAM) {
+        if (!SeMem_in_ram(c->mem, x.pa, size))
+            return a; /* outside region 0 */
+        a.fault = false;
+        if (acc == SE_ACC_STORE) {
+            SeTrace_memw(c->tr, se_lo64(c->cycle), va, (uint8_t)size, wval);
+            ordq_store(c, x.pa, size, wval);
+        } else {
+            a.val = mem_read_fwd(c, x.pa, size);
+            SeTrace_memr(c->tr, se_lo64(c->cycle), va, (uint8_t)size, a.val);
+        }
         return a;
     }
-    if (acc == SE_ACC_STORE) {
-        SeTrace_memw(c->tr, se_lo64(c->cycle), va, (uint8_t)size, wval);
-        SeMem_write(c->mem, x.pa, size, wval);
-    } else {
-        a.val = SeMem_read(c->mem, x.pa, size);
-        SeTrace_memr(c->tr, se_lo64(c->cycle), va, (uint8_t)size, a.val);
+    if (sp == SE_SPACE_HOLE)
+        return a;
+    /* Any device access orders the store queue (ISA 9.2 rules 1-2). */
+    if (c->ordq_count != 0u)
+        ordq_flush(c);
+    if (sp == SE_SPACE_BUF) {
+        a.fault = false;
+        if (acc == SE_ACC_STORE) {
+            SeTrace_devw(c->tr, se_lo64(c->cycle), va, (uint8_t)size, wval);
+            SeMem_write(c->mem, x.pa, size, wval);
+        } else {
+            a.val = SeMem_read(c->mem, x.pa, size);
+            SeTrace_memr(c->tr, se_lo64(c->cycle), va, (uint8_t)size, a.val);
+        }
+        return a;
     }
+    /* Register window: 64-bit accesses only (PLATFORM-SPEC 1), and no
+     * device backs the windows in unit tests (dev == NULL). */
+    if (size != 8u || c->dev == NULL)
+        return a;
+    uint64_t off = se_lo64(x.pa & 0xFFFFu);
+    if (acc == SE_ACC_STORE) {
+        SeDevAcc r = SeDev_reg_write(c->dev, sp, off, se_lo64(wval));
+        if (r.fault)
+            return a;
+        SeTrace_devw(c->tr, se_lo64(c->cycle), va, 8u, wval);
+    } else {
+        SeDevAcc r = SeDev_reg_read(c->dev, sp, off);
+        if (r.fault)
+            return a;
+        a.val = r.val;
+        SeTrace_memr(c->tr, se_lo64(c->cycle), va, 8u, a.val);
+    }
+    a.fault = false;
     return a;
 }
 
@@ -407,8 +508,10 @@ static bool timer_pending(const SeCpu *c)
 
 static bool ext_pending(const SeCpu *c)
 {
-    (void)c; /* device seam: no device sources until the device phase */
-    return false;
+    /* Level-triggered OR of every device pending condition
+     * (PLATFORM-SPEC 3); no sources exist while the event queues stay
+     * headless-empty, so this still never fires in the suite. */
+    return c->dev != NULL && SeDev_ext_pending(c->dev);
 }
 
 /* The src2 modifier (3.3). kind 0 with nonzero amount is malformed:
@@ -593,15 +696,19 @@ static void exec_insn(SeCpu *c, uint64_t insn)
             deliver(c, xl.cause, pc, xl.baddr);
             return;
         }
-        /* Device space traps DEVERR for atomics (5.4) -- always, even
-         * once devices have behavior; out-of-RAM takes the same path
-         * (SPEC-ISSUES.md entry 3). Checked before the read so a
-         * DEVERR'd atomic leaves no MEMR footprint in the trace. */
-        if (se_plat_in_dev_window(xl.pa, size) ||
+        /* Device space traps DEVERR for atomics (5.4, nic.md E7) --
+         * registers, buffers, and holes alike; out-of-RAM takes the
+         * same path (SPEC-ISSUES.md entry 3). Checked before the read
+         * so a DEVERR'd atomic leaves no MEMR footprint in the trace. */
+        if (se_plat_classify(xl.pa) != SE_SPACE_RAM ||
             !SeMem_in_ram(c->mem, xl.pa, size)) {
             deliver(c, CAUSE_DEVERR, pc, ea);
             return;
         }
+        /* An atomic is ordered on both sides: drain the devorder queue
+         * and operate on memory directly. */
+        if (c->ordq_count != 0u)
+            ordq_flush(c);
         se_u128 old = SeMem_read(c->mem, xl.pa, size);
         SeTrace_memr(c->tr, se_lo64(c->cycle), ea, (uint8_t)size, old);
         se_u128 zold = se_zext(old, w);
@@ -906,14 +1013,15 @@ void SeCpu_step(SeCpu *c)
         deliver(c, f.cause, c->pc, f.baddr);
         return;
     }
-    /* Fetch from a device window: no cause is specified; DEVERR by the
-     * same "no such physical address" reading as out-of-RAM fetches
-     * (SPEC-ISSUES.md entries 3 and 32). */
-    if (se_plat_in_dev_window(f.pa, 8u) || !SeMem_in_ram(c->mem, f.pa, 8u)) {
+    /* Fetch from device space or a hole: DEVERR (boot.md BOOT-15; the
+     * device-window case is the conservative reading of nic.md 5.2,
+     * SPEC-ISSUES.md entries 3 and 32). */
+    if (se_plat_classify(f.pa) != SE_SPACE_RAM ||
+        !SeMem_in_ram(c->mem, f.pa, 8u)) {
         deliver(c, CAUSE_DEVERR, c->pc, c->pc);
         return;
     }
-    uint64_t insn = se_lo64(SeMem_read(c->mem, f.pa, 8u));
+    uint64_t insn = se_lo64(mem_read_fwd(c, f.pa, 8u));
     /* Predication (3.2) is evaluated before any legality check: a
      * false-predicated instruction -- even an illegal opcode -- retires
      * with no architectural effect and cannot fault (C1). */

@@ -1,36 +1,66 @@
 #ifndef SE_PLATFORM_H
 #define SE_PLATFORM_H
 
-#include <stdbool.h>
-
 #include "rw/attrs.h"
 #include "u128.h"
 
-/* Reference-platform physical map, PLATFORM-SPEC section 1. The four
- * fixed device-register windows are contiguous: display control (64 KB),
- * keyboard (64 KB), mouse (64 KB), NIC (192 KB). They sit numerically
- * inside the default 256 MB RAM span, and the spec's "everything at
- * 0x0F00_0000 and above in this map is device space" makes them a
- * carve-out: device-space classification wins over RAM backing
- * (SPEC-ISSUES.md entry 32).
- *
- * The display pixel buffer (PA 0x1000_0000, size per device table) is
- * NOT classified here: no display device exists yet, its window has no
- * table-defined size, and under the default RAM length its base is
- * out-of-RAM, which already takes the DEVERR path. Entry 32 records the
- * --ram > 256 MB gap this leaves until the device phase. */
+/* Reference-platform physical map, PLATFORM-SPEC section 1 as resolved
+ * by devspec/boot.md: RAM region 0 is [0, 0x0F00_0000) -- 240 MB, ending
+ * exactly where the device windows begin ("256 MB" is the address budget
+ * below the pixel buffer, devspec SPEC-ISSUES 1); the four register
+ * windows and the two NIC buffers are contiguous above it;
+ * [0x0F06_0000, 0x1000_0000) is declared in no region and traps DEVERR
+ * (boot.md BOOT-15), as does everything past the pixel buffer window.
+ * SPEC-ISSUES.md entry 32 records the adoption history. */
 
-#define SE_PLAT_DEV_BASE ((se_u128)0x0F000000u)
+#define SE_PLAT_RAM_MAX ((se_u128)0x0F000000u) /* region 0 length cap */
+#define SE_PLAT_DISPLAY_BASE ((se_u128)0x0F000000u)
+#define SE_PLAT_KBD_BASE ((se_u128)0x0F010000u)
+#define SE_PLAT_MOUSE_BASE ((se_u128)0x0F020000u)
+#define SE_PLAT_NIC_BASE ((se_u128)0x0F030000u)
+#define SE_PLAT_NIC_TXBUF ((se_u128)0x0F040000u)
+#define SE_PLAT_NIC_RXBUF ((se_u128)0x0F050000u)
 #define SE_PLAT_DEV_END ((se_u128)0x0F060000u)
+#define SE_PLAT_PIXBUF_BASE ((se_u128)0x10000000u)
+#define SE_PLAT_PIXBUF_SIZE ((se_u128)0x01000000u) /* 16 MB, display.md 1 */
 
-/* Does [pa, pa+size) overlap the device-register windows? Physical
- * addresses only (classification happens after translation). A pa near
- * the top of the address space wraps pa+size to a small value and
- * returns false; such an access then fails the caller's RAM check. */
-RW_WARN_UNUSED static inline bool se_plat_in_dev_window(se_u128 pa,
-                                                        unsigned size)
+/* Reference MAC 52:54:00:12:34:56 packed per devspec/boot.md 3.6 (wire
+ * octets little-endian into bits 47:0). The CLI contract has no MAC
+ * flag, so this is a constant of the platform. */
+#define SE_PLAT_MAC 0x0000563412005452ull
+
+/* What backs a physical address (classification happens after
+ * translation). Naturally-aligned accesses of at most 16 bytes cannot
+ * cross the 64 KB window boundaries, so classifying the base address
+ * classifies the whole access; callers check alignment first. */
+typedef enum SePlatSpace {
+    SE_SPACE_RAM = 0, /* below the windows: RAM if inside region 0 */
+    SE_SPACE_DISPLAY, /* display control registers */
+    SE_SPACE_KBD,     /* keyboard registers */
+    SE_SPACE_MOUSE,   /* mouse registers */
+    SE_SPACE_NIC,     /* NIC registers */
+    SE_SPACE_BUF,     /* memory-like device space: NIC TX/RX, pixels */
+    SE_SPACE_HOLE,    /* in no region and no window: always DEVERR */
+} SePlatSpace;
+
+RW_WARN_UNUSED static inline SePlatSpace se_plat_classify(se_u128 pa)
 {
-    return pa < SE_PLAT_DEV_END && pa + size > SE_PLAT_DEV_BASE;
+    if (pa < SE_PLAT_DISPLAY_BASE)
+        return SE_SPACE_RAM;
+    if (pa < SE_PLAT_KBD_BASE)
+        return SE_SPACE_DISPLAY;
+    if (pa < SE_PLAT_MOUSE_BASE)
+        return SE_SPACE_KBD;
+    if (pa < SE_PLAT_NIC_BASE)
+        return SE_SPACE_MOUSE;
+    if (pa < SE_PLAT_NIC_TXBUF)
+        return SE_SPACE_NIC;
+    if (pa < SE_PLAT_DEV_END)
+        return SE_SPACE_BUF;
+    if (pa >= SE_PLAT_PIXBUF_BASE &&
+        pa < SE_PLAT_PIXBUF_BASE + SE_PLAT_PIXBUF_SIZE)
+        return SE_SPACE_BUF;
+    return SE_SPACE_HOLE;
 }
 
 #endif /* SE_PLATFORM_H */

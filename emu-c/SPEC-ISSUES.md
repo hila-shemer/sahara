@@ -296,6 +296,14 @@ they need a spec ruling more urgently than the rest.
     below 0x0F00_0000 and above 0x0F06_0000, so it cannot distinguish
     hole-DEVERR from RAM there — the flip is invisible to it except
     through the table bytes.*
+    *ADOPTED (iteration 10, with the C7 device tranche): platform.h now
+    classifies the full boot.md map — RAM region 0 capped at
+    0x0F00_0000, four register windows with dev.c behavior, NIC TX/RX
+    and the pixel window as memory-like device space, holes at
+    [0x0F06_0000, 0x1000_0000) and past the pixel window trapping
+    DEVERR (BOOT-15) — and main.c writes the byte-exact boot.md V1
+    four-device table (test_dev.c asserts all 328 bytes + window
+    zeros). Sub-reading (b) (walk node in device space → PF) kept.*
 
 33. **devspec/trace.md 2.3.4 vs root SPEC-ISSUES 17 — does a triple
     fault write a diagnostic TRAP record?** Root entry 17 (toolchain,
@@ -328,3 +336,38 @@ they need a spec ruling more urgently than the rest.
     the fixed lengths 50/49 and TV-2's packed layout) are root
     SPEC-ISSUES 28; the packed layout is what this emulator writes and
     what --replay's strict reader checks against.*
+
+34. **PLATFORM-SPEC 1 / boot.md 5 — what does `--ram` mean now that
+    "256 MB" is an address budget, and which values are legal?** boot.md
+    reads the default 256 MB as the budget below the pixel buffer, so
+    region 0 = [0, 0x0F00_0000) (240 MB); it also requires region
+    base/len to be 64 KB-granular (3.4 rule 1) and says the emulator
+    "recomputes the RAM region record(s)" for other sizes — plural,
+    unspecified placement for the overflow. Chose: `--ram` ≤ 240 MB maps
+    to a single region of exactly that length; 240 MB < `--ram` ≤ 256 MB
+    is capped at 240 MB (the budget reading); `--ram` > 256 MB dies
+    loudly (a second region needs a placement rule — above the pixel
+    window? gap size? — that no spec pins); a `--ram` that is not a
+    64 KB multiple dies loudly (boot.md V7 requires the generator to
+    refuse, and rounding silently would violate byte-exact table
+    determinism, BOOT-16). **[divergence risk]** the Python
+    implementation may round, refuse the 240–256 MB band, or invent a
+    second-region placement; visible in table bytes and exit paths only
+    for non-default `--ram`.
+
+35. **nic.md 6 vs headless live mode — the translator is not yet
+    implemented; live TX frames are dropped with no reply.** nic.md's
+    translator decision tree is normative (ARP probes get replies,
+    DHCP answers, etc.), but replay mode sources every RX frame from
+    the trace alone (PLATFORM-SPEC 7 determinism rule; nic.md replay
+    isolation), so a headless replay run never consults the translator
+    and this emulator is conformant there. In live headless mode
+    TX_DOORBELL validates E5, drains the store queue, traces DEVW, and
+    drops the frame — no reply is synthesized, diverging from the
+    decision tree for any frame it would answer. c7_dev only transmits
+    an all-zero frame the tree drops anyway. The translator belongs to
+    the NIC-bridging GUI phase (emu-c-prompt.md); until it lands, a
+    live-mode guest doing real networking sees a dead wire, loudly
+    documented here rather than half-faked. Not a divergence risk for
+    the suite: no shared test can reach live-mode RX (the harness
+    injects no EVENTs and the tree's reply paths need real frames).

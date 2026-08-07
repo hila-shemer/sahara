@@ -78,9 +78,19 @@ static uint8_t *insert(SeMem *m, uint64_t page_no)
     return blk;
 }
 
+/* Accesses must stay inside one 64 KB page (mem.h contract); pa may be
+ * RAM or a memory-like device window, so the bound is 2^64, not
+ * ram_len -- space classification is the caller's job (platform.h). */
+static bool access_ok(se_u128 pa, unsigned size)
+{
+    if (se_hi64(pa) != 0u || size == 0u || size > 16u)
+        return false;
+    return (se_lo64(pa) & (SE_PAGE_BYTES - 1u)) + size <= SE_PAGE_BYTES;
+}
+
 se_u128 SeMem_read(SeMem *m, se_u128 pa, unsigned size)
 {
-    RW_ASSERT(SeMem_in_ram(m, pa, size));
+    RW_ASSERT(access_ok(pa, size));
     uint64_t addr = se_lo64(pa);
     const uint8_t *blk = lookup(m, addr >> SE_PAGE_SHIFT);
     if (!blk)
@@ -94,7 +104,7 @@ se_u128 SeMem_read(SeMem *m, se_u128 pa, unsigned size)
 
 void SeMem_write(SeMem *m, se_u128 pa, unsigned size, se_u128 val)
 {
-    RW_ASSERT(SeMem_in_ram(m, pa, size));
+    RW_ASSERT(access_ok(pa, size));
     uint64_t addr = se_lo64(pa);
     uint64_t page_no = addr >> SE_PAGE_SHIFT;
     uint8_t *blk = lookup(m, page_no);

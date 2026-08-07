@@ -254,26 +254,34 @@ def cause_check_handler(want_cause, ok=111, bad=222):
 
 
 def test_devspace():
-    """PLATFORM-SPEC 1 device windows carve device space out of the RAM
-    span (emu-c/platform.h, SPEC-ISSUES 32). No device behavior exists
-    yet, so every access -- not just atomics -- traps DEVERR; the
-    boundary addresses on both sides stay ordinary RAM. The shared
-    suite (c3_irq_dev) owns the atomic cases."""
+    """The devspec/boot.md physical map (emu-c/platform.h, SPEC-ISSUES
+    32 resolution): RAM region 0 ends at 0x0F00_0000; the register
+    windows have per-device semantics (dev.c; the shared c7_dev image
+    owns the full matrix -- these are the harness-level boundary
+    probes); the NIC buffers and the pixel window are memory-like
+    device space; [0x0F06_0000, 0x1000_0000) and everything past the
+    pixel window are holes trapping DEVERR (BOOT-15)."""
     KBD = 0x0F010000       # keyboard window base
     BELOW = 0x0EFFFFF8     # last 8 RAM bytes below the windows
-    ABOVE = 0x0F060000     # first RAM byte after the NIC window
-    TOP = 0x0F05FFF8       # last 8 bytes inside the NIC window
-    expect_halt("dev-load-deverr",
+    HOLE = 0x0F060000      # first hole byte after the NIC window
+    RXTOP = 0x0F05FFF8     # last 8 bytes of the NIC RX buffer
+    PIXBUF = 0x10000000    # pixel window base
+    PIXEND = 0x11000000    # first byte past the 16 MB pixel window
+    expect_halt("dev-unlisted-offset-deverr",
                 handler_img(li64(1, KBD) +
-                            [enc("LDS", dst=2, src1=1, width=3)],
+                            [enc("LDS", dst=2, src1=1, width=3, imm=16)],
                             cause_check_handler(E.CAUSES["DEVERR"])), 111)
     expect_halt("dev-store-deverr",
                 handler_img(li64(1, KBD) +
                             [enc("LDI", dst=2, imm=7),
                              enc("ST", src1=1, src3=2, width=3)],
                             cause_check_handler(E.CAUSES["DEVERR"])), 111)
-    expect_halt("dev-window-top-deverr",
-                handler_img(li64(1, TOP) +
+    expect_halt("dev-hole-deverr",
+                handler_img(li64(1, HOLE) +
+                            [enc("LDS", dst=2, src1=1, width=3)],
+                            cause_check_handler(E.CAUSES["DEVERR"])), 111)
+    expect_halt("dev-pixbuf-end-hole-deverr",
+                handler_img(li64(1, PIXEND) +
                             [enc("LDS", dst=2, src1=1, width=3)],
                             cause_check_handler(E.CAUSES["DEVERR"])), 111)
     expect_halt("dev-fetch-deverr",
@@ -286,12 +294,28 @@ def test_devspace():
                   enc("ST", src1=1, src3=2, width=3),
                   enc("LDS", dst=0, src1=1, width=3),
                   HALT]}, 7)
-    expect_halt("dev-above-window-ram",
-                {0x1000: li64(1, ABOVE) +
+    expect_halt("dev-rxbuf-memory-like",
+                {0x1000: li64(1, RXTOP) +
                  [enc("LDI", dst=2, imm=9),
                   enc("ST", src1=1, src3=2, width=3),
                   enc("LDS", dst=0, src1=1, width=3),
                   HALT]}, 9)
+    expect_halt("dev-pixbuf-zero-then-store",
+                {0x1000: li64(1, PIXBUF) +
+                 [enc("LDZ", dst=3, src1=1, width=3),   # reads 0 (D-08)
+                  enc("LDI", dst=2, imm=0x5A),
+                  enc("ST", src1=1, src3=2, width=0),   # st.8
+                  enc("LDZ", dst=0, src1=1, width=0),
+                  enc("ADD", dst=0, src1=0, src2=3, width=W128),
+                  HALT]}, 0x5A)
+    expect_halt("dev-kbd-sentinel",
+                {0x1000: li64(1, KBD) +
+                 [enc("LDS", dst=2, src1=1, width=3),   # sext all-ones
+                  enc("CMPEQ", dst=1, src1=2, width=W128,
+                      imm=(-1) & IMM_MASK, iform=True),
+                  enc("LDI", dst=0, imm=44, pred=(1 << 1)),
+                  enc("LDI", dst=0, imm=55, pred=(1 << 1) | 1),
+                  HALT]}, 44)
 
 
 def test_traps():

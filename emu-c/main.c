@@ -16,10 +16,12 @@
 #include <string.h>
 
 #include "cpu.h"
+#include "dev.h"
 #include "gen/spec_version.h"
 #include "hostmem.h"
 #include "image.h"
 #include "mem.h"
+#include "platform.h"
 #include "trace.h"
 #include "u128.h"
 
@@ -28,9 +30,10 @@
  * for it the way encoding.py carries SPEC_VERSION). */
 #define PLATFORM_SPEC_VERSION "1.0-draft"
 
+/* --ram is the address budget below the pixel buffer (devspec/boot.md
+ * 5 / devspec SPEC-ISSUES 1): the default 256 MB yields RAM region 0 =
+ * [0, 0x0F00_0000) -- 240 MB -- ending where the device windows begin. */
 #define DEFAULT_RAM (256ull * 1024u * 1024u)
-#define DEVTAB_PA 0x800ull
-#define DEVTAB_MAGIC 0x5450415241484153ull /* "SAHARAPT" little-endian */
 
 static void die(const char *msg)
 {
@@ -47,19 +50,6 @@ static uint64_t parse_u64(const char *s, const char *what)
         exit(1);
     }
     return (uint64_t)v;
-}
-
-/* The emulator writes the device table before reset (PLATFORM-SPEC 2).
- * Headless core phase: one RAM region, no devices yet. */
-static void write_device_table(SeMem *m, uint64_t ram_len)
-{
-    SeMem_write(m, DEVTAB_PA + 0u, 8u, DEVTAB_MAGIC);
-    SeMem_write(m, DEVTAB_PA + 8u, 8u, 1u);  /* version */
-    SeMem_write(m, DEVTAB_PA + 16u, 8u, 1u); /* cpu_count */
-    SeMem_write(m, DEVTAB_PA + 24u, 8u, 1u); /* ram_region_count */
-    SeMem_write(m, DEVTAB_PA + 32u, 8u, 0u); /* device_count */
-    SeMem_write(m, DEVTAB_PA + 40u, 16u, 0u);              /* region base */
-    SeMem_write(m, DEVTAB_PA + 56u, 16u, (se_u128)ram_len); /* region len */
 }
 
 /* Find the LF-terminated value of key in META text, or NULL. */
@@ -326,10 +316,18 @@ int main(int argc, char **argv)
             "[--check-invtp] [--check-devorder N]");
     if (ram < 0x20000u)
         die("--ram too small for device table + reset vector");
+    if (ram % 0x10000u != 0u)
+        die("--ram must be a multiple of 64 KB (devspec/boot.md 3.4)");
+    if (ram > 0x10000000ull)
+        die("--ram above 256 MB needs a second RAM region above the "
+            "pixel buffer; not implemented (SPEC-ISSUES 32)");
+    uint64_t region_len = ram > se_lo64(SE_PLAT_RAM_MAX)
+                              ? se_lo64(SE_PLAT_RAM_MAX)
+                              : ram;
 
     SeMem mem;
-    SeMem_init(&mem, ram);
-    write_device_table(&mem, ram);
+    SeMem_init(&mem, region_len);
+    se_plat_write_devtable(&mem, region_len);
 
     se_u128 entry = 0;
     uint8_t sha[32];
@@ -351,10 +349,19 @@ int main(int argc, char **argv)
         meta_record(&tr, image, sha_hex, level, replay_path != NULL);
     }
 
+    if (devorder > (1ull << 20))
+        die("--check-devorder depth over 2^20 (bound the queue alloc)");
+
+    SeDev dev;
+    SeDev_reset(&dev);
+
     SeCpu *cpu = se_host_alloc(sizeof *cpu); /* one startup allocation */
     SeCpu_reset(cpu, &mem, &tr);
+    cpu->dev = &dev;
     cpu->check_invtp = check_invtp;
     cpu->devorder_depth = devorder;
+    if (devorder != 0u)
+        cpu->ordq = se_host_alloc((size_t)devorder * sizeof *cpu->ordq);
 
     bool out_of_cycles = false;
     while (cpu->state == SE_RUN_RUNNING) {

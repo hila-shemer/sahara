@@ -5,6 +5,7 @@ rw_c_library(
     name = "core",
     srcs = [
         "cpu.c",
+        "dev.c",
         "fp.c",
         "hostmem.c",
         "image.c",
@@ -14,6 +15,7 @@ rw_c_library(
     ],
     hdrs = [
         "cpu.h",
+        "dev.h",
         "fp.h",
         "hostmem.h",
         "image.h",
@@ -43,6 +45,13 @@ rw_c_test(
 rw_c_test(
     name = "test_fp",
     srcs = ["test_fp.c"],
+    tier = "short",
+    deps = [":core"],
+)
+
+rw_c_test(
+    name = "test_dev",
+    srcs = ["test_dev.c"],
     tier = "short",
     deps = [":core"],
 )

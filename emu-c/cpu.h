@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "dev.h"
 #include "mem.h"
 #include "trace.h"
 #include "u128.h"
@@ -32,6 +33,13 @@ typedef struct SeInvtpCache {
     SeInvtpEnt *ents;
 } SeInvtpCache;
 
+/* One pending ordinary store in the --check-devorder queue. */
+typedef struct SeOrdEnt {
+    se_u128 pa;
+    se_u128 val;
+    uint8_t size;
+} SeOrdEnt;
+
 typedef struct SeCpu {
     se_u128 r[32];    /* r31 kept zero */
     uint8_t p[8];     /* 0/1; p[0] kept 1 */
@@ -40,10 +48,17 @@ typedef struct SeCpu {
     se_u128 cycle;
     SeMem *mem;
     SeTrace *tr;
+    SeDev *dev; /* NULL in unit tests: register windows then DEVERR */
     bool check_invtp;
     SeInvtpCache invtp;
-    uint64_t devorder_depth; /* --check-devorder N; mechanics arrive with
-                                the device phase (CONFORMANCE C7) */
+    /* --check-devorder N (ISA-SPEC 9.2, CONFORMANCE C7): ordinary RAM
+     * stores sit in a FIFO of depth N; loads forward from it byte-wise;
+     * device accesses and atomics drain it. Semantics-neutral on this
+     * single-CPU platform (SPEC-ISSUES 30 toolchain-side) -- the mode's
+     * testable property, which c7_dev_ordq asserts. */
+    uint64_t devorder_depth; /* 0 = mode off */
+    SeOrdEnt *ordq;          /* ring of devorder_depth entries */
+    uint64_t ordq_head, ordq_count;
     SeRun state;
     char checkfail[160];
     const char *halt_note; /* stderr diagnostic for non-HALT halts */
