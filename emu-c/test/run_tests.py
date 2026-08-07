@@ -764,6 +764,138 @@ def test_trace_golden():
               f"rc={p.returncode} tl_afters={[tp[48] for tp in traps]}")
 
 
+def _records(trc):
+    """Walk trace framing: yields (offset, type, payload_len)."""
+    off = 0
+    while off + 8 <= len(trc):
+        plen = int.from_bytes(trc[off + 4:off + 8], "little")
+        yield off, trc[off], plen
+        off += 8 + plen
+    assert off == len(trc), "trace does not end on a record boundary"
+
+
+def _filter_level(trc, types):
+    """Post-META bytes of trc keeping only record types in `types`."""
+    out = b""
+    for off, typ, plen in _records(trc):
+        if typ != 7 and typ in types:
+            out += trc[off:off + 8 + plen]
+    return out
+
+
+def test_replay_reader():
+    """--replay is a strict trace reader: devspec/trace.md 2.4 (torn
+    tail tolerated with a diagnostic, malformation fatal) and 5.3
+    (level nesting) on top of the 5.1 META validation tested above."""
+    with tempfile.TemporaryDirectory() as d:
+        dp = pathlib.Path(d)
+        (dp / "example.img").write_bytes(TV1_IMG)
+
+        def replay(trc_bytes, name):
+            (dp / name).write_bytes(trc_bytes)
+            return subprocess.run(
+                [str(EMU), "example.img", "--replay", name],
+                capture_output=True, timeout=60, cwd=d)
+
+        recs = list(_records(TV2_TRC))
+        last_off, _, last_plen = recs[-1]
+        halt = b"HALT r0=%032x\n" % 0
+
+        # Torn tail mid-payload: prefix runs, diagnostic names the
+        # decimal offset of the incomplete record and bytes discarded.
+        torn = TV2_TRC[:last_off + 8 + last_plen - 5]
+        discarded = 8 + last_plen - 5
+        p = replay(torn, "torn-payload.trc")
+        check("torn-tail-mid-payload",
+              p.returncode == 0 and p.stdout == halt
+              and str(last_off).encode() in p.stderr
+              and str(discarded).encode() in p.stderr,
+              f"rc={p.returncode} err={p.stderr!r}")
+        # Torn tail mid-header (3 of 8 header bytes present).
+        p = replay(TV2_TRC[:last_off + 3], "torn-header.trc")
+        check("torn-tail-mid-header",
+              p.returncode == 0 and p.stdout == halt
+              and str(last_off).encode() in p.stderr
+              and b"3 bytes discarded" in p.stderr,
+              f"rc={p.returncode} err={p.stderr!r}")
+        # Truncation exactly at a record boundary: a valid prefix, no
+        # diagnostic.
+        p = replay(TV2_TRC[:last_off], "prefix.trc")
+        check("clean-prefix-no-diagnostic",
+              p.returncode == 0 and p.stdout == halt and p.stderr == b"",
+              f"rc={p.returncode} err={p.stderr!r}")
+
+        # Malformation classes (trace.md 2.4): each rejected fatally,
+        # the run never starts (no HALT on stdout).
+        r1_off, r1_type, r1_plen = recs[1]
+        assert r1_type == 1, "TV-2 record 1 expected EXEC"
+
+        def expect_reject(name, trc_bytes, why):
+            p = replay(trc_bytes, name + ".trc")
+            check(name,
+                  p.returncode not in (0, 2, 3) and b"HALT" not in p.stdout
+                  and why in p.stderr,
+                  f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}")
+
+        bad = bytearray(TV2_TRC)
+        bad[r1_off + 1] = 1
+        expect_reject("malformed-reserved-byte", bytes(bad), b"reserved")
+        bad = bytearray(TV2_TRC)
+        bad[r1_off] = 8
+        expect_reject("malformed-bad-type", bytes(bad), b"type")
+        bad = bytearray(TV2_TRC)
+        bad[r1_off + 4] = 49  # EXEC fixed payload length is 50
+        expect_reject("malformed-wrong-fixed-len", bytes(bad),
+                      b"payload length")
+        meta_len = 8 + recs[0][2]
+        expect_reject("malformed-duplicate-meta",
+                      TV2_TRC + TV2_TRC[:meta_len], b"duplicate META")
+        bad = bytearray(TV2_TRC)
+        bad[r1_off + 8 + 48] |= 0x80  # EXEC flags bits 7:3 (payload @48)
+        expect_reject("malformed-exec-flags-high", bytes(bad), b"flags")
+        # Decreasing cycle: zero the last record's cycle stamp; some
+        # earlier record must carry a larger one for the test to bite.
+        cycles = [int.from_bytes(TV2_TRC[o + 8:o + 16], "little")
+                  for o, t, _ in recs if t != 7]
+        assert max(cycles[:-1]) > 0, "TV-2 cycles all zero?"
+        bad = bytearray(TV2_TRC)
+        bad[last_off + 8:last_off + 16] = bytes(8)
+        expect_reject("malformed-cycle-decrease", bytes(bad), b"decreases")
+        # EVENT with inner payload_len != payload length - 20.
+        maxc = max(cycles).to_bytes(8, "little")
+        ev = bytes([5, 0, 0, 0]) + (24).to_bytes(4, "little") + maxc \
+            + bytes(8) + (99).to_bytes(4, "little") + bytes(4)
+        expect_reject("malformed-event-innerlen", TV2_TRC + ev,
+                      b"payload_len")
+        # A well-formed EVENT is framing-valid but still refused: the
+        # device phase that would consume it does not exist yet.
+        ev = bytes([5, 0, 0, 0]) + (24).to_bytes(4, "little") + maxc \
+            + bytes(8) + (4).to_bytes(4, "little") + bytes(4)
+        expect_reject("wellformed-event-refused", TV2_TRC + ev,
+                      b"device phase")
+
+        # Level nesting (trace.md 5.3): filtering the level-2 trace to
+        # level-1 record types must equal the level-1 trace post-META,
+        # and likewise level 1 -> level 0.
+        by_level = {}
+        for level in ("0", "1", "2"):
+            p = subprocess.run(
+                [str(EMU), "example.img", "--trace", f"n{level}.trc",
+                 "--trace-level", level],
+                capture_output=True, timeout=60, cwd=d)
+            check(f"nesting-run-l{level}", p.returncode == 0,
+                  f"rc={p.returncode} err={p.stderr!r}")
+            by_level[level] = (dp / f"n{level}.trc").read_bytes()
+        l1_types = {1, 4, 5, 2, 6}   # EXEC TRAP EVENT + MEMW DEVW
+        l0_types = {1, 4, 5}
+        check("level-nesting-l2-to-l1",
+              _filter_level(by_level["2"], l1_types)
+              == by_level["1"][_post_meta(by_level["1"]):])
+        check("level-nesting-l1-to-l0",
+              _filter_level(by_level["1"], l0_types)
+              == by_level["0"][_post_meta(by_level["0"]):])
+
+
 def test_fuzz():
     rng = random.Random(1234)
     bad = 0
@@ -819,6 +951,8 @@ def main():
     test_determinism()
     print("trace golden (devspec/trace.md TV-1/TV-2):")
     test_trace_golden()
+    print("replay reader (devspec/trace.md 2.4/5.3):")
+    test_replay_reader()
     print("cli:")
     test_cli_contract()
     print("fuzz:")

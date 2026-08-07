@@ -96,46 +96,167 @@ static void meta_expect(const char *text, const char *key, const char *want)
     }
 }
 
-/* Replay input validation (devspec/trace.md 5.1): record 0 must be a
- * META record whose trace/encoding/image_sha256 keys match this run;
- * any mismatch is fatal and the run must not start. EVENT records are
- * still rejected outright: the device phase that would consume them
- * does not exist yet (they would silently vanish otherwise -- loud
- * failure instead). */
+/* A malformed replay input (devspec/trace.md 2.4 class 2) is a fatal
+ * error: readers must reject the file. Offset is the record's start. */
+static void malformed(uint64_t off, const char *why)
+{
+    fprintf(stderr,
+            "sahara-emu: --replay malformed record at offset %" PRIu64
+            ": %s\n",
+            off, why);
+    exit(1);
+}
+
+/* META line grammar per devspec/trace.md 2.3.7: lines of key=value, LF
+ * terminated, keys [a-z0-9_]+, values NUL/LF-free; the seven v1 keys
+ * are all mandatory (unknown extras are ignored -- forward compat). */
+static void meta_check_grammar(const char *text, uint64_t off)
+{
+    for (const char *p = text; *p != '\0';) {
+        const char *eol = strchr(p, '\n');
+        if (!eol)
+            malformed(off, "META line without LF terminator");
+        const char *eq = memchr(p, '=', (size_t)(eol - p));
+        if (!eq || eq == p)
+            malformed(off, "META line is not key=value");
+        for (const char *k = p; k < eq; k++)
+            if (!((*k >= 'a' && *k <= 'z') || (*k >= '0' && *k <= '9') ||
+                  *k == '_'))
+                malformed(off, "META key has chars outside [a-z0-9_]");
+        p = eol + 1;
+    }
+    static const char *const mandatory[] = { "trace",  "encoding",
+                                             "level",  "mode",
+                                             "image",  "image_sha256",
+                                             "platform" };
+    for (unsigned i = 0; i < sizeof mandatory / sizeof mandatory[0]; i++)
+        if (!meta_find(text, mandatory[i]))
+            malformed(off, "META missing a mandatory v1 key");
+}
+
+/* Replay input validation: a strict trace read per devspec/trace.md
+ * 2.4 + 5.1. Record 0 must be a META record whose trace/encoding/
+ * image_sha256 keys match this run; any malformed record (bad reserved
+ * bytes, type, fixed payload length, EVENT inner length, EXEC flag
+ * bits 7:3, duplicate META, decreasing cycle) is fatal; a torn tail
+ * (killed-emulator artifact) keeps the complete-record prefix and gets
+ * a stderr diagnostic with the offset and bytes discarded. EVENT
+ * records are still rejected outright: the device phase that would
+ * consume them does not exist yet (they would silently vanish
+ * otherwise -- loud failure instead). */
 static void validate_replay(const char *path, const char *sha_hex)
 {
+    /* Fixed payload lengths per trace.md 2.1; 0 = variable. */
+    static const uint32_t fixed_plen[8] = { 0, 50u, 41u, 41u, 49u, 0, 41u,
+                                            0 };
     FILE *f = fopen(path, "rb");
     if (!f)
         die("cannot open --replay file");
     uint8_t hdr[8];
+    uint64_t off = 0, records = 0, prev_cycle = 0;
     bool saw_meta = false;
-    while (fread(hdr, 1u, 8u, f) == 8u) {
+    for (;;) {
+        size_t got = fread(hdr, 1u, 8u, f);
+        if (got == 0u)
+            break; /* clean end at a record boundary */
+        if (got < 8u) {
+            fprintf(stderr,
+                    "sahara-emu: --replay torn tail: incomplete record at "
+                    "offset %" PRIu64 ", %zu bytes discarded\n",
+                    off, got);
+            break;
+        }
         uint32_t plen = 0;
         for (unsigned i = 0; i < 4u; i++)
             plen |= (uint32_t)hdr[4u + i] << (8u * i);
-        if (!saw_meta) {
+        uint8_t type = hdr[0];
+        if (hdr[1] != 0u || hdr[2] != 0u || hdr[3] != 0u)
+            malformed(off, "nonzero reserved header bytes");
+        if (type < 1u || type > 7u)
+            malformed(off, "record type outside 1-7");
+        if (records == 0u && type != 7u)
+            malformed(off, "record 0 is not META");
+        if (type == 7u && records != 0u)
+            malformed(off, "duplicate META record");
+        if (fixed_plen[type] != 0u && plen != fixed_plen[type])
+            malformed(off, "wrong payload length for fixed-size type");
+        if (type == 5u && plen < 20u)
+            malformed(off, "EVENT payload shorter than its fixed part");
+        if (type == 7u) {
             /* 64 KB cap: the v1 catalog is seven short lines; anything
              * bigger is malformed long before it is that large. */
-            if (hdr[0] != 7u || plen == 0u || plen > 65536u)
-                die("--replay file does not start with a META record");
+            if (plen == 0u || plen > 65536u)
+                malformed(off, "META payload empty or over 64 KB");
             char *meta = se_host_alloc((size_t)plen + 1u);
-            if (fread(meta, 1u, plen, f) != plen)
-                die("truncated --replay META record");
+            size_t mgot = fread(meta, 1u, plen, f);
+            if (mgot != plen) {
+                fprintf(stderr,
+                        "sahara-emu: --replay torn tail: incomplete record "
+                        "at offset %" PRIu64 ", %zu bytes discarded\n",
+                        off, 8u + mgot);
+                se_host_free(meta, (size_t)plen + 1u);
+                break;
+            }
             meta[plen] = '\0';
             if (memchr(meta, '\0', plen) != NULL || meta[plen - 1u] != '\n')
-                die("malformed --replay META record");
+                malformed(off, "META payload has NUL or no final LF");
+            meta_check_grammar(meta, off);
             meta_expect(meta, "trace", "1");
             meta_expect(meta, "encoding", SE_ENCODING_SPEC_VERSION);
             meta_expect(meta, "image_sha256", sha_hex);
             se_host_free(meta, (size_t)plen + 1u);
             saw_meta = true;
+            records++;
+            off += 8u + plen;
             continue;
         }
-        if (hdr[0] == 5u) /* EVENT */
+        /* Types 1-6: stream the payload (fseek cannot detect a torn
+         * tail), keeping the leading bytes every field check needs --
+         * cycle at 0, EVENT inner length at 16, EXEC flags at 48. */
+        uint8_t head[52] = { 0 };
+        uint8_t chunk[4096];
+        size_t total = 0;
+        while (total < plen) {
+            size_t want = plen - total;
+            if (want > sizeof chunk)
+                want = sizeof chunk;
+            size_t r = fread(chunk, 1u, want, f);
+            if (r > 0u && total < sizeof head) {
+                size_t keep = sizeof head - total;
+                if (keep > r)
+                    keep = r;
+                memcpy(head + total, chunk, keep);
+            }
+            total += r;
+            if (r < want)
+                break;
+        }
+        if (total < plen) {
+            fprintf(stderr,
+                    "sahara-emu: --replay torn tail: incomplete record at "
+                    "offset %" PRIu64 ", %zu bytes discarded\n",
+                    off, 8u + total);
+            break;
+        }
+        uint64_t cycle = 0;
+        for (unsigned i = 0; i < 8u; i++)
+            cycle |= (uint64_t)head[i] << (8u * i);
+        if (records > 1u && cycle < prev_cycle)
+            malformed(off, "record cycle decreases");
+        prev_cycle = cycle;
+        if (type == 1u && (head[48] & 0xF8u) != 0u)
+            malformed(off, "nonzero EXEC flags bits 7:3");
+        if (type == 5u) {
+            uint32_t inner = 0;
+            for (unsigned i = 0; i < 4u; i++)
+                inner |= (uint32_t)head[16u + i] << (8u * i);
+            if (inner != plen - 20u)
+                malformed(off, "EVENT inner payload_len mismatch");
             die("--replay contains EVENT records; device phase not "
                 "implemented yet");
-        if (fseek(f, (long)plen, SEEK_CUR) != 0)
-            die("truncated --replay file");
+        }
+        records++;
+        off += 8u + plen;
     }
     if (!saw_meta)
         die("--replay file has no META record");
