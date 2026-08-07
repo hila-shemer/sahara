@@ -76,7 +76,24 @@ Both emulator implementations must match the readings marked
     at HALT, failure HALTs with r0 = the failing test ID. Both below the
     device table so no image segment can collide.
 
-12. **ISA-SPEC 3.3 mod field with I=1** — 3.1 says `mod` is ignored when
+12. **ISA-SPEC 7.2 / emu-common CLI contract, halts that are not the
+    HALT instruction** — the contract defines stdout for "On HALT", but
+    the machine also halts on triple fault (ISA-SPEC 7.2 step 1) and on
+    WFI deadlock (7.6). Whether those print the `HALT r0=...` line and
+    exit 0 is unspecified. Chosen reading: **yes — any architectural
+    halt prints the same line (current r0) and exits 0**; C1's
+    triple-fault test will set r0 to a marker and rely on it.
+    **(emulators must match)**
+
+13. **ISA-SPEC 10.3, UF (underflow) tininess detection** — IEEE 754
+    allows detecting tininess before or after rounding and the spec does
+    not choose; implementations on host FP (x86: after rounding) and
+    softfloat defaults can disagree on the UF flag for results near the
+    subnormal boundary. Recommend freezing **after rounding**. C4
+    vectors will avoid the distinguishing edge until this is frozen.
+    **(emulators must match)**
+
+14. **ISA-SPEC 3.3 mod field with I=1** — 3.1 says `mod` is ignored when
     I=1 for ALU/compare. Assemblers must emit zero in unused fields, so
     the only way to exercise "ignored" is a hand-built word; c5 includes
     one via `.quad`. Note the tension with ISA-SPEC 3 "future revisions
