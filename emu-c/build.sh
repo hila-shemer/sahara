@@ -19,3 +19,8 @@ bazel build //...
 bazel test //...
 
 python3 test/run_tests.py
+
+# Shared conformance suite (consumed from the toolchain, never edited
+# here). Each test runs twice, byte-identical traces required,
+# --check-invtp always on; this is the stop-condition gate.
+EMU="$PWD/bazel-bin/sahara-emu" ../tests/run-tests.sh
