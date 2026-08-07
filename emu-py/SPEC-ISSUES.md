@@ -103,14 +103,19 @@ ruling most urgently.
     ILLEGAL (an "illegal format combination").
 
 17. **ISA-SPEC 10.3 — which operations "round" for the reserved-rm
-    trap.** Chosen: the ops that consult fcsr's rounding mode: FADD,
-    FSUB, FMUL, FDIV, FSQRT, FMADD, FCVTIF, FCVTUIF, FCVTFF. FCVTFI/
-    FCVTFIU (always RTZ, fcsr-independent), FMIN/FMAX, and FCMP* do not
-    trap on a reserved rm. **[cross-impl]**
+    trap.** Originally chosen: only the ops that consult fcsr's rm, so
+    FCVTFI/FCVTFIU (always RTZ) were exempt. **Superseded by root
+    SPEC-ISSUES 19** ("all FCVT forms round", emulators-must-match):
+    FCVTFI/FCVTFIU now also trap ILLEGAL on a reserved rm, even though
+    their result never uses it. FMIN/FMAX/FCMP* still do not trap.
+    **[cross-impl]**
 
 18. **ISA-SPEC 10.4 — NX on inexact in-range FCVT F→I.** Spec only
     mentions NV. Chosen: IEEE behavior — in-range inexact conversions
-    raise NX; saturating/NaN cases raise NV only.
+    raise NX; saturating/NaN cases raise NV only. Consequence:
+    truncation happens before the range check, so 2^31 - 0.5 → i32 and
+    -0.5 → u32 land in range and raise NX, not NV. C4 should probe
+    both. **[cross-impl]**
 
 19. **ISA-SPEC 10 — FP details the spec is silent on**, chosen per IEEE
     754-2019 + RISC-V conventions: NV on any sNaN operand; FMADD raises

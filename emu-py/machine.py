@@ -625,6 +625,10 @@ class Machine:
         (integer only)."""
         if f["mod"] & ~3:
             raise Trap("ILLEGAL")
+        # Root SPEC-ISSUES 19: all FCVT forms "round", so a reserved rm
+        # traps here too - even for FCVTFI/FCVTFIU, whose result then
+        # ignores rm (always RTZ). Supersedes local entry 17.
+        rm = self.fp_rm()
         sfc, dfc = f["mod"] & 3, f["width"]
         if name in ("FCVTFI", "FCVTFIU"):
             fmt = sf.BY_WIDTH.get(sfc)
@@ -640,7 +644,6 @@ class Machine:
             fmt = sf.BY_WIDTH.get(dfc)
             if iw is None or fmt is None:
                 raise Trap("ILLEGAL")
-            rm = self.fp_rm()
             raw = self.rreg(f["src1"]) & ((1 << iw) - 1)
             v = sext(raw, iw) if name == "FCVTIF" else raw
             bits, flags = sf.int_to_f(fmt, v, rm)
@@ -650,7 +653,6 @@ class Machine:
         sfmt, dfmt = sf.BY_WIDTH.get(sfc), sf.BY_WIDTH.get(dfc)
         if sfmt is None or dfmt is None or sfc == dfc:
             raise Trap("ILLEGAL")
-        rm = self.fp_rm()
         a = self.rreg(f["src1"]) & ((1 << sfmt.bits) - 1)
         bits, flags = sf.f_to_f(sfmt, dfmt, a, rm)
         self.fp_accum(flags)

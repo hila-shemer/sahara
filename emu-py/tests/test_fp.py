@@ -372,3 +372,36 @@ def test_machine_fcvt_badmod_illegal():
             + [asm("FCVTFI", dst=0, src1=1, width=0, mod=4), halt()])
     m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))])
     assert m.regs[10] == E.CAUSES["ILLEGAL"]
+
+
+def test_machine_reserved_rm_traps_even_rtz_fcvt():
+    """Root SPEC-ISSUES 19 supersedes local 17: all FCVT forms 'round',
+    so FCVTFI traps ILLEGAL on a reserved rm even though its result is
+    fcsr-independent (always RTZ)."""
+    rm5 = 5 << E.FCSR_RM_LSB
+    prog = (vbase_setup()
+            + [ldi(1, rm5), mtsr("fcsr", 1)]
+            + li128(2, d2b(7.0))
+            + [asm("FCVTFI", dst=0, src1=2, width=0, mod=1), halt()])
+    m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))])
+    assert m.regs[10] == E.CAUSES["ILLEGAL"]
+
+
+def test_f_to_int_exact_power_boundaries():
+    """C4-prep: the 2^31/2^63 edges where NV-vs-NX and the sign asymmetry
+    (-2^N fits, +2^N does not) catch host-cast implementations."""
+    f64, f32 = sf.F64, sf.F32
+    assert sf.f_to_int(f64, d2b(2.0**31), 32, True) == (0x7FFFFFFF, sf.NV)
+    assert sf.f_to_int(f64, d2b(-(2.0**31)), 32, True) == (0x80000000, 0)
+    assert sf.f_to_int(f64, d2b(2.0**31 - 1), 32, True) == (0x7FFFFFFF, 0)
+    assert sf.f_to_int(f64, d2b(2.0**63), 64, True) == ((1 << 63) - 1, sf.NV)
+    assert sf.f_to_int(f64, d2b(-(2.0**63)), 64, True) == (1 << 63, 0)
+    assert sf.f_to_int(f64, d2b(2.0**32), 32, False) == (0xFFFFFFFF, sf.NV)
+    assert sf.f_to_int(f64, d2b(2.0**32 - 1), 32, False) == (0xFFFFFFFF, 0)
+    # truncation rescues values past the edge: NX, not NV (local entry 18)
+    assert sf.f_to_int(f64, d2b(2.0**31 - 0.5), 32, True) == (0x7FFFFFFF,
+                                                              sf.NX)
+    assert sf.f_to_int(f64, d2b(-0.5), 32, False) == (0, sf.NX)
+    # f32 source: the largest f32 below 2^31 is 2^31 - 2^7
+    assert sf.f_to_int(f32, f2b(2147483520.0), 32, True) == (2147483520, 0)
+    assert sf.f_to_int(f32, f2b(2.0**31), 32, True) == (0x7FFFFFFF, sf.NV)

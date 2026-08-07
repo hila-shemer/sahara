@@ -410,3 +410,21 @@ def test_mmu_enable_pc_page_unmapped_pf_fetch_next_fetch():
     assert m.regs[10] == E.CAUSES["PF_FETCH"]
     assert m.regs[11] == fault_pc
     assert m.regs[12] == fault_pc
+
+
+def test_walk_node_in_device_window_faults():
+    """SPEC-ISSUES 13: table reads come from plain RAM. A root entry
+    pointing the walk at a device window is malformed - the access
+    faults PF, the walker never issues a device load."""
+    from helpers import QueueDevice
+    DEV_PA = 0x200000
+    dev = QueueDevice(DEV_PA, size=64)
+    data = tree(root_extra={1: table(DEV_PA)}) \
+        + [(HANDLER_PA, wbytes(cause_handler()))]
+    bad_va = 0x100 << E.PAGE_BITS              # root idx 1 -> device
+    prog = (vbase_setup() + enable()
+            + li128(1, bad_va)
+            + [lds(0, 1, 0, w=64), halt()])
+    m, _ = run_words(prog, data=data, devices=[dev])
+    assert m.regs[10] == E.CAUSES["PF_LOAD"]
+    assert m.regs[11] == bad_va
