@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "rw/attrs.h"
 #include "u128.h"
 
 /* Software IEEE 754-2019 binary32/binary64 (ISA-SPEC section 10).
@@ -33,25 +34,26 @@ typedef struct SeFpInt {
 /* FADD/FSUB/FMUL/FDIV/FSQRT/FMADD/FMIN/FMAX by opcode. `c` is the
  * FMADD addend; FSQRT uses only `a`. rm must be a defined mode
  * (reserved values trap ILLEGAL before execution, 10.3). */
-SeFpRes se_fp_arith(uint8_t op, unsigned fmtw, uint64_t a, uint64_t b,
-                    uint64_t c, unsigned rm);
+RW_WARN_UNUSED SeFpRes se_fp_arith(uint8_t op, unsigned fmtw, uint64_t a,
+                                   uint64_t b, uint64_t c, unsigned rm);
 
 /* FCMPEQ/FCMPLT/FCMPLE. NaN compares false; LT/LE raise NV on any NaN
  * operand, EQ never does (10.2). */
-bool se_fp_cmp(uint8_t op, unsigned fmtw, uint64_t a, uint64_t b,
-               uint8_t *flags);
+RW_WARN_UNUSED bool se_fp_cmp(uint8_t op, unsigned fmtw, uint64_t a,
+                              uint64_t b, uint8_t *flags);
 
 /* FCVTFI / FCVTFIU: truncate toward zero regardless of fcsr; saturate
  * with NV on out-of-range/inf/NaN (10.4). dstw in {32, 64, 128}. */
-SeFpInt se_fp_to_int(unsigned srcfmtw, uint64_t a, unsigned dstw, bool uns);
+RW_WARN_UNUSED SeFpInt se_fp_to_int(unsigned srcfmtw, uint64_t a,
+                                    unsigned dstw, bool uns);
 
 /* FCVTIF / FCVTUIF: the low srcw bits of v as a signed/unsigned
  * integer, rounded per rm. srcw in {32, 64, 128}. */
-SeFpRes se_fp_from_int(se_u128 v, unsigned srcw, bool uns, unsigned dstfmtw,
-                       unsigned rm);
+RW_WARN_UNUSED SeFpRes se_fp_from_int(se_u128 v, unsigned srcw, bool uns,
+                                      unsigned dstfmtw, unsigned rm);
 
 /* FCVTFF: 32 <-> 64, rounded per rm (widening is exact). */
-SeFpRes se_fp_to_fp(unsigned srcfmtw, uint64_t a, unsigned dstfmtw,
-                    unsigned rm);
+RW_WARN_UNUSED SeFpRes se_fp_to_fp(unsigned srcfmtw, uint64_t a,
+                                   unsigned dstfmtw, unsigned rm);
 
 #endif /* SE_FP_H */
