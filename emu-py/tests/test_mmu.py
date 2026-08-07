@@ -6,8 +6,8 @@ import pytest
 import encoding as E
 import machine
 from helpers import (HANDLER_PA, asm, cause_handler, halt, jalr, ldi, lds,
-                     li128, make_machine, mtsr, run_words, st, vbase_setup,
-                     wbytes)
+                     li128, make_machine, mtsr, pt_leaf, pt_node, pt_table,
+                     run_words, st, vbase_setup, wbytes)
 
 S = 1 << E.STATUS_BITS["S"]
 MMU = 1 << E.STATUS_BITS["MMU_EN"]
@@ -16,26 +16,7 @@ ROOT_PA = 0x100000
 CHILD_PA = 0x110000
 VPN_MASK = (1 << E.VPN_BITS) - 1
 
-
-def leaf(frame, r=1, w=1, x=0, u=0):
-    return (frame | E.PTE_TYPE_LEAF | (r << E.PTE_BITS["R"])
-            | (w << E.PTE_BITS["W"]) | (x << E.PTE_BITS["X"])
-            | (u << E.PTE_BITS["U"]))
-
-
-def table(child_pa):
-    return child_pa | E.PTE_TYPE_TABLE
-
-
-def node(shift, prefix, prefix_mask, entries):
-    blob = bytearray(E.NODE_BYTES)
-    blob[0:8] = shift.to_bytes(8, "little")
-    blob[8:24] = prefix.to_bytes(16, "little")
-    blob[24:40] = prefix_mask.to_bytes(16, "little")
-    for idx, ent in entries.items():
-        off = E.NODE_HEADER_BYTES + idx * E.NODE_ENTRY_BYTES
-        blob[off:off + 16] = ent.to_bytes(16, "little")
-    return bytes(blob)
+leaf, table, node = pt_leaf, pt_table, pt_node
 
 
 def tree(child_extra=None, root_extra=None):
@@ -241,3 +222,160 @@ def test_aliasing_two_vas_one_frame():
                st(3, 1, 0, w=64), lds(0, 2, 0, w=64), halt()])
     m, _ = run_words(prog, data=data)
     assert m.regs[0] == 42
+
+
+# ------------------------------------------- path compression, high VAs
+# CONFORMANCE C2: "Path-compression: ... regions above 2^64 and 2^100."
+# Two-node walks over the 112-bit VPN space: the root dispatches on the
+# highest differing chunk, prefix_mask compresses every chunk in between.
+
+CHILD_HI_PA = 0x120000                 # VPN 0x12: identity-mappable
+HI64_VA = 1 << 70                      # VPN bit 54 -> chunk 6, value 64
+HI100_VA = 1 << 100                    # VPN bit 84 -> chunk 10, value 16
+
+CODE_LEAF = leaf(0, r=1, w=1, x=1, u=1)
+
+
+def hi_tree(root_shift, hi_idx, hi_prefix, hi_extra=None, lo_extra=None):
+    """Root at root_shift dispatching {0: low child, hi_idx: high child};
+    prefix_mask on the root compresses all chunks above it, on each child
+    all chunks below the root's."""
+    above_root = VPN_MASK & ~((1 << (root_shift + 8)) - 1)
+    lo_entries = {0: CODE_LEAF}
+    lo_entries.update(lo_extra or {})
+    hi_entries = {0: leaf(0x30000)}
+    hi_entries.update(hi_extra or {})
+    return [
+        (ROOT_PA, node(root_shift, 0, above_root,
+                       {0: table(CHILD_PA), hi_idx: table(CHILD_HI_PA)})),
+        (CHILD_PA, node(0, 0, VPN_MASK & ~0xFF, lo_entries)),
+        (CHILD_HI_PA, node(0, hi_prefix, VPN_MASK & ~0xFF, hi_entries)),
+    ]
+
+
+def test_region_above_2_64():
+    data = hi_tree(48, 64, HI64_VA >> E.PAGE_BITS)
+    prog = (enable() + li128(1, HI64_VA)
+            + [ldi(2, 0x77), st(2, 1, 0, w=64),
+               lds(0, 1, 0, w=64), halt()])
+    m, out = run_words(prog, data=data, check_invtp=True)
+    assert out == "halt"
+    assert m.regs[0] == 0x77
+    assert m.phys.read_raw(0x30000, 8) == (0x77).to_bytes(8, "little")
+
+
+def test_region_above_2_100():
+    data = hi_tree(80, 16, HI100_VA >> E.PAGE_BITS)
+    prog = (enable() + li128(1, HI100_VA)
+            + [ldi(2, 0x5A), st(2, 1, 0, w=64),
+               lds(0, 1, 0, w=64), halt()])
+    m, out = run_words(prog, data=data, check_invtp=True)
+    assert out == "halt"
+    assert m.regs[0] == 0x5A
+    assert m.phys.read_raw(0x30000, 8) == (0x5A).to_bytes(8, "little")
+
+
+def test_prefix_mismatch_above_2_64_full_baddr():
+    # routes into the high child by chunk 10, then fails its prefix
+    # check; baddr must carry all 128 bits of the VA.
+    data = (hi_tree(80, 16, HI100_VA >> E.PAGE_BITS)
+            + [(HANDLER_PA, wbytes(cause_handler()))])
+    va = HI100_VA | (1 << 90)
+    prog = (vbase_setup() + enable()
+            + li128(1, va) + [lds(0, 1, 0, w=64), halt()])
+    m, _ = run_words(prog, data=data)
+    assert m.regs[10] == E.CAUSES["PF_LOAD"]
+    assert m.regs[11] == va
+
+
+# entry PA of the high child's slot 0, identity-mapped via VPN 0x12
+_HI_ENTRY0_VA = CHILD_HI_PA + E.NODE_HEADER_BYTES
+
+
+def _hi_remap_data():
+    return (hi_tree(80, 16, HI100_VA >> E.PAGE_BITS,
+                    lo_extra={CHILD_HI_PA >> E.PAGE_BITS:
+                              leaf(CHILD_HI_PA)})
+            + [(0x30000, (111).to_bytes(8, "little")),
+               (0x40000, (222).to_bytes(8, "little"))])
+
+
+def _hi_remap_prog(*, with_invtp):
+    return (enable() + li128(1, HI100_VA)
+            + [lds(5, 1, 0, w=64),                        # load via frame A
+               ldi(2, leaf(0x40000)),                     # new PTE: frame B
+               ldi(3, _HI_ENTRY0_VA), st(2, 3, 0, w=64)]  # rewrite deep PTE
+            + ([asm("INVTP")] if with_invtp else [])
+            + [lds(6, 1, 0, w=64), halt()])
+
+
+def test_remap_above_2_100_missing_invtp_asserts():
+    m = make_machine(_hi_remap_prog(with_invtp=False), data=_hi_remap_data(),
+                     check_invtp=True)
+    with pytest.raises(machine.CheckFail):
+        m.run(100000)
+
+
+def test_remap_above_2_100_with_invtp():
+    m, out = run_words(_hi_remap_prog(with_invtp=True),
+                       data=_hi_remap_data(), check_invtp=True)
+    assert out == "halt"
+    assert m.regs[5] == 111
+    assert m.regs[6] == 222
+
+
+# -------------------------------------------------- ptbase switch, ASID
+# CONFORMANCE C2: "change ptbase+asid without INVTP (legal), change
+# ptbase alone without INVTP (illegal -- check-mode assertion fires)."
+
+ROOT_B_PA = 0x130000
+CHILD_B_PA = 0x140000
+
+
+def _two_trees():
+    """Tree A (at ROOT_PA) maps VA 0x10000 -> 0x30000; tree B (at
+    ROOT_B_PA) maps it -> 0x40000. Both map VPN 0 identically so code
+    fetches translate the same either way."""
+    return (tree({1: leaf(0x30000)})
+            + [(ROOT_B_PA, node(8, 0, 0, {0: table(CHILD_B_PA)})),
+               (CHILD_B_PA, node(0, 0, VPN_MASK & ~0xFF,
+                                 {0: CODE_LEAF, 1: leaf(0x40000)})),
+               (0x30000, (111).to_bytes(8, "little")),
+               (0x40000, (222).to_bytes(8, "little"))])
+
+
+def test_ptbase_change_alone_asserts():
+    prog = (enable()
+            + [ldi(1, 0x10000), lds(5, 1, 0, w=64),
+               ldi(2, ROOT_B_PA), mtsr("ptbase", 2),
+               lds(6, 1, 0, w=64), halt()])
+    m = make_machine(prog, data=_two_trees(), check_invtp=True)
+    with pytest.raises(machine.CheckFail):
+        m.run(100000)
+
+
+def test_ptbase_change_with_asid_ok():
+    prog = (enable()
+            + [ldi(1, 0x10000), lds(5, 1, 0, w=64),
+               ldi(3, 1), mtsr("asid", 3),
+               ldi(2, ROOT_B_PA), mtsr("ptbase", 2),
+               lds(6, 1, 0, w=64), halt()])
+    m, out = run_words(prog, data=_two_trees(), check_invtp=True)
+    assert out == "halt"
+    assert m.regs[5] == 111
+    assert m.regs[6] == 222
+
+
+def test_cyclic_table_walk_faults():
+    # root entry 1 points back at the root: the walk must terminate and
+    # fault PF rather than loop (emu-py SPEC-ISSUES 13, depth guard).
+    data = [(ROOT_PA, node(8, 0, 0, {0: table(CHILD_PA),
+                                     1: table(ROOT_PA)})),
+            (CHILD_PA, node(0, 0, VPN_MASK & ~0xFF, {0: CODE_LEAF})),
+            (HANDLER_PA, wbytes(cause_handler()))]
+    va = 256 << E.PAGE_BITS
+    prog = (vbase_setup() + enable()
+            + li128(1, va) + [lds(0, 1, 0, w=64), halt()])
+    m, _ = run_words(prog, data=data)
+    assert m.regs[10] == E.CAUSES["PF_LOAD"]
+    assert m.regs[11] == va

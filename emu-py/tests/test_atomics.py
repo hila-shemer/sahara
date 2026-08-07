@@ -125,3 +125,131 @@ def test_all_amos():
         assert m.regs[0] == 0b1100, name
         assert m.phys.read_raw(DATA, 8) == expected.to_bytes(8, "little"), \
             name
+
+
+# --------------------------------------- permission faults: R before W
+# ISA-SPEC 7.1: an atomic requires both R and W and reports the first
+# failing check in the order R then W. CONFORMANCE C3: "AMO permission
+# faults report load-before-store order."
+
+from helpers import mtsr, pred, pt_leaf, pt_node, pt_table, OrderedTracer
+
+ROOT_PA = 0x100000
+CHILD_PA = 0x110000
+VPN_MASK = (1 << E.VPN_BITS) - 1
+
+
+def _amo_tree(**leaf1_perms):
+    return [
+        (ROOT_PA, pt_node(8, 0, 0, {0: pt_table(CHILD_PA)})),
+        (CHILD_PA, pt_node(0, 0, VPN_MASK & ~0xFF,
+                           {0: pt_leaf(0, r=1, w=1, x=1, u=1),
+                            1: pt_leaf(0x30000, **leaf1_perms)})),
+        (HANDLER_PA, wbytes(cause_handler())),
+    ]
+
+
+def _amo_mmu_prog():
+    import encoding
+    S = 1 << encoding.STATUS_BITS["S"]
+    MMU = 1 << encoding.STATUS_BITS["MMU_EN"]
+    return (vbase_setup()
+            + [ldi(19, ROOT_PA), mtsr("ptbase", 19),
+               ldi(19, S | MMU), mtsr("status", 19),
+               ldi(1, 0x10000), amo("AMOADD", 0, 1, 2, w=64), halt()])
+
+
+def test_amo_write_only_page_faults_perm_load():
+    # R check runs first: a W-only page reports PERM_LOAD, not PERM_STORE
+    m, _ = run_words(_amo_mmu_prog(), data=_amo_tree(r=0, w=1))
+    assert m.regs[10] == E.CAUSES["PERM_LOAD"]
+    assert m.regs[11] == 0x10000
+
+
+def test_amo_read_only_page_faults_perm_store():
+    m, _ = run_words(_amo_mmu_prog(), data=_amo_tree(r=1, w=0))
+    assert m.regs[10] == E.CAUSES["PERM_STORE"]
+    assert m.regs[11] == 0x10000
+
+
+def test_amo_unmapped_faults_pf_load():
+    # both translations fail: PF_LOAD wins (R before W)
+    import encoding
+    S = 1 << encoding.STATUS_BITS["S"]
+    MMU = 1 << encoding.STATUS_BITS["MMU_EN"]
+    prog = (vbase_setup()
+            + [ldi(19, ROOT_PA), mtsr("ptbase", 19),
+               ldi(19, S | MMU), mtsr("status", 19),
+               ldi(1, 0x20000), amo("AMOADD", 0, 1, 2, w=64), halt()])
+    m, _ = run_words(prog, data=_amo_tree(r=1, w=1))
+    assert m.regs[10] == E.CAUSES["PF_LOAD"]
+    assert m.regs[11] == 0x20000
+
+
+# ------------------------------------------- atomicity under interrupts
+# CONFORMANCE C3: timer armed to fire "during" an AMO -- delivery must be
+# before or after, never between read and write (verified via trace).
+
+def test_amo_read_write_pair_unsplit_by_timer():
+    import encoding
+    S = 1 << encoding.STATUS_BITS["S"]
+    IE = 1 << encoding.STATUS_BITS["IE"]
+    prefix = (vbase_setup()
+              + [ldi(1, DATA), ldi(2, 10), st(2, 1, 0, w=64),
+                 ldi(3, 5)])
+    amo_cycle = len(prefix) + 4          # after the 4 timecmp/IE insns
+    prog = (prefix
+            + [ldi(4, amo_cycle + 1), mtsr("timecmp", 4),
+               ldi(5, S | IE), mtsr("status", 5),
+               amo("AMOADD", 0, 1, 3, w=64),
+               halt()])
+    t = OrderedTracer()
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))],
+                       tracer=t)
+    assert out == "halt"
+    kinds = t.kinds()
+    ri = next(i for i, r in enumerate(t.recs)
+              if r[0] == "memr" and r[2] == DATA)
+    wi = next(i for i, r in enumerate(t.recs)
+              if r[0] == "memw" and r[2] == DATA and i > ri)
+    assert wi == ri + 1                  # nothing between read and write
+    assert t.recs[ri][1] == t.recs[wi][1] == amo_cycle
+    trap = next(r for r in t.recs if r[0] == "trap")
+    assert trap[1] == amo_cycle + 1      # delivered after, never between
+    assert trap[2] == E.CAUSES["TIMER"]
+    assert "trap" not in kinds[ri:wi + 1]
+    assert m.regs[10] == E.CAUSES["TIMER"]
+    assert m.phys.read_raw(DATA, 8) == (15).to_bytes(8, "little")
+
+
+def test_cas_failure_traces_read_no_write():
+    prog = [ldi(1, DATA), ldi(2, 7), st(2, 1, 0, w=32),
+            ldi(3, 8),                       # expected != 7: CAS fails
+            amo("CAS", 0, 1, 3, w=32, src3=2), halt()]
+    t = OrderedTracer()
+    m, _ = run_words(prog, tracer=t)
+    reads = [r for r in t.recs if r[0] == "memr"]
+    writes = [r for r in t.recs if r[0] == "memw"]
+    assert len(reads) == 1 and reads[0][2] == DATA
+    assert len(writes) == 1              # only the seeding ST, not the CAS
+    assert writes[0][1] == 2             # the ST's cycle
+    assert m.phys.read_raw(DATA, 4) == (7).to_bytes(4, "little")
+
+
+def test_squashed_cas_and_store_no_memory_access():
+    # CONFORMANCE C6: "CAS squash -- no memory access on squash,
+    # verified by trace." p1 is 0 at reset -> pred(1) is false.
+    import trc
+    npred = pred(1)
+    prog = [ldi(1, DATA), ldi(2, 7),
+            st(2, 1, 0, w=64, p=npred),          # squashed store
+            amo("CAS", 0, 1, 2, w=64, src3=2) | (npred << 8),  # squashed
+            halt()]
+    t = OrderedTracer()
+    m, out = run_words(prog, tracer=t)
+    assert out == "halt"
+    assert not any(k in ("memr", "memw") for k in t.kinds())
+    squashed = [r for r in t.recs
+                if r[0] == "exec" and r[5] & trc.F_SQUASHED]
+    assert len(squashed) == 2
+    assert m.regs[0] == 0                # squashed CAS wrote no dst

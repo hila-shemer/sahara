@@ -221,3 +221,114 @@ def test_wfi_in_user_mode_privs():
                             halt()]
     m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))])
     assert m.regs[10] == E.CAUSES["PRIV"]
+
+
+# ------------------------------------------------- TL writability matrix
+# ISA-SPEC 7.2/7.3/7.4: TL is MTSR-writable; delivery banks and IRET bank
+# selection follow the *current* TL, however it got there.
+
+def tl_bits(v):
+    return v << E.STATUS_BITS["TL_LSB"]
+
+
+def test_mtsr_tl2_then_fault_triple_faults():
+    # software parks TL at 2: the very next fault is a triple fault --
+    # machine halts, no sreg written
+    prog = (vbase_setup() + dfbase_setup()
+            + [ldi(1, S | tl_bits(2)), mtsr("status", 1),
+               syscall(), halt()])
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler())),
+                                   (DF_PA, wbytes(cause_handler()))])
+    assert out == "halt"
+    assert m.triple_fault
+    assert m.sregs[E.SREGS["cause0"]] == 0    # nothing was delivered
+    assert m.sregs[E.SREGS["cause1"]] == 0
+    assert m.tl == 2
+
+
+def test_mtsr_tl1_next_fault_is_double():
+    # TL=1 by MTSR, never trapped: the next fault delivers to bank 1 at
+    # dfbase, bank 0 untouched
+    df = [mfsr(10, "cause0"), mfsr(11, "cause1"), mfsr(13, "epc1"), halt()]
+    prog = (vbase_setup() + dfbase_setup()
+            + [ldi(1, S | tl_bits(1)), mtsr("status", 1),
+               syscall(), halt()])
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes([0])),
+                                   (DF_PA, wbytes(df))])
+    assert out == "halt"
+    assert m.regs[10] == 0                    # bank 0 never written
+    assert m.regs[11] == E.CAUSES["SYSCALL"]
+    assert m.regs[13] == E.RESET_PC + 6 * 8   # the SYSCALL itself
+    assert m.tl == 2
+
+
+STAGE1_PA = 0x4000
+STAGE2_PA = 0x5000
+
+
+def test_iret_bank_selection_at_tl2():
+    # TL=2 by MTSR: first IRET takes epc1 (bank 1) and drops to TL=1,
+    # second takes epc0 (bank 0) and drops to TL=0
+    stage1 = [alui("ADD", 5, 31, 1), iret()]
+    stage2 = [alui("ADD", 6, 31, 2), halt()]
+    prog = [ldi(1, STAGE1_PA), mtsr("epc1", 1),
+            ldi(1, STAGE2_PA), mtsr("epc0", 1),
+            ldi(1, S | PS | tl_bits(2)), mtsr("status", 1),
+            iret()]
+    m, out = run_words(prog, data=[(STAGE1_PA, wbytes(stage1)),
+                                   (STAGE2_PA, wbytes(stage2))])
+    assert out == "halt"
+    assert m.regs[5] == 1
+    assert m.regs[6] == 2
+    assert m.tl == 0
+
+
+def test_tl3_via_mtsr_iret_uses_bank1_delivery_triple_faults():
+    # emu-py SPEC-ISSUES 12: TL=3 is reachable only by MTSR. IRET at TL=3
+    # selects bank 1 (TL >= 2) and decrements to 2; a fault at TL=3
+    # triple-faults. Pin both.
+    stage1 = [alui("ADD", 5, 31, 1),
+              syscall(),                       # TL now 2 -> triple fault
+              halt()]
+    prog = (vbase_setup() + dfbase_setup()
+            + [ldi(1, STAGE1_PA), mtsr("epc1", 1),
+               ldi(1, S | PS | tl_bits(3)), mtsr("status", 1),
+               iret()])
+    m, out = run_words(prog, data=[(STAGE1_PA, wbytes(stage1)),
+                                   (HANDLER_PA, wbytes(cause_handler())),
+                                   (DF_PA, wbytes(cause_handler()))])
+    assert out == "halt"
+    assert m.regs[5] == 1                     # bank-1 target reached
+    assert m.triple_fault
+    assert m.tl == 2
+
+
+def test_double_fault_overwrites_pie_ps():
+    # single copy of PIE/PS (ISA-SPEC 7.2): first trap saves IE=1 into
+    # PIE; the handler faults with IE=0, overwriting PIE with 0
+    df = [mfsr(15, "status"), halt()]
+    prog = (vbase_setup() + dfbase_setup()
+            + [ldi(1, S | IE), mtsr("status", 1),
+               syscall(), halt()])
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes([0])),
+                                   (DF_PA, wbytes(df))])
+    assert out == "halt"
+    st = m.regs[15]
+    assert (st >> E.STATUS_BITS["PIE"]) & 1 == 0   # 1 was overwritten
+    assert (st >> E.STATUS_BITS["PS"]) & 1 == 1
+    assert (st >> E.STATUS_BITS["IE"]) & 1 == 0
+
+
+def test_priv_iret_from_user():
+    prog = vbase_setup() + [ldi(1, 0), mtsr("status", 1), iret(), halt()]
+    m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))])
+    assert m.regs[10] == E.CAUSES["PRIV"]
+    assert m.regs[12] == E.RESET_PC + 4 * 8
+
+
+def test_priv_invtp_from_user():
+    prog = (vbase_setup()
+            + [ldi(1, 0), mtsr("status", 1), asm("INVTP"), halt()])
+    m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))])
+    assert m.regs[10] == E.CAUSES["PRIV"]
+    assert m.regs[12] == E.RESET_PC + 4 * 8

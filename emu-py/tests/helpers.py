@@ -153,6 +153,60 @@ def nop():
     return asm("OR", dst=31, src1=31, src2=31, width=W[128])
 
 
+# ------------------------------------------------------- page tables
+def pt_leaf(frame, r=1, w=1, x=0, u=0):
+    return (frame | E.PTE_TYPE_LEAF | (r << E.PTE_BITS["R"])
+            | (w << E.PTE_BITS["W"]) | (x << E.PTE_BITS["X"])
+            | (u << E.PTE_BITS["U"]))
+
+
+def pt_table(child_pa):
+    return child_pa | E.PTE_TYPE_TABLE
+
+
+def pt_node(shift, prefix, prefix_mask, entries):
+    blob = bytearray(E.NODE_BYTES)
+    blob[0:8] = shift.to_bytes(8, "little")
+    blob[8:24] = prefix.to_bytes(16, "little")
+    blob[24:40] = prefix_mask.to_bytes(16, "little")
+    for idx, ent in entries.items():
+        off = E.NODE_HEADER_BYTES + idx * E.NODE_ENTRY_BYTES
+        blob[off:off + 16] = ent.to_bytes(16, "little")
+    return bytes(blob)
+
+
+# ----------------------------------------------------- ordered tracer
+class OrderedTracer:
+    """Records every trace record in stream order; enough tracer surface
+    for Machine. Lets tests assert record *ordering* (e.g. no TRAP
+    between an atomic's MEMR/MEMW pair)."""
+    level = 2
+
+    def __init__(self):
+        self.recs = []
+
+    def exec_(self, cycle, pc, insn, wb, flags, pred_wb):
+        self.recs.append(("exec", cycle, pc, insn, wb, flags, pred_wb))
+
+    def memw(self, cycle, ea, size, new):
+        self.recs.append(("memw", cycle, ea, size, new))
+
+    def memr(self, cycle, ea, size, val):
+        self.recs.append(("memr", cycle, ea, size, val))
+
+    def trap(self, cycle, cause, epc, baddr, tl_after):
+        self.recs.append(("trap", cycle, cause, epc, baddr, tl_after))
+
+    def event(self, cycle, device, payload):
+        self.recs.append(("event", cycle, device, payload))
+
+    def devw(self, cycle, ea, size, val):
+        self.recs.append(("devw", cycle, ea, size, val))
+
+    def kinds(self):
+        return [r[0] for r in self.recs]
+
+
 # ------------------------------------------------------- trap harness
 HANDLER_PA = 0x2000
 DF_PA = 0x3000
