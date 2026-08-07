@@ -447,3 +447,40 @@ def test_faulting_insn_emits_no_exec_record():
     assert fault_pc not in exec_pcs
     traps = [r for r in tr.recs if r[0] == "trap"]
     assert len(traps) == 1 and traps[0][3] == fault_pc   # epc = faulting pc
+
+
+def test_interrupt_at_tl1_escalates_to_dfbase():
+    # ISA-SPEC 7.2 says "delivery of any trap or interrupt" - interrupts
+    # are not special-cased out of escalation. A handler that re-enables
+    # IE without dropping TL gets the pending timer as a double fault:
+    # bank 1, dfbase, bank 0 intact.
+    handler = [ldi(1, S | IE | tl_bits(1)), mtsr("status", 1),
+               b(0)]                          # spin until timer fires
+    df = [mfsr(10, "cause0"), mfsr(11, "cause1"), mfsr(13, "epc1"),
+          halt()]
+    prog = (vbase_setup() + dfbase_setup()
+            + [ldi(1, 30), mtsr("timecmp", 1),
+               syscall(), halt()])
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes(handler)),
+                                   (DF_PA, wbytes(df))])
+    assert out == "halt"
+    assert m.regs[10] == E.CAUSES["SYSCALL"]  # bank 0 untouched
+    assert m.regs[11] == E.CAUSES["TIMER"]
+    assert m.regs[13] == HANDLER_PA + 2 * 8   # epc1 = the spin insn
+    assert m.tl == 2
+
+
+def test_interrupt_at_tl2_triple_faults():
+    # ...and at TL=2 the same uniformity means a pending interrupt with
+    # IE=1 is a triple fault: halt, nothing written.
+    prog = (vbase_setup() + dfbase_setup()
+            + [ldi(1, 5), mtsr("timecmp", 1),
+               ldi(1, S | IE | tl_bits(2)), mtsr("status", 1),
+               nop(), nop(), halt()])
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler())),
+                                   (DF_PA, wbytes(cause_handler()))])
+    assert out == "halt"
+    assert m.triple_fault
+    assert m.sregs[E.SREGS["cause0"]] == 0    # nothing delivered
+    assert m.sregs[E.SREGS["cause1"]] == 0
+    assert m.tl == 2
