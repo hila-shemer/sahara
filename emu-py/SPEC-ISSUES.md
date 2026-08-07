@@ -167,3 +167,7 @@ ruling most urgently.
     runs, traces byte-identical). One-character fix, owned by the
     toolchain agent. Local tests pin both halves of reading 21
     (perms-only diff asserts; identical result does not).
+    *Resolved (iteration 7):* toolchain commit 8f31564 lands exactly
+    that PTE word (0x1e → 0x3e in c2_mmu.s) plus two expect=checkfail
+    negatives (c2_noinvtp_remap/ptbase, root SPEC-ISSUES 23 harness
+    class); c2_mmu and both negatives pass on emu-py unchanged.
