@@ -101,6 +101,40 @@ run_one() {
         return 1
     fi
 
+    # Reference-implementation replay check (CONFORMANCE.md: "bit-exact
+    # replay of every test's trace"), REPLAY=1-gated so emulators that
+    # have not built --replay yet still get the rest of the harness.
+    # The EVENT subsequence of run a is extracted and fed back; the
+    # replay must reproduce stdout and every non-META record
+    # (SPEC-ISSUES 26). checkfail runs are not replayed: what --replay
+    # does after an assertion is nobody's contract.
+    if [ "${REPLAY:-0}" = "1" ] && [ "$expect" != "checkfail" ]; then
+        local ev="$OUT/$name.events.trc" rtrc="$OUT/$name.r.trc"
+        if ! python3 "$TRACEQ" events "$OUT/$name.a.trc" -o "$ev" \
+                > /dev/null 2>"$OUT/$name.ev.err"; then
+            echo "FAIL $name: event extraction failed:"
+            sed 's/^/    /' "$OUT/$name.ev.err"
+            return 1
+        fi
+        out=$(HARNESS_EXPECT_R0="$expect" \
+              "$EMU" "$img" --replay "$ev" --trace "$rtrc" \
+              --trace-level "$level" --maxcycles "$MAXCYCLES" \
+              --check-invtp "${flags[@]}" 2>"$OUT/$name.r.err")
+        rc=$?
+        if [ $rc -ne 0 ] || [ "$out" != "HALT r0=$expect" ]; then
+            echo "FAIL $name (replay): rc=$rc stdout='$out'"
+            [ -s "$OUT/$name.r.err" ] && sed 's/^/    stderr: /' \
+                "$OUT/$name.r.err"
+            return 1
+        fi
+        if ! dv=$(python3 "$TRACEQ" diverge --ignore-meta \
+                  "$OUT/$name.a.trc" "$rtrc"); then
+            echo "FAIL $name: REPLAY DIVERGENCE from the recorded run:"
+            echo "$dv" | sed 's/^/    /'
+            return 1
+        fi
+    fi
+
     if [ -x "$TESTS/checks/$name.sh" ]; then
         if ! "$TESTS/checks/$name.sh" "$OUT/$name.a.trc" "$sym" "$img"; then
             echo "FAIL $name: trace-level check checks/$name.sh failed"
