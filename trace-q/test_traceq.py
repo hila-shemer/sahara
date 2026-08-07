@@ -225,6 +225,18 @@ with open(trc2, "wb") as f:
 rc, out, err = run_q("diverge", trc, trc2)
 check(rc == 1 and "end of trace" in out, f"diverge length: {out}")
 
+# events: extraction produces a valid .trc of META + EVENT subsequence
+evf = os.path.join(td, "events.trc")
+rc, out, err = run_q("events", trc, "-o", evf)
+check(rc == 0 and out.strip() == "1 events", f"events: {out} {err}")
+evrecs = T.read_records(evf)
+check(len(evrecs) == 2 and evrecs[0].type == T.T_META
+      and evrecs[1].type == T.T_EVENT
+      and evrecs[1].fields["cycle"] == 6
+      and evrecs[1].fields["device"] == 2
+      and evrecs[1].fields["bytes"] == b"\x11\x22",
+      "events output records wrong")
+
 # loud failures
 bad = os.path.join(td, "bad.trc")
 with open(bad, "wb") as f:

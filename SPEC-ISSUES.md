@@ -208,3 +208,18 @@ Both emulator implementations must match the readings marked
     naturally aligned. No test pins the priority until the spec picks
     one; recommend UNALIGNED first (alignment is a property of the ea
     itself, checkable before any address classification).
+
+26. **TOOLING-SPEC 3.2 replay mode, input file format** — "re-run
+    from an image plus EVENT records alone" never says what the
+    `--replay events.trc` file looks like. Chosen: a valid .trc — the
+    original trace's META record followed by the EVENT subsequence,
+    which `trace-q events` (a harness extension beyond the 3.3 query
+    set) extracts. The replay's output trace must match the recorded
+    run under `diverge --ignore-meta` (META may legitimately record
+    replay mode) and produce identical stdout. run-tests gates the
+    whole check behind REPLAY=1 so emulators without --replay still
+    get the rest of the harness; it becomes part of the required
+    reference-implementation checks once both emulators implement
+    --replay. A zero-EVENT replay file is valid and still meaningful
+    (a determinism re-run through the replay path). **(emulators must
+    match: accept the format, reproduce the records)**
