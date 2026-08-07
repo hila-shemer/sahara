@@ -10,6 +10,9 @@
 # The stub executes nothing; semantic expectations are first exercised
 # when a real emulator arrives.
 set -u
+# selftest drives both REPLAY modes itself (step 3); an inherited
+# REPLAY=1 would leak into the plain run and break its summary check
+unset REPLAY
 
 die() { echo "selftest: FATAL: $*" >&2; exit 1; }
 
@@ -19,7 +22,8 @@ TMP=$(mktemp -d) || die mktemp
 trap 'rm -rf "$TMP"' EXIT
 
 echo "== 0. component unit tests =="
-for t in asm/test_asm.py trace-q/test_traceq.py trace-q/test_vectors.py; do
+for t in asm/test_asm.py asm/test_asmmd.py trace-q/test_traceq.py \
+         trace-q/test_vectors.py; do
     python3 "$ROOT/$t" > "$TMP/unit.out" 2>&1 \
         || { cat "$TMP/unit.out"; die "$t failed"; }
     echo "ok: $t"
