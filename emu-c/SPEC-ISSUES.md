@@ -203,3 +203,23 @@ they need a spec ruling more urgently than the rest.
     `cycle >= timecmp`, so both pass today; the TRAP record's cycle
     field will differ in the cross-diff until Hila freezes one.
     **[divergence risk]**
+
+31. **tests/gen_c2.py — test bug: ROOT2's code-page leaf drops the U
+    bit, so the ptbase/asid switch window CHECKFAILs under root
+    SPEC-ISSUES 21's own definition.** The generator's comment (and
+    root entry 21) promise the two fetches between `mtsr ptbase` and
+    `mtsr asid` in test [32] "translate identically under either
+    table" — but ROOT maps VPN0 `leaf(0, R,W,X,U)` = 0x3e while ROOT2
+    maps it `leaf(0, R,W,X)` = 0x1e. Frames match; the U permission
+    does not. Entry 21 pins stale = "frame and permissions differ from
+    a fresh walk", so a conforming checker MUST fire on the fetch at
+    0x17e0 (VPN0, cached under asid A from ROOT, fresh-walked under
+    ROOT2). The bug is in the test, not the spec and not this
+    emulator: one character in gen_c2.py (add "U" to ROOT2's entry 0)
+    fixes it. Verified both ways on emu-c: the committed image runs to
+    HALT 0x600D with the check off; a patched copy (0x1e -> 0x3e at
+    ROOT2 entry[0], nothing else) runs to HALT 0x600D twice with
+    --check-invtp on and byte-identical level-2 traces. Until the
+    toolchain fixes the generator, c2_mmu fails on any emulator that
+    implements entry 21 faithfully — arguably on both. **(toolchain
+    fix needed; test unchanged here per the no-edits rule)**
