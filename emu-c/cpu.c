@@ -51,7 +51,16 @@ static void deliver(SeCpu *c, uint64_t cause, se_u128 epc, se_u128 baddr)
 {
     unsigned tl = get_tl(c);
     if (tl == 2u) {
-        /* Triple fault: the machine halts; no state is written (7.2). */
+        /* Triple fault: the machine halts; no state is written (7.2),
+         * and no TRAP record either -- delivery at TL=2 delivers
+         * nothing (root SPEC-ISSUES 17, "emulators must match";
+         * checks/c1_triplefault.sh asserts exactly two records).
+         * devspec/trace.md 2.3.4 wants the opposite: a final diagnostic
+         * TRAP carrying this cause/epc/baddr with tl_after = 3. The
+         * conflict is emu-c/SPEC-ISSUES 33; if it resolves toward
+         * devspec, the flip is one line here:
+         *   SeTrace_trap(c->tr, se_lo64(c->cycle), cause, epc, baddr, 3u);
+         */
         c->state = SE_RUN_HALT;
         c->halt_note = "triple fault";
         return;

@@ -29,6 +29,11 @@ they need a spec ruling more urgently than the rest.
    virtual address** for data/fetch accesses, and PF_* when it happens
    inside a page-table walk (folded into "malformed node"). **[divergence
    risk]**
+   *devspec (landed on main) pins the same reading: boot.md 3.4/BOOT-15
+   and devspec/SPEC-ISSUES.md 19 — data or fetch in a hole traps DEVERR
+   with baddr = the accessed address, predicated-false exempt. Still
+   flagged there as new normative surface for Hila; risk retired unless
+   she rules against it.*
 
 4. **ISA-SPEC 3/5.5 — fetch from a misaligned PC.** JALR checks its
    target, but IRET (arbitrary epc via MTSR) and trap vectors can set
@@ -61,19 +66,26 @@ they need a spec ruling more urgently than the rest.
    faulting instruction itself; the TRAP delivery consumes the one
    cycle**. SYSCALL is treated the same way (TRAP record only, no EXEC).
    **[divergence risk]** — this shapes every trace containing a trap.
+   *Pinned by devspec/trace.md 3.3 and T-06 (same reading; recorded there
+   as devspec SPEC-ISSUES 17 for Hila). Risk retired unless overruled.*
 
 10. **TOOLING-SPEC 3.2 — pred_wb semantics.** u8 field, but PWR writes
     seven predicates at once. Chose: when flags bit 2 (wrote-pred) is
     set, pred_wb = the whole predicate file P7..P0 *after* the write
     (works uniformly for CMP and PWR). **[divergence risk]**
+    *Pinned by devspec/trace.md 2.3.1, verbatim. Risk retired.*
 
 11. **TOOLING-SPEC 3.2 — writes discarded by hardware (r31 dst, p0
     pred).** Chose: discarded writes set no wrote-dst/wrote-pred flag,
     wb/pred_wb stay 0 (the architectural effect is nil).
+    *Pinned by devspec/trace.md 2.3.1 rules (r31 case stated verbatim).*
 
 12. **TOOLING-SPEC 3.2 — intra-cycle record order.** Not pinned. Chose:
     MEMR record(s), then MEMW, then EXEC, all carrying the same cycle;
     TRAP stands alone. **[divergence risk]** for byte-identical diffs.
+    *Pinned by devspec/trace.md 3.3/T-08: access records before their
+    EXEC, atomic MEMR before MEMW, failed CAS emits MEMR only — the
+    implemented order. Risk retired.*
 
 13. **TOOLING-SPEC 3.2 — META payload format.** "key/value text (image
     path+hash, encoding version, mode flags)": no key names, no hash
@@ -82,15 +94,27 @@ they need a spec ruling more urgently than the rest.
     differ across working directories), FNV-1a-64 as the hash. Needs
     pinning before cross-implementation byte comparison can include
     META. **[divergence risk]**
+    *Superseded: devspec/trace.md 2.3.7 pins the v1 catalog (trace,
+    encoding, level, mode, image, image_sha256, platform — exactly, in
+    order) and 5.3 excludes the run-variant keys (mode, image) from
+    comparison, which answers the working-directory concern the basename
+    choice was solving; the hash is SHA-256. Adopted wholesale
+    (emu-c/sha256.c, main.c meta_record), image= now the exact CLI
+    argument, and --replay validates trace/encoding/image_sha256 per
+    5.1. The harness now byte-compares a full run against trace.md TV-2,
+    META included. Risk retired.*
 
 14. **TOOLING-SPEC 3.2 — MEMR `val` for a sign-extending load.** Chose
     the raw memory bytes zero-extended (what memory returned), not the
     sign-extended writeback (which EXEC's wb already records).
+    *Pinned by devspec/trace.md 2.3.3 ("bytes above size zero").*
 
 15. **TOOLING-SPEC 3.2 — are page-table-walk reads traced as MEMR?**
     Chose no: MEMR records architectural data accesses of instructions;
     walk reads are a hardware mechanism. **[divergence risk]** at trace
     level 2.
+    *Pinned by devspec/trace.md 2.3.3/T-12: fetches and walk reads are
+    never recorded. Risk retired.*
 
 16. **TOOLING-SPEC 1 vs ISA-SPEC 11 — image `entry` vs reset PC.**
     TOOLING says the loader "then start[s] at entry"; ISA and PLATFORM
@@ -108,6 +132,10 @@ they need a spec ruling more urgently than the rest.
     print the normal `HALT r0=...` line and exit 0, plus a diagnostic
     note on stderr (stdout contract untouched, failure still loud).
     **[divergence risk]**
+    *stdout/exit side confirmed by root SPEC-ISSUES 12 ("any
+    architectural halt prints the same line and exits 0, emulators must
+    match") and exercised by c1_triplefault/c1_wfihang. The triple
+    fault's trace-side record is a live conflict — see entry 33.*
 
 19. **ISA-SPEC 7.5 — timer compare width.** `cycle >= timecmp` compared
     at full 128-bit sreg width here; the trace's EXEC/TRAP cycle field is
@@ -250,3 +278,41 @@ they need a spec ruling more urgently than the rest.
     trap yet -- and ram_len > 0x1000_0000 makes the spec's own map
     self-overlapping, which needs a ruling anyway. **[divergence
     risk]** (a) and (c) are observable in traces and exit paths.
+    *devspec/boot.md (landed) resolves the map: RAM region 0 is
+    [0, 0x0F00_0000) — 240 MB, ending where the windows begin ("256 MB"
+    read as the address budget below the pixel buffer, devspec
+    SPEC-ISSUES 1); [0x0F06_0000, 0x1000_0000) is an undeclared hole
+    trapping DEVERR (BOOT-15, matching sub-reading (a)'s trap and
+    entry 3); the pixel buffer is device space located by the display
+    record's params, killing sub-reading (c)'s self-overlap. Sub-
+    reading (b) — walk node in a window → PF — is not contradicted.
+    ADOPTION DEFERRED: the current tree still decodes a 256 MB RAM span
+    with the windows carved out and writes a device_count=0 table;
+    switching to the 240 MB region + boot.md 5's byte-exact 4-device
+    reference table (V1) + hole classification changes guest-visible
+    table bytes and the [0x0F06_0000, 0x1000_0000) trap behavior, and
+    belongs to the device phase (build order 6), which this run's
+    dispatch keeps gated. The suite today probes RAM boundaries only
+    below 0x0F00_0000 and above 0x0F06_0000, so it cannot distinguish
+    hole-DEVERR from RAM there — the flip is invisible to it except
+    through the table bytes.*
+
+33. **devspec/trace.md 2.3.4 vs root SPEC-ISSUES 17 — does a triple
+    fault write a diagnostic TRAP record?** Root entry 17 (toolchain,
+    "emulators must match"): delivery at TL=2 delivers nothing, no
+    third TRAP record; checks/c1_triplefault.sh asserts exactly two.
+    devspec/trace.md 2.3.4/3.3/T-07 (landed on main): the trace
+    records the triple fault loudly — one final diagnostic TRAP with
+    the cause/epc/baddr the third trap would have delivered and
+    tl_after = 3, then the trace ends. Both readings are consistent
+    with the frozen specs (ISA 7.2 and CONFORMANCE are silent about
+    the trace; TOOLING 3.2 only ties EXEC to retirement). Verified
+    empirically this iteration: emitting the devspec record turns
+    c1_triplefault red (trace-q renders it fine; the check counts 3).
+    Implemented **root 17** — the shared suite is the operative gate
+    and its author pinned this contract explicitly; the devspec-side
+    flip is one line in deliver() (see the comment there) plus the
+    harness's triplefault-two-traps-no-diagnostic check. Needs either
+    a c1_triplefault update (toolchain's trace.md reconciliation) or a
+    trace.md amendment; flagged for Hila. **[divergence risk]** — the
+    Python implementation may follow trace.md here.
