@@ -332,3 +332,85 @@ def test_priv_invtp_from_user():
     m, _ = run_words(prog, data=[(HANDLER_PA, wbytes(cause_handler()))])
     assert m.regs[10] == E.CAUSES["PRIV"]
     assert m.regs[12] == E.RESET_PC + 4 * 8
+
+
+# --------------------------------------- interrupt priority and WFI edges
+DEVBASE = 0x100000
+
+
+def test_timer_beats_extint_when_both_pending():
+    """ISA-SPEC 7.5: fixed priority timer-then-external. Device pending
+    from cycle 0, timer from cycle 1; at the first IE=1 boundary both are
+    pending -- TIMER must be delivered first, EXTINT right after IRET."""
+    from helpers import QueueDevice, alur
+    dev = QueueDevice(DEVBASE)
+    handler = [mfsr(9, "cause0"),
+               cmpi("CMPEQ", 1, 13, 0, w=64),          # p1: first entry
+               alur("OR", 10, 9, 31, p=pred(1)),       # r10 = first cause
+               alur("OR", 11, 9, 31, p=pred(1, negate=True)),
+               alui("ADD", 13, 13, 1, w=64),
+               ldi(1, 0), mtsr("timecmp", 1),          # disarm timer
+               cmpi("CMPEQ", 2, 13, 2, w=64),          # p2: both taken
+               ldi(3, DEVBASE),
+               lds(4, 3, 0, w=64, p=pred(2)),          # drain device
+               halt(p=pred(2)),
+               iret()]
+    prog = (vbase_setup()
+            + [ldi(1, 1), mtsr("timecmp", 1),
+               ldi(1, S | IE), mtsr("status", 1),
+               b(0)])
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes(handler))],
+                       devices=[dev], events=[(0, 0, b"k")])
+    assert out == "halt"
+    assert m.regs[10] == E.CAUSES["TIMER"]
+    assert m.regs[11] == E.CAUSES["EXTINT"]
+    assert not dev.queue                       # handler drained it
+
+
+def test_extint_level_triggered_until_drained():
+    """ISA-SPEC 7.5: external is level-triggered. A handler that IRETs
+    without draining the device is re-entered immediately; only the
+    draining load stops delivery."""
+    from helpers import QueueDevice
+    dev = QueueDevice(DEVBASE)
+    handler = [alui("ADD", 13, 13, 1, w=64),           # entry counter
+               cmpi("CMPLT", 1, 13, 3, w=64),          # p1: fewer than 3
+               iret(p=pred(1)),                        # bounce back undrained
+               ldi(3, DEVBASE), lds(4, 3, 0, w=64),    # third entry: drain
+               iret()]
+    prog = (vbase_setup()
+            + [ldi(1, S | IE), mtsr("status", 1),
+               nop(), nop(), nop(), nop(), nop(),
+               halt()])
+    m, out = run_words(prog, data=[(HANDLER_PA, wbytes(handler))],
+                       devices=[dev], events=[(0, 0, b"k")])
+    assert out == "halt"
+    assert not m.triple_fault
+    assert m.regs[13] == 3                     # exactly 3 deliveries
+    assert m.regs[4] == 1                      # drain saw 1 queued payload
+
+
+def test_wfi_ie0_time_jumps_then_falls_through():
+    """ISA-SPEC 7.6: with IE=0 the WFI still jumps virtual time to the
+    pending point but delivers nothing; execution continues at the next
+    instruction."""
+    prog = [ldi(1, 500), mtsr("timecmp", 1),   # armed; IE stays 0 (reset)
+            asm("WFI"),
+            ldi(0, 0x77), halt()]
+    m, out = run_words(prog)
+    assert out == "halt"
+    assert not m.triple_fault
+    assert m.regs[0] == 0x77                   # fell through, no delivery
+    assert m.cycle >= 500                      # time really jumped
+    assert m.sregs[E.SREGS["cause0"]] == 0     # nothing was ever delivered
+
+
+def test_wfi_deadlock_halts():
+    """ISA-SPEC 7.6: no timer armed, no events, no device -> no future
+    cycle can make an interrupt pending. WFI halts the machine (loudly),
+    it does not spin."""
+    prog = [ldi(0, 0x2BAD), asm("WFI"), ldi(0, 0), halt()]
+    m, out = run_words(prog)
+    assert out == "halt"
+    assert not m.triple_fault
+    assert m.regs[0] == 0x2BAD                 # never reached the ldi after

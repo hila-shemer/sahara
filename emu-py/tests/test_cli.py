@@ -124,3 +124,25 @@ def test_ram_flag(tmp_path):
     r2 = run_cli(img, "--maxcycles", "100")   # default 256 MB: fine
     assert r2.returncode == 0
     assert r2.stdout.startswith(b"HALT r0=")
+
+
+# ------------------------- non-HALT halts (root SPEC-ISSUES 12) pin the
+# CLI contract: ANY architectural halt prints the same line and exits 0.
+def test_triple_fault_prints_exact_halt_line(tmp_path):
+    marker = 0x3FA170_0000BAD_00000001_DEADD00D
+    # vbase/dfbase at reset are 0; PA 0 reads as zero words (ILLEGAL), so
+    # one SYSCALL escalates fault -> double -> triple deterministically.
+    prog = li128(0, marker) + [syscall()]
+    img = write_img(tmp_path, "triple.img", [(E.RESET_PC, wbytes(prog))])
+    r = run_cli(img, "--maxcycles", "100")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == f"HALT r0={marker:032x}\n".encode()
+
+
+def test_wfi_deadlock_prints_exact_halt_line(tmp_path):
+    marker = 0x3FA170_0000BAD_00000002_DEADD00D
+    prog = li128(0, marker) + [asm("WFI")]     # nothing can ever pend
+    img = write_img(tmp_path, "wfidead.img", [(E.RESET_PC, wbytes(prog))])
+    r = run_cli(img, "--maxcycles", "100")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == f"HALT r0={marker:032x}\n".encode()

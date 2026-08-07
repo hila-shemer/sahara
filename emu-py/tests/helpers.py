@@ -207,6 +207,35 @@ class OrderedTracer:
         return [r[0] for r in self.recs]
 
 
+# ------------------------------------------------------ queue device
+class QueueDevice(mem_.Device):
+    """Minimal EXTINT source shaped like the reference input device
+    (ISA-SPEC 7.5): level-triggered while its queue is non-empty, drained
+    by a load. Stores are recorded (with a pre-store RAM peek so tests
+    can observe the 9.2 release-drain ordering)."""
+
+    def __init__(self, base, size=8, on_store=None):
+        super().__init__(base, size)
+        self.queue = []
+        self.stores = []
+        self.on_store = on_store        # callback(): sampled at store time
+
+    def event(self, payload):
+        self.queue.append(payload)
+
+    def pending(self):
+        return bool(self.queue)
+
+    def load(self, off, size):
+        n = len(self.queue)
+        self.queue.clear()
+        return n
+
+    def store(self, off, size, val):
+        self.stores.append((off, size, val,
+                            self.on_store() if self.on_store else None))
+
+
 # ------------------------------------------------------- trap harness
 HANDLER_PA = 0x2000
 DF_PA = 0x3000
@@ -231,8 +260,10 @@ def dfbase_setup(pa=DF_PA):
 
 # ------------------------------------------------------------ running
 def make_machine(words, ram=1 << 24, data=None, check_invtp=False,
-                 tracer=None, events=(), devorder=None):
+                 tracer=None, events=(), devorder=None, devices=()):
     phys = mem_.PhysMap(ram, devorder=devorder)
+    for dev in devices:
+        phys.add_device(dev)
     prog = b"".join(w.to_bytes(8, "little") for w in words)
     phys.write_raw(E.RESET_PC, prog)
     for pa, blob in (data or []):

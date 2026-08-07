@@ -86,3 +86,64 @@ def test_devorder_loads_snoop_store_queue():
             lds(0, 1, 0, w=64), halt()]
     m, _ = run_words(prog, devorder=4)
     assert m.regs[0] == 11                    # own store visible via snoop
+
+
+# ----------------- weak-store queue (--check-devorder N), ISA-SPEC 9.2.
+# C7 prep: pin the model root SPEC-ISSUES / emu-py SPEC-ISSUES 20 chose.
+DEVBASE = 0x100000
+
+
+def _steps(m, n):
+    for _ in range(n):
+        m.step()
+
+
+def test_devorder_store_sits_in_queue_until_depth():
+    """Ordinary stores are delayed in a depth-N queue; only overflow
+    spills the oldest to RAM (stores may drain in any order, and the
+    check mode models maximal delay)."""
+    from helpers import make_machine
+    prog = [ldi(1, DATA), ldi(2, 0xA1), st(2, 1, 0, w=64),
+            ldi(2, 0xB2), st(2, 1, 8, w=64),
+            ldi(2, 0xC3), st(2, 1, 16, w=64),
+            halt()]
+    m = make_machine(prog, devorder=2)
+    _steps(m, 7)                               # everything but HALT
+    assert len(m.phys.queue) == 2              # B2, C3 still queued
+    assert int.from_bytes(m.phys.read_raw(DATA, 8), "little") == 0xA1
+    assert int.from_bytes(m.phys.read_raw(DATA + 8, 8), "little") == 0
+    m.step()                                   # HALT drains
+    assert not m.phys.queue
+    assert int.from_bytes(m.phys.read_raw(DATA + 8, 8), "little") == 0xB2
+    assert int.from_bytes(m.phys.read_raw(DATA + 16, 8), "little") == 0xC3
+
+
+def test_devorder_device_store_is_release_drain():
+    """ISA-SPEC 9.2(1): a device store drains all earlier ordinary
+    stores BEFORE the device sees the value. Sampled at store time via
+    the device callback, not post-halt (HALT also drains)."""
+    from helpers import QueueDevice, make_machine
+    dev = QueueDevice(
+        DEVBASE, on_store=lambda: int.from_bytes(m.phys.read_raw(DATA, 8),
+                                                 "little"))
+    prog = [ldi(1, DATA), ldi(2, 0xD4), st(2, 1, 0, w=64),
+            ldi(3, DEVBASE), ldi(4, 1), st(4, 3, 0, w=64),
+            halt()]
+    m = make_machine(prog, devorder=8, devices=[dev])
+    m.run(100)
+    assert dev.stores, "device store never landed"
+    off, size, val, ram_at_store = dev.stores[0]
+    assert (off, val) == (0, 1)
+    assert ram_at_store == 0xD4                # drained before device saw it
+
+
+def test_devorder_ifence_drains():
+    from helpers import asm, make_machine
+    prog = [ldi(1, DATA), ldi(2, 0xE5), st(2, 1, 0, w=64),
+            asm("IFENCE"), halt()]
+    m = make_machine(prog, devorder=8)
+    _steps(m, 3)
+    assert len(m.phys.queue) == 1
+    m.step()                                   # IFENCE
+    assert not m.phys.queue
+    assert int.from_bytes(m.phys.read_raw(DATA, 8), "little") == 0xE5

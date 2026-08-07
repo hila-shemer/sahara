@@ -334,3 +334,31 @@ def test_f32_sqrt_vs_host():
         got, _fl = sf.fsqrt(sf.F32, ab, RNE)
         want32 = struct.unpack("<I", struct.pack("<f", math.sqrt(a)))[0]
         assert got == want32, a
+
+
+def test_uf_tininess_detected_after_rounding():
+    """Root SPEC-ISSUES 13 (recommended freeze: after rounding). The
+    distinguishing edge: an exact pre-rounding value just below the
+    smallest normal that rounds UP to it. Before-rounding detection
+    would set UF; after-rounding must give NX only. FMADD makes the
+    pre-rounding value exact: a*b + c with no intermediate rounding."""
+    f64, f32 = sf.F64, sf.F32
+    # f64: 2^-538 * -2^-538 + 2^-1022 = 2^-1022 - 2^-1076
+    a = (1023 - 538) << 52
+    na = (1 << 63) | a
+    minn = 1 << 52                             # smallest normal
+    got, fl = sf.fmadd(f64, a, na, minn, RNE)
+    assert got == minn                         # rounded up into the normals
+    assert fl == sf.NX                         # no UF: not tiny after rounding
+    # companion: 2^-538 * 2^-538 + largest_subnormal stays subnormal -> UF|NX
+    lsub = (1 << 52) - 1
+    got2, fl2 = sf.fmadd(f64, a, a, lsub, RNE)
+    assert got2 == lsub                        # rounded back down (fr = 1/4)
+    assert fl2 == (sf.UF | sf.NX)
+    # f32 same shape: 2^-75 * -2^-76 + 2^-126 = 2^-126 - 2^-151
+    a32 = (127 - 75) << 23
+    nb32 = (1 << 31) | ((127 - 76) << 23)
+    minn32 = 1 << 23
+    got3, fl3 = sf.fmadd(f32, a32, nb32, minn32, RNE)
+    assert got3 == minn32
+    assert fl3 == sf.NX
