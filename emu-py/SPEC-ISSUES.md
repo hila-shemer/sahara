@@ -202,3 +202,13 @@ ruling most urgently.
     table-driven classification where an empty table means it is all
     RAM) would pass/fail c3_irq_dev phase 2 differently and diverge
     on a plain load at 0x0F06_0000. **[cross-impl]**
+
+25. **ISA-SPEC 5.3 vs PLATFORM-SPEC 1 — UNALIGNED vs DEVERR on a
+    misaligned device access (root SPEC-ISSUES 25).** emu-py already
+    implements the order the root entry recommends: the alignment
+    check is on the ea itself and runs before translation and before
+    device-space classification, in both the load/store and atomic
+    paths — so a misaligned non-64-bit access to a device register
+    raises UNALIGNED, baddr = ea. No shared test depends on the
+    priority yet (C7 avoids the overlap on purpose); pinned locally in
+    test_mem.py so a future reordering shows up. **[cross-impl]**

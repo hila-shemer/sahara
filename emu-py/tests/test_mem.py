@@ -205,3 +205,12 @@ def test_fetch_from_device_space_deverr():
     m, _ = _dev_space_run(prog)
     assert m.regs[10] == E.CAUSES["DEVERR"]
     assert m.regs[12] == DSB            # epc = the unfetchable pc
+
+
+def test_misaligned_device_access_unaligned_wins():
+    # root SPEC-ISSUES 25's recommended order (local 25): alignment is
+    # a property of the ea, checked before any address classification
+    prog = li128(1, DSB + 2) + [lds(2, 1, 0, w=32), halt()]
+    m, _ = _dev_space_run(prog)
+    assert m.regs[10] == E.CAUSES["UNALIGNED"]
+    assert m.regs[11] == DSB + 2
