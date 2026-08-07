@@ -104,9 +104,7 @@ A repo that builds with `./build.sh` and passes `./run-tests.sh`:
 - No performance work. No optimization flags beyond -O1. Clarity is the
   optimization target: this is the *reference* implementation other
   implementations will be diffed against.
-- Plain portable C11 for the emulator core unless told otherwise. Do not
-  apply the rightwayc doctrine to this repo. [Hila: flip this line if you
-  want doctrine here.]
+- Use rightwayc - ~/proj/rightwayc and the applicable skills
 - When the conformance suite and the spec disagree, the spec wins; when
   the spec and your intuition disagree, the spec wins *and* SPEC-ISSUES.md
   gets an entry. The spec changes only by Hila editing it.
