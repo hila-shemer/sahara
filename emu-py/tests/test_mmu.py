@@ -366,6 +366,48 @@ def test_ptbase_change_with_asid_ok():
     assert m.regs[6] == 222
 
 
+def _two_trees_one_frame(*, u_b):
+    """Both trees map VA 0x10000 to frame 0x30000; tree B's leaf
+    carries u=u_b (tree A's has the pt_leaf defaults, u=0). Code page
+    is identical under both, so only the data access can differ."""
+    return (tree({1: leaf(0x30000)})
+            + [(ROOT_B_PA, node(8, 0, 0, {0: table(CHILD_B_PA)})),
+               (CHILD_B_PA, node(0, 0, VPN_MASK & ~0xFF,
+                                 {0: leaf(0, r=1, w=1, x=1, u=1),
+                                  1: leaf(0x30000, u=u_b)})),
+               (0x30000, (111).to_bytes(8, "little"))])
+
+
+def test_ptbase_change_perms_only_diff_asserts():
+    # Root SPEC-ISSUES 21: stale = the cached entry's (frame, perms)
+    # differs from a fresh walk - perms included. Tree B flips only the
+    # U bit; the supervisor load ignores U, so the *outcome* is
+    # identical either way, but the served result is stale and the
+    # check must fire. (Exactly the c2_mmu ROOT2 dispute, local 23.)
+    prog = (enable()
+            + [ldi(1, 0x10000), lds(5, 1, 0, w=64),
+               ldi(2, ROOT_B_PA), mtsr("ptbase", 2),
+               lds(6, 1, 0, w=64), halt()])
+    m = make_machine(prog, data=_two_trees_one_frame(u_b=1),
+                     check_invtp=True)
+    with pytest.raises(machine.CheckFail):
+        m.run(100000)
+
+
+def test_ptbase_change_identical_result_ok():
+    # ...and the other half of reading 21: identical (frame, perms)
+    # under both roots is not stale - ptbase alone, no INVTP, no assert.
+    prog = (enable()
+            + [ldi(1, 0x10000), lds(5, 1, 0, w=64),
+               ldi(2, ROOT_B_PA), mtsr("ptbase", 2),
+               lds(6, 1, 0, w=64), halt()])
+    m, out = run_words(prog, data=_two_trees_one_frame(u_b=0),
+                       check_invtp=True)
+    assert out == "halt"
+    assert m.regs[5] == 111
+    assert m.regs[6] == 111
+
+
 def test_cyclic_table_walk_faults():
     # root entry 1 points back at the root: the walk must terminate and
     # fault PF rather than loop (emu-py SPEC-ISSUES 13, depth guard).

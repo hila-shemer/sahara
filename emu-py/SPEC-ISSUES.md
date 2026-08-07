@@ -148,3 +148,22 @@ ruling most urgently.
     re-emitted with cycle C) at the first between-instruction point
     where machine cycle >= C, before interrupt recognition at that
     point. **[cross-impl]** (moot until devices exist).
+
+23. **tests/gen_c2.py ROOT2 / c2_mmu.s test [32] — bug is in the
+    test, not the spec or the emulator.** The [32] switch window
+    (`mtsr ptbase, ROOT2` while asid is still 0xA) fetches the code
+    page before the asid write; the phantom cache holds ROOT's
+    (frame 0, RWXU), a fresh walk under ROOT2 gives (frame 0, RWX) —
+    ROOT2's VPN0 leaf is `leaf(0x00000, "R", "W", "X")`, no "U",
+    where NODEB entry 0 has "U". Root SPEC-ISSUES 21 froze stale =
+    "(frame and permissions) differs", and gen_c2.py's own comment
+    says the two roots "translate identically ... so the switch
+    window cannot trip a result-comparing stale check" — the
+    generator matched the frame and missed the U bit. emu-py
+    therefore CHECKFAILs c2_mmu at va 0x17e0, per the frozen reading.
+    Verified the U bit is the whole dispute: regenerating with "U"
+    added to ROOT2 entry 0 changes exactly one PTE word (0x1e →
+    0x3e) and c2_mmu then passes fully on emu-py (HALT 600d, both
+    runs, traces byte-identical). One-character fix, owned by the
+    toolchain agent. Local tests pin both halves of reading 21
+    (perms-only diff asserts; identical result does not).
