@@ -1,0 +1,12 @@
+# Sahara conformance suite manifest.
+# Format: NAME SRC [level=N] [expect=<32 lowercase hex>] [extra emulator flags]
+# run-tests.sh prepends tests/defs.s to every assembly and always passes
+# --check-invtp. difftest.sh forces trace level 1 (per toolchain-prompt).
+# expect= overrides the required HALT r0 line (default PASS magic 600d)
+# for tests that end in a non-HALT-instruction halt (SPEC-ISSUES 12).
+c0_smoke c0_smoke.s
+c1_traps c1_traps.s
+c1_triplefault c1_triplefault.s expect=00000000000000000000000000003f3f
+c3_atomics c3_atomics.s
+c5_base c5_base.s
+c6_control c6_control.s level=2

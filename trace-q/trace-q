@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""trace-q — Sahara execution-trace query tool (TOOLING-SPEC 3.3).
+
+Usage:
+  trace-q exec CYCLE TRACE [--sym FILE]
+  trace-q at PC TRACE [--sym FILE]
+  trace-q last-write ADDR [--before CYCLE] TRACE [--sym FILE]
+  trace-q reg R --at CYCLE TRACE
+  trace-q find (--pc X | --wrote-reg R=V | --touched A)
+               [--from C] [--to C] [--last] TRACE [--sym FILE]
+  trace-q diverge A.trc B.trc [--ignore-meta] [--sym FILE]
+  trace-q range C1 C2 TRACE [--sym FILE]
+  trace-q trapdump TRACE [--sym FILE]
+
+Every output is plain text, one fact per line, symbolized when a .sym
+file is given. Register/predicate values are reconstructed from EXEC
+writebacks; `reg` reports the value AFTER the given cycle retires.
+Numbers accept decimal or 0x hex. Errors are fatal and named.
+"""
+
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
+
+import encoding as E          # noqa: E402
+import disasm as D            # noqa: E402
+import tracefile as T         # noqa: E402
+
+
+def die(msg):
+    sys.exit(f"trace-q: error: {msg}")
+
+
+def num(text, what):
+    try:
+        return int(text, 0)
+    except ValueError:
+        die(f"{what}: not a number: {text!r}")
+
+
+def take_opt(args, name, has_value=True):
+    if name in args:
+        i = args.index(name)
+        if has_value:
+            if i + 1 >= len(args):
+                die(f"{name} needs a value")
+            v = args[i + 1]
+            del args[i:i + 2]
+            return v
+        del args[i]
+        return True
+    return None
+
+
+def hx(v):
+    return f"0x{v:x}"
+
+
+def render_exec(rec, symtab):
+    f = rec.fields
+    parts = [f"cycle={f['cycle']}", f"pc={hx(f['pc'])}"]
+    if symtab:
+        s = symtab.lookup(f["pc"])
+        if s:
+            parts.append(f"sym={s}")
+    parts.append(f"insn=0x{f['insn']:016x}")
+    flags = f["flags"]
+    if flags & T.FLAG_SQUASHED:
+        parts.append("squashed=1")
+    if flags & T.FLAG_WROTE_DST:
+        parts.append(f"wb={hx(f['wb'])}")
+    if flags & T.FLAG_WROTE_PRED:
+        parts.append(f"pred_wb=0b{f['pred_wb']:08b}")
+    parts.append(f'asm="{D.disasm(f["insn"], pc=f["pc"], symtab=symtab)}"')
+    return " ".join(parts)
+
+
+def render_mem(rec, symtab):
+    f = rec.fields
+    parts = [f"cycle={f['cycle']}", f"type={rec.name}",
+             f"ea={hx(f['ea'])}"]
+    if symtab:
+        s = symtab.lookup(f["ea"])
+        if s:
+            parts.append(f"sym={s}")
+    parts.append(f"size={f['size']}")
+    parts.append(f"val={hx(f['val'])}")
+    return " ".join(parts)
+
+
+def render_trap(rec, symtab):
+    f = rec.fields
+    cause = {v: k for k, v in E.CAUSES.items()}.get(f["cause"],
+                                                    str(f["cause"]))
+    parts = [f"cycle={f['cycle']}", f"cause={cause}",
+             f"epc={hx(f['epc'])}"]
+    if symtab:
+        s = symtab.lookup(f["epc"])
+        if s:
+            parts.append(f"epc_sym={s}")
+    parts.append(f"baddr={hx(f['baddr'])}")
+    parts.append(f"tl_after={f['tl_after']}")
+    return " ".join(parts)
+
+
+def render(rec, symtab):
+    if rec.type == T.T_EXEC:
+        return render_exec(rec, symtab)
+    if rec.type in (T.T_MEMW, T.T_MEMR, T.T_DEVW):
+        return render_mem(rec, symtab)
+    if rec.type == T.T_TRAP:
+        return render_trap(rec, symtab)
+    if rec.type == T.T_EVENT:
+        f = rec.fields
+        return (f"cycle={f['cycle']} type=EVENT device={f['device']} "
+                f"len={len(f['bytes'])} bytes={f['bytes'].hex()}")
+    if rec.type == T.T_META:
+        return "type=META " + " ".join(rec.fields["text"].split("\n"))
+    return f"type={rec.type}"
+
+
+def load(path, symtab_path):
+    try:
+        recs = T.read_records(path)
+        symtab = T.Symtab(T.load_sym(symtab_path)) if symtab_path else None
+    except T.TraceError as e:
+        die(str(e))
+    return recs, symtab
+
+
+def insn_field(insn, name):
+    lsb, width = E.FIELDS[name]
+    return (insn >> lsb) & ((1 << width) - 1)
+
+
+# ---------------------------------------------------------------- commands
+
+
+def cmd_exec(args):
+    sym = take_opt(args, "--sym")
+    if len(args) != 2:
+        die("usage: exec CYCLE TRACE [--sym FILE]")
+    cycle = num(args[0], "cycle")
+    recs, symtab = load(args[1], sym)
+    for r in recs:
+        if r.type == T.T_EXEC and r.fields["cycle"] == cycle:
+            print(render_exec(r, symtab))
+            return
+    print("none")
+
+
+def cmd_at(args):
+    sym = take_opt(args, "--sym")
+    if len(args) != 2:
+        die("usage: at PC TRACE [--sym FILE]")
+    pc = num(args[0], "pc")
+    recs, symtab = load(args[1], sym)
+    found = False
+    for r in recs:
+        if r.type == T.T_EXEC and r.fields["pc"] == pc:
+            print(r.fields["cycle"])
+            found = True
+    if not found:
+        print("none")
+
+
+def cmd_last_write(args):
+    sym = take_opt(args, "--sym")
+    before = take_opt(args, "--before")
+    if len(args) != 2:
+        die("usage: last-write ADDR [--before CYCLE] TRACE [--sym FILE]")
+    addr = num(args[0], "addr")
+    recs, symtab = load(args[1], sym)
+    best = None
+    for r in recs:
+        if r.type in (T.T_MEMW, T.T_DEVW):
+            f = r.fields
+            if before is not None and f["cycle"] >= num(before, "--before"):
+                continue
+            if f["ea"] <= addr < f["ea"] + f["size"]:
+                best = r
+    if best is None:
+        print("none")
+    else:
+        print(render_mem(best, symtab))
+
+
+def parse_regname(text):
+    t = text.strip().lower()
+    aliases = {"sp": 28, "ra": 29, "k0": 30, "zero": 31}
+    if t in aliases:
+        return ("r", aliases[t])
+    if t.startswith("r") and t[1:].isdigit() and 0 <= int(t[1:]) <= 31:
+        return ("r", int(t[1:]))
+    if t.startswith("p") and t[1:].isdigit() and 0 <= int(t[1:]) <= 7:
+        return ("p", int(t[1:]))
+    die(f"bad register name {text!r}")
+
+
+def reconstruct_reg(recs, kind, idx, at_cycle):
+    """Register/predicate value after cycle `at_cycle` retires.
+
+    Reset state per ISA-SPEC 11: GPRs 0, p0=1, p1-p7=0.
+    """
+    if kind == "r" and idx == 31:
+        return 0
+    if kind == "p" and idx == 0:
+        return 1
+    val = 0
+    for r in recs:
+        if r.type != T.T_EXEC or r.fields["cycle"] > at_cycle:
+            continue
+        f = r.fields
+        if kind == "r" and f["flags"] & T.FLAG_WROTE_DST \
+                and insn_field(f["insn"], "dst") == idx:
+            val = f["wb"]
+        if kind == "p" and f["flags"] & T.FLAG_WROTE_PRED:
+            val = (f["pred_wb"] >> idx) & 1
+    return val
+
+
+def cmd_reg(args):
+    take_opt(args, "--sym")  # accepted, unused
+    at = take_opt(args, "--at")
+    if at is None or len(args) != 2:
+        die("usage: reg R --at CYCLE TRACE")
+    kind, idx = parse_regname(args[0])
+    recs, _ = load(args[1], None)
+    v = reconstruct_reg(recs, kind, idx, num(at, "--at"))
+    print(f"{kind}{idx}={hx(v)}" if kind == "r" else f"p{idx}={v}")
+
+
+def cmd_find(args):
+    sym = take_opt(args, "--sym")
+    pc = take_opt(args, "--pc")
+    wrote = take_opt(args, "--wrote-reg")
+    touched = take_opt(args, "--touched")
+    frm = take_opt(args, "--from")
+    to = take_opt(args, "--to")
+    last = take_opt(args, "--last", has_value=False)
+    if sum(x is not None for x in (pc, wrote, touched)) != 1:
+        die("find needs exactly one of --pc, --wrote-reg, --touched")
+    if len(args) != 1:
+        die("usage: find (--pc X | --wrote-reg R=V | --touched A) "
+            "[--from C] [--to C] [--last] TRACE [--sym FILE]")
+    recs, symtab = load(args[0], sym)
+    frm_c = num(frm, "--from") if frm is not None else None
+    to_c = num(to, "--to") if to is not None else None
+
+    if wrote is not None:
+        if "=" not in wrote:
+            die("--wrote-reg wants R=V")
+        rname, vtext = wrote.split("=", 1)
+        kind, idx = parse_regname(rname)
+        want = num(vtext, "--wrote-reg value")
+
+    def matches(r):
+        f = r.fields
+        c = f.get("cycle")
+        if c is None:
+            return False
+        if frm_c is not None and c < frm_c:
+            return False
+        if to_c is not None and c > to_c:
+            return False
+        if pc is not None:
+            return r.type == T.T_EXEC and f["pc"] == num(pc, "--pc")
+        if touched is not None:
+            a = num(touched, "--touched")
+            return r.type in (T.T_MEMW, T.T_MEMR, T.T_DEVW) \
+                and f["ea"] <= a < f["ea"] + f["size"]
+        # wrote-reg
+        if r.type != T.T_EXEC:
+            return False
+        if kind == "r":
+            return bool(f["flags"] & T.FLAG_WROTE_DST) \
+                and insn_field(f["insn"], "dst") == idx and f["wb"] == want
+        return bool(f["flags"] & T.FLAG_WROTE_PRED) \
+            and ((f["pred_wb"] >> idx) & 1) == want
+
+    hit = None
+    for r in recs:
+        if matches(r):
+            hit = r
+            if not last:
+                break
+    if hit is None:
+        print("none")
+    else:
+        print(render(hit, symtab))
+
+
+def cmd_diverge(args):
+    sym = take_opt(args, "--sym")
+    ignore_meta = take_opt(args, "--ignore-meta", has_value=False)
+    if len(args) != 2:
+        die("usage: diverge A.trc B.trc [--ignore-meta] [--sym FILE]")
+    ra, symtab = load(args[0], sym)
+    rb, _ = load(args[1], sym)
+    if ignore_meta:
+        ra = [r for r in ra if r.type != T.T_META]
+        rb = [r for r in rb if r.type != T.T_META]
+    n = min(len(ra), len(rb))
+    for i in range(n):
+        if ra[i] != rb[i]:
+            print(f"diverge record={i}")
+            print(f"a: {render(ra[i], symtab)}")
+            print(f"b: {render(rb[i], symtab)}")
+            sys.exit(1)
+    if len(ra) != len(rb):
+        longer, tag = (ra, "a") if len(ra) > len(rb) else (rb, "b")
+        print(f"diverge record={n} (length: a={len(ra)} b={len(rb)})")
+        print(f"{tag}: {render(longer[n], symtab)}")
+        print(f"{'b' if tag == 'a' else 'a'}: <end of trace>")
+        sys.exit(1)
+    print(f"identical ({n} records)")
+
+
+def cmd_range(args):
+    sym = take_opt(args, "--sym")
+    if len(args) != 3:
+        die("usage: range C1 C2 TRACE [--sym FILE]")
+    c1, c2 = num(args[0], "C1"), num(args[1], "C2")
+    recs, symtab = load(args[2], sym)
+    found = False
+    for r in recs:
+        if r.type == T.T_EXEC and c1 <= r.fields["cycle"] <= c2:
+            print(render_exec(r, symtab))
+            found = True
+    if not found:
+        print("none")
+
+
+def cmd_trapdump(args):
+    sym = take_opt(args, "--sym")
+    if len(args) != 1:
+        die("usage: trapdump TRACE [--sym FILE]")
+    recs, symtab = load(args[0], sym)
+    found = False
+    for r in recs:
+        if r.type == T.T_TRAP:
+            print(render_trap(r, symtab))
+            found = True
+    if not found:
+        print("none")
+
+
+COMMANDS = {
+    "exec": cmd_exec,
+    "at": cmd_at,
+    "last-write": cmd_last_write,
+    "reg": cmd_reg,
+    "find": cmd_find,
+    "diverge": cmd_diverge,
+    "range": cmd_range,
+    "trapdump": cmd_trapdump,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        sys.exit(__doc__.strip())
+    cmd = sys.argv[1]
+    if cmd not in COMMANDS:
+        die(f"unknown query {cmd!r} (have: {', '.join(COMMANDS)})")
+    COMMANDS[cmd](list(sys.argv[2:]))
+
+
+if __name__ == "__main__":
+    main()
