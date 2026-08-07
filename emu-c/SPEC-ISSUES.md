@@ -146,7 +146,8 @@ they need a spec ruling more urgently than the rest.
     format.** "FP -> FP (32 <-> 64)" plus "illegal format combinations
     trap ILLEGAL". Chose: same-format FCVTFF traps ILLEGAL (the spec
     names only the two cross conversions); the permissive reading is a
-    canonicalization no-op. **[divergence risk]**
+    canonicalization no-op. **Resolved by the shared suite:** c4_fp.s
+    test 920 asserts the raw same-format word traps ILLEGAL.
 
 24. **ISA-SPEC 10.3 — underflow flag definition.** 754 leaves tininess
     detection (before vs after rounding) to the implementation and the
@@ -154,7 +155,8 @@ they need a spec ruling more urgently than the rest.
     when the result is also inexact (the x86-SSE convention; RISC-V
     uses the same pair). **[divergence risk]** — a before-rounding
     implementation differs on results that round up to the smallest
-    normal.
+    normal. c4_fp.s deliberately keeps its UF vectors off that edge
+    until root SPEC-ISSUES 13 is frozen, so the risk stays untested.
 
 25. **ISA-SPEC 10.2 — signaling NaN vs FCMPEQ.** "FCMPLT and FCMPLE
     with a NaN operand raise NV, FCMPEQ does not" — read literally:
@@ -162,17 +164,23 @@ they need a spec ruling more urgently than the rest.
     754's compareQuietEqual (which signals on sNaN). Implemented the
     literal spec. Everywhere else any sNaN operand raises NV (FMIN/
     FMAX included, per 754-2019 minimum/maximum). **[divergence risk]**
+    — c4_fp.s only feeds FCMPEQ a qNaN, never an sNaN, so the shared
+    suite does not arbitrate this.
 
 26. **ISA-SPEC 10.2 — FMADD of (0, inf, c).** 754-2008/2019 makes NV
     for fusedMultiplyAdd(0, inf, qNaN) implementation-defined. Chose:
     0 x inf raises NV and returns the canonical qNaN regardless of c
-    (the RISC-V choice). **[divergence risk]**
+    (the RISC-V choice). **[divergence risk]** — c4_fp.s covers
+    FMADD(inf, 0, 1.0), where NV is forced under either reading; the
+    c=qNaN case that separates them is untested.
 
 27. **ISA-SPEC 10.4 — NX on inexact conversions.** 10.4 mentions only
     NV (saturation) explicitly; standard 754 also raises NX on inexact
     F->I truncation and inexact I->F / F->F rounding. Implemented the
     standard behavior: NX accumulates for inexact conversions, and is
-    *not* raised alongside a saturating NV. **[divergence risk]**
+    *not* raised alongside a saturating NV. **Resolved by the shared
+    suite:** c4_fp.s asserts flags=NX on 21 inexact-conversion vectors
+    and NV alone on the saturating ones.
 
 28. **ISA-SPEC 10.3 — exact overflow raises NX.** A result exactly
     representable at an out-of-range exponent (e.g. maxfin + maxfin at
