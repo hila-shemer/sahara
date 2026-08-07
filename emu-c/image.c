@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "hostmem.h"
+#include "sha256.h"
 
 #define IMG_MAGIC 0x3130474d49484153ull /* "SAHIMG01" little-endian */
 #define IMG_HDR_BYTES 32u
@@ -69,7 +70,7 @@ out:
 }
 
 const char *se_image_load(SeMem *m, const char *path, se_u128 *entry_out,
-                          uint64_t *fnv64_out)
+                          uint8_t sha256_out[32])
 {
     uint8_t *buf;
     uint64_t flen;
@@ -77,10 +78,7 @@ const char *se_image_load(SeMem *m, const char *path, se_u128 *entry_out,
     if (serr)
         return serr;
 
-    uint64_t fnv = 0xcbf29ce484222325ull;
-    for (uint64_t i = 0; i < flen; i++)
-        fnv = (fnv ^ buf[i]) * 0x100000001b3ull;
-    *fnv64_out = fnv;
+    se_sha256(buf, flen, sha256_out);
 
     const char *err = NULL;
     if (get_u64(buf) != IMG_MAGIC) {

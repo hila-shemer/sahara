@@ -660,6 +660,110 @@ def test_determinism():
                   "traces differ")
 
 
+# devspec/trace.md TV-1 (112-byte reference image) and TV-2 (its complete
+# 449-byte level-1 trace). Bytes extracted mechanically from the spec's
+# hex dumps; the image's SHA-256 is re-checked below against the digest
+# the spec publishes, so a transcription error cannot pass silently.
+TV1_IMG = bytes.fromhex(
+    "534148494d473031001000000000000000000000000000000100000000000000"
+    "0010000000000000000000000000000050000000000000002000000000000000"
+    "20000000000000000000000000000000541000000014000003200200001e0000"
+    "3600c40f00130000fe00000000000000")
+TV1_SHA = "f9d6f74caea6168036806d42309781440c66f16e46c60cadf8230eabb98d60e8"
+TV2_TRC = bytes.fromhex(
+    "07000000a000000074726163653d310a656e636f64696e673d312e302d647261"
+    "66740a6c6576656c3d310a6d6f64653d6c6976650a696d6167653d6578616d70"
+    "6c652e696d670a696d6167655f7368613235363d663964366637346361656136"
+    "3136383033363830366434323330393738313434306336366631366534366336"
+    "30636164663832333065616262393864363065380a706c6174666f726d3d312e"
+    "302d64726166740a010000003200000000000000000000000010000000000000"
+    "0000000000000000541000000014000005000000000000000000000000000000"
+    "0200010000003200000001000000000000000810000000000000000000000000"
+    "000003200200001e00000c000000000000000000000000000000020002000000"
+    "2900000002000000000000001000000000000000000000000000000008050000"
+    "0000000000000000000000000001000000320000000200000000000000101000"
+    "000000000000000000000000003600c40f001300000000000000000000000000"
+    "0000000000000001000000320000000300000000000000181000000000000000"
+    "00000000000000fe000000000000000000000000000000000000000000000000"
+    "00")
+
+
+def _post_meta(trc):
+    """Byte offset just past record 0 (META)."""
+    assert trc[0] == 7, "record 0 not META"
+    plen = int.from_bytes(trc[4:8], "little")
+    return 8 + plen
+
+
+def test_trace_golden():
+    import hashlib
+    check("tv1-selfcheck", hashlib.sha256(TV1_IMG).hexdigest() == TV1_SHA,
+          "embedded TV-1 bytes corrupt")
+    with tempfile.TemporaryDirectory() as d:
+        dp = pathlib.Path(d)
+        (dp / "example.img").write_bytes(TV1_IMG)
+        # Live run: the whole file, META included, must equal TV-2
+        # (image= is the exact CLI argument, hence cwd=d).
+        p = subprocess.run(
+            [str(EMU), "example.img", "--trace", "t.trc",
+             "--trace-level", "1"],
+            capture_output=True, timeout=60, cwd=d)
+        got = (dp / "t.trc").read_bytes()
+        check("tv2-golden-trace",
+              p.returncode == 0 and p.stdout == b"HALT r0=%032x\n" % 0
+              and got == TV2_TRC,
+              f"rc={p.returncode} err={p.stderr!r} "
+              f"diff@{next((i for i in range(min(len(got), len(TV2_TRC))) if got[i] != TV2_TRC[i]), min(len(got), len(TV2_TRC)))} "
+              f"len={len(got)}/{len(TV2_TRC)}")
+        # Replay of that trace: post-META records byte-identical
+        # (trace.md 5.2/5.3), META mode=replay.
+        p = subprocess.run(
+            [str(EMU), "example.img", "--replay", "t.trc", "--trace",
+             "t2.trc", "--trace-level", "1"],
+            capture_output=True, timeout=60, cwd=d)
+        t2 = (dp / "t2.trc").read_bytes()
+        check("tv2-replay-identical",
+              p.returncode == 0
+              and t2[_post_meta(t2):] == TV2_TRC[_post_meta(TV2_TRC):]
+              and b"mode=replay\n" in t2[:_post_meta(t2)],
+              f"rc={p.returncode} err={p.stderr!r}")
+        # Tampered image_sha256 in META: replay must refuse to start
+        # (trace.md 5.1).
+        bad = bytearray(TV2_TRC)
+        i = TV2_TRC.index(b"image_sha256=") + len(b"image_sha256=")
+        bad[i] = ord("0") if bad[i] != ord("0") else ord("1")
+        (dp / "bad.trc").write_bytes(bytes(bad))
+        p = subprocess.run(
+            [str(EMU), "example.img", "--replay", "bad.trc"],
+            capture_output=True, timeout=60, cwd=d)
+        check("replay-sha-mismatch-refused",
+              p.returncode not in (0, 2, 3) and b"mismatch" in p.stderr,
+              f"rc={p.returncode} err={p.stderr!r}")
+        # Triple fault trace: exactly two TRAP records, none with
+        # tl_after = 3 -- root SPEC-ISSUES 17's pinned reading, which
+        # checks/c1_triplefault.sh also asserts. devspec/trace.md 2.3.4
+        # requires a third diagnostic TRAP (tl_after = 3) instead; the
+        # conflict is emu-c/SPEC-ISSUES 33, and this check flips with
+        # it. vbase = dfbase = 0 turns one SYSCALL into the ILLEGAL
+        # cascade.
+        (dp / "tf.img").write_bytes(
+            image({0x1000: [enc("LDI", dst=0, imm=77), enc("SYSCALL")]}))
+        p = subprocess.run(
+            [str(EMU), "tf.img", "--trace", "tf.trc", "--trace-level", "1"],
+            capture_output=True, timeout=60, cwd=d)
+        t = (dp / "tf.trc").read_bytes()
+        off, traps = 0, []
+        while off + 8 <= len(t):
+            plen = int.from_bytes(t[off + 4:off + 8], "little")
+            if t[off] == 4:  # TRAP
+                traps.append(t[off + 8:off + 8 + plen])
+            off += 8 + plen
+        check("triplefault-two-traps-no-diagnostic",
+              p.returncode == 0 and off == len(t) and len(traps) == 2
+              and [tp[48] for tp in traps] == [1, 2],
+              f"rc={p.returncode} tl_afters={[tp[48] for tp in traps]}")
+
+
 def test_fuzz():
     rng = random.Random(1234)
     bad = 0
@@ -713,6 +817,8 @@ def main():
     test_fp_cvt()
     print("determinism:")
     test_determinism()
+    print("trace golden (devspec/trace.md TV-1/TV-2):")
+    test_trace_golden()
     print("cli:")
     test_cli_contract()
     print("fuzz:")

@@ -10,10 +10,21 @@ python3 ../encoding.py check
 (cd .. && python3 crosscheck.py ISA-SPEC.md)
 
 regen="gen/.sahara_isa.h.regen"
-trap 'rm -f "$regen"' EXIT
+svregen="gen/.spec_version.h.regen"
+trap 'rm -f "$regen" "$svregen"' EXIT
 python3 ../encoding.py cheader "$regen" >/dev/null
 diff -u ../sahara_isa.h "$regen"     # committed root header is fresh
 diff -u gen/sahara_isa.h "$regen"    # the copy we compile against matches
+python3 - <<'EOF' > "$svregen"
+import sys
+sys.path.insert(0, "..")
+import encoding
+print("/* Generated from encoding.py SPEC_VERSION -- do not edit.")
+print(" * Regenerated and drift-checked by build.sh; consumed by the trace")
+print(" * META record's encoding= key (devspec/trace.md 2.3.7). */")
+print(f'#define SE_ENCODING_SPEC_VERSION "{encoding.SPEC_VERSION}"')
+EOF
+diff -u gen/spec_version.h "$svregen" # META encoding= tracks encoding.py
 
 bazel build //...
 bazel test //...

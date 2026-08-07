@@ -9,6 +9,7 @@ rw_c_library(
         "hostmem.c",
         "image.c",
         "mem.c",
+        "sha256.c",
         "trace.c",
     ],
     hdrs = [
@@ -18,9 +19,11 @@ rw_c_library(
         "image.h",
         "mem.h",
         "platform.h",
+        "sha256.h",
         "trace.h",
         "u128.h",
         "gen/sahara_isa.h",
+        "gen/spec_version.h",
     ],
 )
 

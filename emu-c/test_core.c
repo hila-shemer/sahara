@@ -5,10 +5,13 @@
  * cross-check of the same code path through the emulator binary). */
 #include <stdio.h>
 
+#include <string.h>
+
 #include "cpu.h"
 #include "gen/sahara_isa.h"
 #include "mem.h"
 #include "rw/status.h"
+#include "sha256.h"
 #include "u128.h"
 
 static void test_extend(void)
@@ -144,12 +147,37 @@ static void test_mmu(void)
     RW_ASSERT(!x.fault && x.pa == 0x99990u);
 }
 
+/* FIPS 180-4 known-answer vectors: empty, one-block, and the two-block
+ * 56-byte message (exercises the 128-byte padding tail). The image-level
+ * check against devspec/trace.md TV-1's published digest lives in
+ * test/run_tests.py. */
+static void sha_vec(const char *msg, const char *want_hex)
+{
+    uint8_t d[32];
+    se_sha256((const uint8_t *)msg, strlen(msg), d);
+    char hex[65];
+    for (unsigned i = 0; i < 32u; i++)
+        snprintf(hex + 2u * i, 3u, "%02x", d[i]);
+    RW_ASSERT(strcmp(hex, want_hex) == 0);
+}
+
+static void test_sha256(void)
+{
+    sha_vec("",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    sha_vec("abc",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    sha_vec("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+}
+
 int main(void)
 {
     test_extend();
     test_mulh();
     test_sparse_mem();
     test_mmu();
+    test_sha256();
     printf("test_core: OK\n");
     return 0;
 }
