@@ -1,13 +1,18 @@
 # Sahara conformance suite manifest.
-# Format: NAME SRC [level=N] [expect=<32 lowercase hex>] [extra emulator flags]
+# Format: NAME SRC [level=N] [expect=<hex32>|expect=checkfail] [flags]
 # run-tests.sh prepends tests/defs.s to every assembly and always passes
 # --check-invtp. difftest.sh forces trace level 1 (per toolchain-prompt).
 # expect= overrides the required HALT r0 line (default PASS magic 600d)
 # for tests that end in a non-HALT-instruction halt (SPEC-ISSUES 12).
+# expect=checkfail: the correct outcome is a check-mode assertion —
+# exit 3, stdout first word CHECKFAIL, reason text not compared
+# (SPEC-ISSUES 22/23).
 c0_smoke c0_smoke.s
 c1_traps c1_traps.s
 c1_triplefault c1_triplefault.s expect=00000000000000000000000000003f3f
 c2_mmu c2_mmu.s
+c2_noinvtp_remap c2_noinvtp_remap.s expect=checkfail
+c2_noinvtp_ptbase c2_noinvtp_ptbase.s expect=checkfail
 c3_atomics c3_atomics.s
 c4_fp c4_fp.s
 c5_base c5_base.s
