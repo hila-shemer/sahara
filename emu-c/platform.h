@@ -1,7 +1,7 @@
 #ifndef SE_PLATFORM_H
 #define SE_PLATFORM_H
 
-#include "rw/attrs.h"
+#include "rwc/attrs.h"
 #include "u128.h"
 
 /* Reference-platform physical map, PLATFORM-SPEC section 1 as resolved
@@ -43,7 +43,7 @@ typedef enum SePlatSpace {
     SE_SPACE_HOLE,    /* in no region and no window: always DEVERR */
 } SePlatSpace;
 
-RW_WARN_UNUSED static inline SePlatSpace se_plat_classify(se_u128 pa)
+RWC_WARN_UNUSED static inline SePlatSpace se_plat_classify(se_u128 pa)
 {
     if (pa < SE_PLAT_DISPLAY_BASE)
         return SE_SPACE_RAM;

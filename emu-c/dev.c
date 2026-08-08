@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "rw/status.h"
+#include "rwc/status.h"
 
 /* Display register offsets (PLATFORM-SPEC 4; devspec/display.md 2). */
 enum {
@@ -94,7 +94,7 @@ SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp, uint64_t off)
             return acc_fault();
         }
     default:
-        RW_ASSERT(0); /* only register windows reach here */
+        RWC_ASSERT(0); /* only register windows reach here */
         return acc_fault();
     }
 }
@@ -148,7 +148,7 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
             return acc_fault(); /* read-only (E4) or unlisted (E2) */
         }
     default:
-        RW_ASSERT(0);
+        RWC_ASSERT(0);
         return acc_fault();
     }
 }
@@ -183,8 +183,8 @@ void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len)
 {
     /* Structural rules of boot.md 3.4 for the one-region reference
      * table; main.c derives ram_region_len to satisfy them. */
-    RW_ASSERT(ram_region_len % 0x10000u == 0u);
-    RW_ASSERT(ram_region_len > 0u &&
+    RWC_ASSERT(ram_region_len % 0x10000u == 0u);
+    RWC_ASSERT(ram_region_len > 0u &&
               (se_u128)ram_region_len <= SE_PLAT_RAM_MAX);
 
     uint64_t off = DEVTAB_PA;

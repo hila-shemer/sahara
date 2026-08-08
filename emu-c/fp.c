@@ -1,7 +1,7 @@
 #include "fp.h"
 
 #include "gen/sahara_isa.h"
-#include "rw/status.h"
+#include "rwc/status.h"
 
 /* ------------------------------------------------------------ formats */
 
@@ -17,7 +17,7 @@ static const Fmt FMT64 = { 64u, 53u, 1023 };
 static const Fmt *fmt_of(SeFpFmtW_t fmtw)
 {
     unsigned w = SeFpFmtW_t_val(fmtw);
-    RW_ASSERT(w == 32u || w == 64u);
+    RWC_ASSERT(w == 32u || w == 64u);
     return (w == 32u) ? &FMT32 : &FMT64;
 }
 
@@ -96,7 +96,7 @@ static uint64_t bits_maxfin(const Fmt *f, bool sign)
 
 static unsigned msb128(se_u128 v)
 {
-    RW_ASSERT(v != 0u);
+    RWC_ASSERT(v != 0u);
     unsigned n = 0u;
     if (se_hi64(v) != 0u) {
         n = 64u;
@@ -113,7 +113,7 @@ static unsigned msb128(se_u128 v)
 /* Integer square root with remainder (restoring, bit pairs). */
 static se_u128 isqrt128(se_u128 v, se_u128 *rem)
 {
-    RW_ASSERT(v != 0u);
+    RWC_ASSERT(v != 0u);
     se_u128 r = 0u, bit = (se_u128)1 << 126;
     while (bit > v)
         bit >>= 2;
@@ -140,7 +140,7 @@ static se_u128 isqrt128(se_u128 v, se_u128 *rem)
 static uint64_t fp_round(const Fmt *f, bool sign, se_u128 mant, int exp,
                          bool sticky, unsigned rm, uint8_t *fl)
 {
-    RW_ASSERT(mant != 0u);
+    RWC_ASSERT(mant != 0u);
     unsigned n = msb128(mant);
     int e_val = exp + (int)n; /* value in [2^e_val, 2^(e_val+1)) */
     int emin = 1 - f->emax;
@@ -177,7 +177,7 @@ static uint64_t fp_round(const Fmt *f, bool sign, se_u128 mant, int exp,
     case RM_RUP: inc = inexact && !sign; break;
     case RM_RMM: inc = g; break; /* >= half: away from zero */
     default:
-        RW_ASSERT(0); /* reserved modes trap ILLEGAL before execution */
+        RWC_ASSERT(0); /* reserved modes trap ILLEGAL before execution */
         inc = false;
         break;
     }
@@ -256,13 +256,13 @@ static Ex ex_add(Ex x, Ex y)
         /* subtracting (y + sticky-tail): borrow one unit into the tail */
         r.mant = x.mant - y.mant - (y.sticky ? 1u : 0u);
         r.sticky = y.sticky;
-        RW_ASSERT(r.mant != 0u || !r.sticky);
+        RWC_ASSERT(r.mant != 0u || !r.sticky);
     } else if (y.mant > x.mant) {
         r.sign = y.sign;
         r.mant = y.mant - x.mant;
         r.sticky = y.sticky;
     } else {
-        RW_ASSERT(!y.sticky); /* equal mants only when y kept every bit */
+        RWC_ASSERT(!y.sticky); /* equal mants only when y kept every bit */
         r.zero = true;
     }
     return r;
@@ -507,7 +507,7 @@ SeFpRes se_fp_arith(uint8_t op, SeFpFmtW_t fmtw, uint64_t a, uint64_t b,
     case OPC_FMADD: return fp_fmadd(f, a, b, c, rm);
     case OPC_FMIN:  return fp_minmax(f, a, b, false);
     default:
-        RW_ASSERT(op == OPC_FMAX);
+        RWC_ASSERT(op == OPC_FMAX);
         return fp_minmax(f, a, b, true);
     }
 }
@@ -529,7 +529,7 @@ bool se_fp_cmp(uint8_t op, SeFpFmtW_t fmtw, uint64_t a, uint64_t b,
     case OPC_FCMPEQ: return both_zero || ka == kb;
     case OPC_FCMPLT: return !both_zero && ka < kb;
     default:
-        RW_ASSERT(op == OPC_FCMPLE);
+        RWC_ASSERT(op == OPC_FCMPLE);
         return both_zero || ka <= kb;
     }
 }

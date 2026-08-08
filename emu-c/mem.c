@@ -1,7 +1,7 @@
 #include "mem.h"
 
 #include "hostmem.h"
-#include "rw/status.h"
+#include "rwc/status.h"
 
 static uint64_t hash_page(uint64_t x)
 {
@@ -90,7 +90,7 @@ static bool access_ok(se_u128 pa, unsigned size)
 
 se_u128 SeMem_read(SeMem *m, se_u128 pa, unsigned size)
 {
-    RW_ASSERT(access_ok(pa, size));
+    RWC_ASSERT(access_ok(pa, size));
     uint64_t addr = se_lo64(pa);
     const uint8_t *blk = lookup(m, addr >> SE_PAGE_SHIFT);
     if (!blk)
@@ -104,7 +104,7 @@ se_u128 SeMem_read(SeMem *m, se_u128 pa, unsigned size)
 
 void SeMem_write(SeMem *m, se_u128 pa, unsigned size, se_u128 val)
 {
-    RW_ASSERT(access_ok(pa, size));
+    RWC_ASSERT(access_ok(pa, size));
     uint64_t addr = se_lo64(pa);
     uint64_t page_no = addr >> SE_PAGE_SHIFT;
     uint8_t *blk = lookup(m, page_no);

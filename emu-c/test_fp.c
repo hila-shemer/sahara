@@ -12,7 +12,7 @@
 
 #include "fp.h"
 #include "gen/sahara_isa.h"
-#include "rw/status.h"
+#include "rwc/status.h"
 
 static const struct {
     uint8_t op; unsigned w, rm;

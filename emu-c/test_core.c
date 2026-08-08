@@ -10,18 +10,18 @@
 #include "cpu.h"
 #include "gen/sahara_isa.h"
 #include "mem.h"
-#include "rw/status.h"
+#include "rwc/status.h"
 #include "sha256.h"
 #include "u128.h"
 
 static void test_extend(void)
 {
-    RW_ASSERT(se_sext(0xFFu, 8u) == ~(se_u128)0);
-    RW_ASSERT(se_sext(0x7Fu, 8u) == 0x7Fu);
-    RW_ASSERT(se_zext(~(se_u128)0, 32u) == 0xFFFFFFFFu);
-    RW_ASSERT(se_canon(0x80000000u, 32u) ==
+    RWC_ASSERT(se_sext(0xFFu, 8u) == ~(se_u128)0);
+    RWC_ASSERT(se_sext(0x7Fu, 8u) == 0x7Fu);
+    RWC_ASSERT(se_zext(~(se_u128)0, 32u) == 0xFFFFFFFFu);
+    RWC_ASSERT(se_canon(0x80000000u, 32u) ==
               se_make128(0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFF80000000ull));
-    RW_ASSERT(se_sext(0, 128u) == 0u);
+    RWC_ASSERT(se_sext(0, 128u) == 0u);
 }
 
 typedef struct MulVec {
@@ -55,12 +55,12 @@ static void test_mulh(void)
     for (unsigned i = 0; i < 3u; i++) {
         se_u128 h = se_mulhu128(se_make128(vu[i].a_hi, vu[i].a_lo),
                                 se_make128(vu[i].b_hi, vu[i].b_lo));
-        RW_ASSERT(h == se_make128(vu[i].h_hi, vu[i].h_lo));
+        RWC_ASSERT(h == se_make128(vu[i].h_hi, vu[i].h_lo));
     }
     for (unsigned i = 0; i < 3u; i++) {
         se_u128 h = se_mulhs128(se_make128(vs[i].a_hi, vs[i].a_lo),
                                 se_make128(vs[i].b_hi, vs[i].b_lo));
-        RW_ASSERT(h == se_make128(vs[i].h_hi, vs[i].h_lo));
+        RWC_ASSERT(h == se_make128(vs[i].h_hi, vs[i].h_lo));
     }
 }
 
@@ -68,20 +68,20 @@ static void test_sparse_mem(void)
 {
     SeMem m;
     SeMem_init(&m, 1ull << 32);
-    RW_ASSERT(SeMem_read(&m, 0x123456u, 8u) == 0u); /* untouched: zero */
+    RWC_ASSERT(SeMem_read(&m, 0x123456u, 8u) == 0u); /* untouched: zero */
     SeMem_write(&m, 0x10000u - 8u, 8u, 0x1122334455667788ull);
-    RW_ASSERT(SeMem_read(&m, 0x10000u - 8u, 8u) == 0x1122334455667788ull);
-    RW_ASSERT(SeMem_read(&m, 0x10000u - 8u, 1u) == 0x88u); /* little-endian */
+    RWC_ASSERT(SeMem_read(&m, 0x10000u - 8u, 8u) == 0x1122334455667788ull);
+    RWC_ASSERT(SeMem_read(&m, 0x10000u - 8u, 1u) == 0x88u); /* little-endian */
     se_u128 wide = se_make128(0xAABBCCDDEEFF0011ull, 0x2233445566778899ull);
     SeMem_write(&m, 0xFFFF0000u, 16u, wide);
-    RW_ASSERT(SeMem_read(&m, 0xFFFF0000u, 16u) == wide);
+    RWC_ASSERT(SeMem_read(&m, 0xFFFF0000u, 16u) == wide);
     /* many pages: force hash growth */
     for (uint64_t i = 0; i < 200u; i++)
         SeMem_write(&m, i << SE_PAGE_SHIFT, 4u, (se_u128)(i + 1u));
     for (uint64_t i = 0; i < 200u; i++)
-        RW_ASSERT(SeMem_read(&m, i << SE_PAGE_SHIFT, 4u) == (se_u128)(i + 1u));
-    RW_ASSERT(!SeMem_in_ram(&m, (se_u128)1 << 32, 1u));
-    RW_ASSERT(!SeMem_in_ram(&m, ((se_u128)1 << 32) - 4u, 8u));
+        RWC_ASSERT(SeMem_read(&m, i << SE_PAGE_SHIFT, 4u) == (se_u128)(i + 1u));
+    RWC_ASSERT(!SeMem_in_ram(&m, (se_u128)1 << 32, 1u));
+    RWC_ASSERT(!SeMem_in_ram(&m, ((se_u128)1 << 32) - 4u, 8u));
 }
 
 /* Build a one-node page table mapping VPN 3 -> frame 0x50000 and check
@@ -109,42 +109,42 @@ static void test_mmu(void)
     cpu.sreg[SREG_STATUS] |= STATUS_MMU_EN;
 
     SeXlate x = SeCpu_translate(&cpu, 0x30004u, SE_ACC_LOAD);
-    RW_ASSERT(!x.fault && x.pa == 0x50004u);
+    RWC_ASSERT(!x.fault && x.pa == 0x50004u);
     x = SeCpu_translate(&cpu, 0x30008u, SE_ACC_STORE);
-    RW_ASSERT(!x.fault && x.pa == 0x50008u);
+    RWC_ASSERT(!x.fault && x.pa == 0x50008u);
     x = SeCpu_translate(&cpu, 0x30000u, SE_ACC_FETCH);
-    RW_ASSERT(!x.fault && x.pa == 0x50000u);
+    RWC_ASSERT(!x.fault && x.pa == 0x50000u);
 
     x = SeCpu_translate(&cpu, 0x40000u, SE_ACC_STORE); /* read-only page */
-    RW_ASSERT(x.fault && x.cause == CAUSE_PERM_STORE && x.baddr == 0x40000u);
+    RWC_ASSERT(x.fault && x.cause == CAUSE_PERM_STORE && x.baddr == 0x40000u);
     x = SeCpu_translate(&cpu, 0x50000u, SE_ACC_LOAD); /* invalid entry */
-    RW_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
+    RWC_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
     x = SeCpu_translate(&cpu, 0x1230000u, SE_ACC_LOAD); /* prefix mismatch */
-    RW_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
+    RWC_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
 
     /* user mode: U = 0 denies */
     cpu.sreg[SREG_STATUS] &= ~(se_u128)STATUS_S;
     x = SeCpu_translate(&cpu, 0x30000u, SE_ACC_LOAD);
-    RW_ASSERT(x.fault && x.cause == CAUSE_PERM_LOAD);
+    RWC_ASSERT(x.fault && x.cause == CAUSE_PERM_LOAD);
     cpu.sreg[SREG_STATUS] |= STATUS_S;
 
     /* malformed: reserved leaf bits set */
     SeMem_write(&m, node + 64u + 5u * 16u, 16u,
                 0x70000u | 0x40u | PTE_R | PTE_LEAF);
     x = SeCpu_translate(&cpu, 0x50000u | (5u << 16), SE_ACC_LOAD);
-    RW_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
+    RWC_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
     /* malformed: nonzero reserved header bytes */
     SeMem_write(&m, node + 48u, 8u, 1u);
     x = SeCpu_translate(&cpu, 0x30000u, SE_ACC_LOAD);
-    RW_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
+    RWC_ASSERT(x.fault && x.cause == CAUSE_PF_LOAD);
     SeMem_write(&m, node + 48u, 8u, 0u);
     x = SeCpu_translate(&cpu, 0x30000u, SE_ACC_LOAD);
-    RW_ASSERT(!x.fault);
+    RWC_ASSERT(!x.fault);
 
     /* MMU off: identity */
     cpu.sreg[SREG_STATUS] &= ~(se_u128)STATUS_MMU_EN;
     x = SeCpu_translate(&cpu, 0x99990u, SE_ACC_STORE);
-    RW_ASSERT(!x.fault && x.pa == 0x99990u);
+    RWC_ASSERT(!x.fault && x.pa == 0x99990u);
 }
 
 /* FIPS 180-4 known-answer vectors: empty, one-block, and the two-block
@@ -158,7 +158,7 @@ static void sha_vec(const char *msg, const char *want_hex)
     char hex[65];
     for (unsigned i = 0; i < 32u; i++)
         snprintf(hex + 2u * i, 3u, "%02x", d[i]);
-    RW_ASSERT(strcmp(hex, want_hex) == 0);
+    RWC_ASSERT(strcmp(hex, want_hex) == 0);
 }
 
 static void test_sha256(void)

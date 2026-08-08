@@ -1,6 +1,6 @@
 #include "trace.h"
 
-#include "rw/status.h"
+#include "rwc/status.h"
 
 /* Record header (3.2): u8 type, u8 reserved, u16 reserved, u32 payload
  * length. Payload field widths are normative; sizes below are the sums. */
@@ -56,7 +56,7 @@ static void emit(SeTrace *t, const uint8_t *b, size_t n)
 {
     size_t w = fwrite(b, 1u, n, t->f);
     /* A failed trace write means the run is unreproducible: fail loud. */
-    RW_ASSERT(w == n);
+    RWC_ASSERT(w == n);
 }
 
 void SeTrace_meta(SeTrace *t, const char *text, uint32_t len)

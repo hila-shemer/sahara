@@ -6,7 +6,7 @@
 
 #include "mem.h"
 #include "platform.h"
-#include "rw/attrs.h"
+#include "rwc/attrs.h"
 
 /* The reference platform's devices, headless (PLATFORM-SPEC 4-7 as
  * elaborated by devspec/display.md, input.md, nic.md; the device table
@@ -34,13 +34,13 @@ typedef struct SeDevAcc {
  * is the byte offset inside it, 8-aligned (the caller has already
  * checked alignment and the 64-bit-only size rule). Reads may have side
  * effects (queue pop). */
-RW_WARN_UNUSED SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp,
+RWC_WARN_UNUSED SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp,
                                        uint64_t off);
-RW_WARN_UNUSED SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp,
+RWC_WARN_UNUSED SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp,
                                         uint64_t off, uint64_t val);
 
 /* EXTINT is the OR of every device pending condition (PLATFORM-SPEC 3). */
-RW_WARN_UNUSED bool SeDev_ext_pending(const SeDev *d);
+RWC_WARN_UNUSED bool SeDev_ext_pending(const SeDev *d);
 
 /* Write the device table at PA 0x0800 before reset (devspec/boot.md 3,
  * 5): header, one RAM region of ram_region_len bytes, and the four

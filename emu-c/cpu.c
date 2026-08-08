@@ -7,7 +7,7 @@
 #include "gen/sahara_isa.h"
 #include "hostmem.h"
 #include "platform.h"
-#include "rw/status.h"
+#include "rwc/status.h"
 
 /* ------------------------------------------------------------- status */
 
@@ -477,7 +477,7 @@ static se_u128 alu_compute(uint8_t op, se_u128 a, se_u128 b, se_u128 s3,
             return 0u; /* MIN_w / -1: remainder 0 */
         return se_canon((se_u128)((se_s128)sa % (se_s128)sb), w);
     default:
-        RW_ASSERT(0);
+        RWC_ASSERT(0);
         return 0u;
     }
 }
@@ -493,7 +493,7 @@ static bool cmp_compute(uint8_t op, se_u128 a, se_u128 b, unsigned w)
     case OPC_CMPLE:  return sa <= sb;
     case OPC_CMPLEU: return za <= zb;
     default:
-        RW_ASSERT(0);
+        RWC_ASSERT(0);
         return false;
     }
 }
@@ -742,7 +742,7 @@ static void exec_insn(SeCpu *c, uint64_t insn)
             newv = (zold > se_zext(rs2, w)) ? zold : se_zext(rs2, w);
             break;
         default:
-            RW_ASSERT(0);
+            RWC_ASSERT(0);
         }
         if (do_write) {
             SeTrace_memw(c->tr, se_lo64(c->cycle), ea, (uint8_t)size, newv);
@@ -973,7 +973,7 @@ static void exec_insn(SeCpu *c, uint64_t insn)
         break;
     }
     default:
-        RW_ASSERT(0); /* every valid family is handled above */
+        RWC_ASSERT(0); /* every valid family is handled above */
         return;
     }
 
@@ -988,7 +988,7 @@ static void exec_insn(SeCpu *c, uint64_t insn)
 
 void SeCpu_step(SeCpu *c)
 {
-    RW_ASSERT(c->state == SE_RUN_RUNNING);
+    RWC_ASSERT(c->state == SE_RUN_RUNNING);
     /* Interrupts: between instructions only, IE = 1, timer first (7.5). */
     if (status_bits(c) & STATUS_IE) {
         if (timer_pending(c)) {

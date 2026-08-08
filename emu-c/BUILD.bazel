@@ -1,7 +1,7 @@
-load("@rightwayc//bzl:rw.bzl", "rw_c_binary", "rw_c_library", "rw_c_test")
+load("@rightwayc//bzl:rwc.bzl", "rwc_binary", "rwc_library", "rwc_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
-rw_c_library(
+rwc_library(
     name = "core",
     srcs = [
         "cpu.c",
@@ -29,27 +29,27 @@ rw_c_library(
     ],
 )
 
-rw_c_binary(
+rwc_binary(
     name = "sahara-emu",
     srcs = ["main.c"],
     deps = [":core"],
 )
 
-rw_c_test(
+rwc_test(
     name = "test_core",
     srcs = ["test_core.c"],
     tier = "short",
     deps = [":core"],
 )
 
-rw_c_test(
+rwc_test(
     name = "test_fp",
     srcs = ["test_fp.c"],
     tier = "short",
     deps = [":core"],
 )
 
-rw_c_test(
+rwc_test(
     name = "test_dev",
     srcs = ["test_dev.c"],
     tier = "short",
