@@ -1,0 +1,214 @@
+# emu-py SPEC-ISSUES
+
+Ambiguities found while implementing, and the readings chosen. Format:
+file:section — the ambiguity — the chosen reading. Entries marked
+**[cross-impl]** are places where the two implementations could silently
+diverge byte-for-byte in traces or observable behavior; those want a spec
+ruling most urgently.
+
+1. **ISA-SPEC 4 / 7.2 — does a faulting instruction consume a cycle of its
+   own?** §4 says cycle increments "for every retired instruction … and by
+   1 for every trap delivery". A faulting instruction has no architectural
+   effect, so I read it as *not retired*: only the delivery increments
+   cycle (a fault costs exactly 1 cycle total). Same reading applied to
+   SYSCALL (its trap delivery is its only cycle). **[cross-impl]**
+
+2. **ISA-SPEC 11 vs TOOLING-SPEC 1 — start pc.** TOOLING's loader
+   semantics say "then start at entry"; ISA-SPEC 11 says reset pc =
+   0x1000 and TOOLING itself notes "entry is convention, reset PC is
+   architecture; images place a jump at 0x1000 when entry differs".
+   Chosen: the machine always starts at 0x1000; `entry` is metadata. If
+   the other implementation jumps directly to entry, traces diverge on
+   the trampoline EXEC record. **[cross-impl]**
+
+3. **TOOLING-SPEC 3.2 — META record content is unspecified** ("key/value
+   text"), yet traces are compared byte-for-byte across implementations.
+   Chosen: `key=value\n` lines: image (basename), sha256 (image file),
+   encoding (SPEC_VERSION), level, modes. The cross-impl differ must skip
+   META, or the spec must pin the exact content. **[cross-impl]**
+
+4. **TOOLING-SPEC 3.2 — cycle stamping of records.** Chosen: EXEC/TRAP
+   records carry the cycle value *before* that unit's increment (an
+   instruction executing "at cycle N" is stamped N; delivery stamped with
+   the cycle at which it begins). MEMW/MEMR carry the executing
+   instruction's cycle. **[cross-impl]**
+
+5. **TOOLING-SPEC 3.2 — wb/flags for discarded writes.** Writes to r31
+   and predicate writes to p0 are architecturally discarded. Chosen:
+   flags wrote-dst / wrote-pred are 0 and wb/pred_wb are 0 for them.
+   ~~Also: wrote-pred + pred_wb are used only for compare/FCMP predicate
+   writes; PWR (which writes p1–p7 wholesale) sets neither.~~
+   *Revised (iteration 2):* superseded by the toolchain's SPEC-ISSUES
+   reading 1, marked "emulators must match": `pred_wb` is the **full
+   8-bit predicate file after the write** (bit i = P[i], so bit 0 is
+   always 1), valid whenever flags bit 2 is set — and PWR sets bit 2
+   with the new file. trace-q's `reg pN` reconstruction depends on this.
+   The p0-discard part stands: a compare targeting p0 writes nothing,
+   sets no flag. **[cross-impl]**
+
+6. **ISA-SPEC 7.2 — trace record on triple fault.** "No state is
+   written"; chosen: the triple fault emits no TRAP record (nothing was
+   delivered) — the machine just halts. **[cross-impl]**
+
+7. **ISA-SPEC 7.6 / CLI contract — WFI deadlock "halts", triple fault
+   "halts".** Chosen: both terminate exactly like HALT: print
+   `HALT r0=…`, exit 0. If they should be distinguishable at the CLI, the
+   contract needs a word for it. **[cross-impl]**
+
+8. **PLATFORM-SPEC 1 — physical access outside RAM and every device
+   window.** Unspecified. Chosen: trap DEVERR with baddr = the effective
+   (virtual) address, for loads, stores, atomics, and fetch (loud
+   failure, and DEVERR's "offending address" wording fits best).
+   Alternatives (reads-as-zero, PF) would diverge. **[cross-impl]**
+
+9. **ISA-SPEC 3.3 — mod kind 0 with nonzero amount.** "none (amount must
+   be 0)" — behavior on violation unspecified. Chosen: trap ILLEGAL.
+   **[cross-impl]** (only for deliberately malformed words / fuzz).
+
+10. **ISA-SPEC 5.1 — signed division rounding.** Not stated. Chosen:
+    truncation toward zero, remainder takes the dividend's sign (C /
+    RISC-V convention); consistent with "MIN_w / -1" being the only
+    listed overflow.
+
+11. **ISA-SPEC 2.3 — "unused high bits … must be written as zero";
+    behavior on nonzero write unspecified.** Chosen: hardware masks:
+    status stores only its defined bits (6:0), fcsr bits 7:0; all other
+    sregs store the full 128 bits written. No trap.
+
+12. **ISA-SPEC 7.4 — IRET bank selection at TL=3.** TL=3 is reachable
+    only by MTSR-writing status.TL. Spec says "bank 1 if TL = 2, else
+    bank 0". Chosen: bank 1 if TL >= 2. Delivery at TL >= 2 (incl. 3)
+    triple-faults.
+
+13. **ISA-SPEC 8.2 — malformed-node checks performed.** Chosen: fault
+    PF_* on: ptbase/child not 64-byte aligned; header reserved bytes
+    (40..63) nonzero; shift not a multiple of 8 or > 104; leaf reserved
+    bits 15:6 nonzero; type 3; leaf at shift != 0; node outside RAM or
+    overlapping a device window; walk deeper than 15 nodes (cycle
+    guard — the spec has no termination guarantee for cyclic tables).
+    **[cross-impl]** (which checks run, and their order, affect which
+    accesses fault).
+
+14. **ISA-SPEC 3 — fetch of a misaligned pc** (reachable via IRET with a
+    misaligned epc, or vbase/dfbase). Not specified. Chosen: UNALIGNED
+    with baddr = pc, checked before translation. **[cross-impl]**
+
+15. **ISA-SPEC 2.3 — user-mode MFSR/MTSR of an unlisted index:** ILLEGAL
+    (unlisted) or PRIV (user)? Chosen: ILLEGAL wins — "access to
+    unlisted indices traps ILLEGAL" is unconditional; the priv check
+    applies to listed indices only.
+
+16. **ISA-SPEC 10.4 — FCVTFF with equal source and dest formats.**
+    "FP -> FP (32 <-> 64)" — same-format not listed. Chosen: trap
+    ILLEGAL (an "illegal format combination").
+
+17. **ISA-SPEC 10.3 — which operations "round" for the reserved-rm
+    trap.** Originally chosen: only the ops that consult fcsr's rm, so
+    FCVTFI/FCVTFIU (always RTZ) were exempt. **Superseded by root
+    SPEC-ISSUES 19** ("all FCVT forms round", emulators-must-match):
+    FCVTFI/FCVTFIU now also trap ILLEGAL on a reserved rm, even though
+    their result never uses it. FMIN/FMAX/FCMP* still do not trap.
+    **[cross-impl]**
+
+18. **ISA-SPEC 10.4 — NX on inexact in-range FCVT F→I.** Spec only
+    mentions NV. Chosen: IEEE behavior — in-range inexact conversions
+    raise NX; saturating/NaN cases raise NV only. Consequence:
+    truncation happens before the range check, so 2^31 - 0.5 → i32 and
+    -0.5 → u32 land in range and raise NX, not NV. C4 should probe
+    both. **[cross-impl]**
+
+19. **ISA-SPEC 10 — FP details the spec is silent on**, chosen per IEEE
+    754-2019 + RISC-V conventions: NV on any sNaN operand; FMADD raises
+    NV for 0×inf even when the addend is a quiet NaN; underflow flag
+    uses tininess-after-rounding (result subnormal-or-zero and inexact);
+    FCMPEQ never raises NV even for sNaN operands (spec's "FCMPEQ does
+    not" read as unconditional). *Added (iteration 7):* OF follows IEEE
+    7.4's unbounded-exponent rule — it fires iff the rounded result
+    *with unbounded exponent* would exceed maxfinite. Consequence at
+    the f32 overflow threshold (2-2^-24)*2^127: RTZ truncates to
+    exactly maxfinite and raises NX only (no OF), while RNE/RUP go to
+    inf with OF|NX; OF with a *finite* delivered result happens only
+    when even the truncated unbounded result exceeds maxfinite (e.g.
+    RTZ of 1e50 -> maxfinite, OF|NX). Directed vectors in test_fp.py
+    (test_f64_to_f32_near_halfway). **[cross-impl]** (a C side that
+    flags OF on every threshold clamp diverges in fcsr).
+
+20. **ISA-SPEC 9.2 / check-devorder — store-queue model details.**
+    Chosen: ordinary stores enter a depth-N queue (oldest commits on
+    overflow); a device store drains the whole queue first, then hits
+    the device; IFENCE and HALT drain; the processor's own loads,
+    fetches, atomics, and page-table walks read through the queue
+    (snoop), preserving single-CPU program order. MEMW trace records are
+    emitted at execution time, not commit time, so traces match
+    non-check-mode runs. **[cross-impl]** (only in check mode).
+
+21. **ISA-SPEC 7.6 — WFI cycle accounting.** Originally chosen:
+    WFI retires (+1), then cycle jumps to the earliest pending cycle T
+    (post-stall cycle = T). **Superseded by root SPEC-ISSUES 20**,
+    which freezes the other order — jump to T first, then +1 for WFI's
+    retire (post-stall cycle = T+1) — and is marked "emulators must
+    match". emu-py now implements T+1 (machine.py wfi_stall). If an
+    interrupt is already pending at WFI's own cycle c, T = c and the
+    post-WFI cycle is c+1, identical to a plain retire. Delivery then
+    costs its usual +1 either way. **[cross-impl]**
+
+22. **PLATFORM/TOOLING — replay event application point.** Chosen: an
+    EVENT with cycle C is applied (device queue fed, EVENT record
+    re-emitted with cycle C) at the first between-instruction point
+    where machine cycle >= C, before interrupt recognition at that
+    point. **[cross-impl]** (moot until devices exist).
+
+23. **tests/gen_c2.py ROOT2 / c2_mmu.s test [32] — bug is in the
+    test, not the spec or the emulator.** The [32] switch window
+    (`mtsr ptbase, ROOT2` while asid is still 0xA) fetches the code
+    page before the asid write; the phantom cache holds ROOT's
+    (frame 0, RWXU), a fresh walk under ROOT2 gives (frame 0, RWX) —
+    ROOT2's VPN0 leaf is `leaf(0x00000, "R", "W", "X")`, no "U",
+    where NODEB entry 0 has "U". Root SPEC-ISSUES 21 froze stale =
+    "(frame and permissions) differs", and gen_c2.py's own comment
+    says the two roots "translate identically ... so the switch
+    window cannot trip a result-comparing stale check" — the
+    generator matched the frame and missed the U bit. emu-py
+    therefore CHECKFAILs c2_mmu at va 0x17e0, per the frozen reading.
+    Verified the U bit is the whole dispute: regenerating with "U"
+    added to ROOT2 entry 0 changes exactly one PTE word (0x1e →
+    0x3e) and c2_mmu then passes fully on emu-py (HALT 600d, both
+    runs, traces byte-identical). One-character fix, owned by the
+    toolchain agent. Local tests pin both halves of reading 21
+    (perms-only diff asserts; identical result does not).
+    *Resolved (iteration 7):* toolchain commit 8f31564 lands exactly
+    that PTE word (0x1e → 0x3e in c2_mmu.s) plus two expect=checkfail
+    negatives (c2_noinvtp_remap/ptbase, root SPEC-ISSUES 23 harness
+    class); c2_mmu and both negatives pass on emu-py unchanged.
+
+24. **PLATFORM-SPEC 1 — device-space classification vs RAM region 0's
+    extent, before any device exists.** The map's RAM row spans
+    `0x0 .. ram_len` (default 256 MB = 0x1000_0000) while the device
+    windows sit at 0x0F00_0000+ *inside* that extent, and headless
+    v1.0 writes a device table with zero devices; the spec also says
+    "everything at 0x0F00_0000 and above in this map is device space
+    in the sense of ISA-SPEC 9.2". Chosen (matching
+    checks/c3_irq_dev.py's `DEV_SPACE_BASE = 0x0F000000`): device
+    space is a property of the *address* — no PA at or above
+    0x0F00_0000 is ever RAM, regardless of ram_len or of which
+    devices the table instantiates. The carve-out beats the RAM row;
+    the gaps between the fixed windows (e.g. 0x0F06_0000 .. 0x0FFF_FFFF)
+    are device space too, not swiss-cheese RAM; `--ram` larger than
+    256 MB still stops being RAM at 0x0F00_0000. An access into
+    device space with no mapped device follows entry 8's rule (trap
+    DEVERR, baddr = ea), so pre-devspec every access there — load,
+    store, atomic, fetch — traps DEVERR with no access footprint.
+    Alternative readings (windows-only carve-out with RAM gaps, or
+    table-driven classification where an empty table means it is all
+    RAM) would pass/fail c3_irq_dev phase 2 differently and diverge
+    on a plain load at 0x0F06_0000. **[cross-impl]**
+
+25. **ISA-SPEC 5.3 vs PLATFORM-SPEC 1 — UNALIGNED vs DEVERR on a
+    misaligned device access (root SPEC-ISSUES 25).** emu-py already
+    implements the order the root entry recommends: the alignment
+    check is on the ea itself and runs before translation and before
+    device-space classification, in both the load/store and atomic
+    paths — so a misaligned non-64-bit access to a device register
+    raises UNALIGNED, baddr = ea. No shared test depends on the
+    priority yet (C7 avoids the overlap on purpose); pinned locally in
+    test_mem.py so a future reordering shows up. **[cross-impl]**

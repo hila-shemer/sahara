@@ -26,10 +26,18 @@ green alone. Two contracts moved after emu-py's last toolchain merge:
    must honor the EVENT payload contract (trace.md 4.3) for the input and
    resize devices.
 
+## Container note
+
+If you are running in the sandbox (fresh git history, single `baseline`
+tag, no branches): the merge below is ALREADY DONE - this tree is
+emu-py + current toolchain, exactly the known-red state. Skip straight
+to making the suite green; commit your work in small green steps.
+
 ## Definition of done
 
-- `git merge toolchain` (current tip) committed on emu-py, conflicts
-  resolved without weakening either side.
+- (host-side, already done in the sandbox) `git merge toolchain` current
+  tip committed on emu-py, conflicts resolved without weakening either
+  side.
 - `emu-py/run-tests.sh` green end to end, REPLAY=1 leg included.
 - No changes under `tests/` or `trace-q/` beyond what the merge brings in —
   those are toolchain-owned; if a suite bug blocks you, record it in

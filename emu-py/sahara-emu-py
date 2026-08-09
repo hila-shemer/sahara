@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Sahara emulator, Python implementation — the independent cross-check.
+
+CLI contract (frozen, emu-common-prompt.md):
+  sahara-emu-py IMAGE [--replay events.trc] [--trace out.trc
+      --trace-level N] [--maxcycles N] [--ram BYTES] [--check-invtp]
+      [--check-devorder N]
+
+HALT -> "HALT r0=<32 hex digits>", exit 0. --maxcycles exhaustion ->
+"MAXCYCLES", exit 2. Check-mode assertion -> "CHECKFAIL <reason>",
+exit 3. Internal errors: message on stderr, nonzero exit.
+"""
+
+import argparse
+import hashlib
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(1, os.path.dirname(_HERE))     # repo root: encoding.py
+
+import devices                  # noqa: E402
+import encoding as E            # noqa: E402
+import image                    # noqa: E402
+import machine                  # noqa: E402
+import mem                      # noqa: E402
+import trc                      # noqa: E402
+
+DEFAULT_RAM = 256 * 1024 * 1024
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="sahara-emu-py", add_help=True)
+    p.add_argument("image")
+    p.add_argument("--replay", metavar="events.trc")
+    p.add_argument("--trace", metavar="out.trc")
+    p.add_argument("--trace-level", type=int, default=1, choices=(0, 1, 2))
+    p.add_argument("--maxcycles", type=int, default=None)
+    p.add_argument("--ram", type=int, default=DEFAULT_RAM)
+    p.add_argument("--check-invtp", action="store_true")
+    p.add_argument("--check-devorder", type=int, default=None, metavar="N")
+    return p.parse_args(argv)
+
+
+def load_replay(path, img_sha256):
+    """Reads a --replay feed: validates its META (trace.md 5.1 — trace,
+    encoding, image_sha256 only; level/mode/image/platform are NOT
+    checked, DECISIONS.md D13) and collects its EVENT records."""
+    events = []
+    with open(path, "rb") as f:
+        records = trc.read_records(f)
+        try:
+            typ, payload = next(records)
+        except StopIteration:
+            raise ValueError(f"{path}: empty replay trace, missing META")
+        if typ != trc.T_META:
+            raise ValueError(f"{path}: first record is not META")
+        meta = trc.parse_meta(payload)
+        if meta.get("trace") != "1":
+            raise ValueError(
+                f"{path}: META trace={meta.get('trace')!r}, want '1'")
+        if meta.get("encoding") != E.SPEC_VERSION:
+            raise ValueError(
+                f"{path}: META encoding={meta.get('encoding')!r}, want "
+                f"{E.SPEC_VERSION!r}")
+        if meta.get("image_sha256") != img_sha256:
+            raise ValueError(
+                f"{path}: META image_sha256 does not match the loaded "
+                f"image")
+        for typ, payload in records:
+            if typ == trc.T_EVENT:
+                events.append(trc.parse_event(payload))
+    return events
+
+
+def main(argv):
+    args = parse_args(argv)
+    with open(args.image, "rb") as f:
+        img_data = f.read()
+
+    phys = mem.PhysMap(args.ram, devorder=args.check_devorder,
+                       dev_base=image.DEV_SPACE_BASE)
+    image.load_image(phys, img_data)
+
+    display = devices.Display()
+    kbd = devices.Input(devices.KBD_BASE, devices.KBD_SIZE)
+    mouse = devices.Input(devices.MOUSE_BASE, devices.MOUSE_SIZE)
+    mac = devices.pack_mac(devices.REFERENCE_MAC_OCTETS)
+    pixbuf = devices.Buffer(devices.PIXBUF_BASE, devices.PIXBUF_SIZE)
+    nic_tx = devices.Buffer(devices.NIC_BASE + devices.NIC_TX_OFFSET,
+                            0x10000)
+    nic_rx = devices.Buffer(devices.NIC_BASE + devices.NIC_RX_OFFSET,
+                            0x10000)
+    nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac, nic_rx)
+    for dev in (display, kbd, mouse, nic, pixbuf, nic_tx, nic_rx):
+        phys.add_device(dev)
+
+    # trace.md 4/boot.md V1: EVENT device indices are 0-based positions
+    # among the device-table *entries*, not phys.devices (which also
+    # carries the pixel/TX/RX buffer routing windows) — PROBLEMS.md P12.
+    event_devices = [display, kbd, mouse, nic]
+
+    # PLATFORM-SPEC 2 device table: table entries advertise the
+    # register-window base/size the table type owns (params per type),
+    # not the sub-window split used for routing above.
+    dev_entries = [
+        (1, devices.DISPLAY_BASE, devices.DISPLAY_SIZE,
+         (devices.PIXBUF_BASE, devices.PIXBUF_SIZE, 0, 0)),
+        (2, devices.KBD_BASE, devices.KBD_SIZE, (0, 0, 0, 0)),
+        (3, devices.MOUSE_BASE, devices.MOUSE_SIZE, (0, 0, 0, 0)),
+        (4, devices.NIC_BASE, devices.NIC_WINDOW_SIZE, (mac, 0, 0, 0)),
+    ]
+    # P8: the table's RAM region must match what PhysMap actually
+    # routes as RAM — the dev_base-clamped length, not the raw --ram
+    # value (DECISIONS.md D9).
+    image.write_device_table(phys, phys.ram_regions[0][1],
+                             devices=dev_entries)
+
+    img_sha256 = hashlib.sha256(img_data).hexdigest()
+    events = load_replay(args.replay, img_sha256) if args.replay else []
+
+    tracer = None
+    trace_file = None
+    if args.trace:
+        trace_file = open(args.trace, "wb")
+        tracer = trc.TraceWriter(trace_file, args.trace_level)
+        # devspec/trace.md 2.3.7: the mandatory 7-key v1 META catalog,
+        # in catalog order, and nothing else.
+        tracer.meta([
+            ("trace", 1),
+            ("encoding", E.SPEC_VERSION),
+            ("level", args.trace_level),
+            ("mode", "replay" if args.replay else "live"),
+            ("image", args.image),
+            ("image_sha256", img_sha256),
+            ("platform", "1.0-draft"),
+        ])
+
+    m = machine.Machine(phys, tracer=tracer, check_invtp=args.check_invtp,
+                        events=events, event_devices=event_devices)
+    try:
+        outcome = m.run(maxcycles=args.maxcycles)
+    except machine.CheckFail as cf:
+        reason = " ".join(str(cf).split())
+        print(f"CHECKFAIL {reason}")
+        return 3
+    finally:
+        if tracer:
+            tracer.close()
+        if trace_file:
+            trace_file.close()
+
+    if outcome == "maxcycles":
+        print("MAXCYCLES")
+        return 2
+    print(f"HALT r0={m.rreg(0):032x}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (image.ImageError, OSError, RuntimeError, ValueError) as e:
+        print(f"sahara-emu-py: {e}", file=sys.stderr)
+        sys.exit(1)
