@@ -71,11 +71,25 @@ typedef struct SeCpu {
     uint64_t devorder_depth; /* 0 = mode off */
     SeOrdEnt *ordq;          /* ring of devorder_depth entries */
     uint64_t ordq_head, ordq_count;
-    /* Replay event feed (--replay): events apply in record order at
-     * the first boundary where cycle reaches theirs (trace.md 5.2). */
-    const SeEvRec *ev; /* NULL when not replaying */
+    /* Event feed: events apply in record order at the first boundary
+     * where cycle reaches theirs (trace.md 5.2). Two exclusive owners:
+     * --replay (main.c points ev at the validated record array) or the
+     * live front end (SeCpu_feed appends to the owned `feed` array and
+     * aims ev at it) -- both are consumed by the same apply_events /
+     * wfi_wait path, so live and replay cannot diverge. */
+    const SeEvRec *ev; /* NULL when neither replaying nor live-fed */
     uint64_t ev_count;
     uint64_t ev_next; /* first not-yet-applied index */
+    SeEvRec *feed;     /* SeCpu_feed's growable backing store */
+    uint64_t feed_cap;
+    /* Live-session WFI handling (GUI front end only; both false in
+     * headless builds so the deadlock halt is unchanged): with
+     * live_yield set, a WFI that would deadlock returns an idle
+     * outcome instead -- pc still at the WFI, nothing retired, no
+     * records emitted -- and wfi_idle tells the front end to block
+     * for host input (SPEC-ISSUES 36). */
+    bool live_yield;
+    bool wfi_idle;
     SeRun state;
     char checkfail[160];
     const char *halt_note; /* stderr diagnostic for non-HALT halts */
@@ -94,6 +108,15 @@ typedef struct SeXlate {
 void SeCpu_reset(SeCpu *c, SeMem *m, SeTrace *t);
 /* Execute one instruction or deliver one trap/interrupt. */
 void SeCpu_step(SeCpu *c);
+/* Live front end only: append one host event to the feed. It applies
+ * at the first boundary whose cycle reaches its stamp, through the
+ * unchanged replay path (apply_events recomputes the drop flag and
+ * records what was accepted). The stamp is max(earliest_cycle, current
+ * cycle, last queued stamp): never in the past, and the queue stays
+ * sorted so wfi_wait's head peek is always the next wake. Feeding
+ * clears wfi_idle. Must not be mixed with a --replay feed. */
+void SeCpu_feed(SeCpu *c, uint8_t device, const uint8_t *payload,
+                uint8_t len, uint64_t earliest_cycle);
 /* Exposed for unit tests: translate va for an access kind under the
  * current MMU state (ISA-SPEC section 8). */
 SeXlate SeCpu_translate(SeCpu *c, se_u128 va, int acc);

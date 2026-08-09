@@ -34,5 +34,9 @@ bool SeMem_in_ram(const SeMem *m, se_u128 pa, unsigned size);
  * natural alignment, so an access never crosses a 64 KB page. */
 se_u128 SeMem_read(SeMem *m, se_u128 pa, unsigned size);
 void SeMem_write(SeMem *m, se_u128 pa, unsigned size, se_u128 val);
+/* Read-only block lookup for the GUI blit's page walk: the 64 KB
+ * block backing page_no, or NULL if never written (reads as zeros).
+ * No allocation, no side effects. */
+const uint8_t *SeMem_page_peek(const SeMem *m, uint64_t page_no);
 
 #endif /* SE_MEM_H */

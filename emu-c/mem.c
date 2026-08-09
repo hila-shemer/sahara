@@ -88,6 +88,11 @@ static bool access_ok(se_u128 pa, unsigned size)
     return (se_lo64(pa) & (SE_PAGE_BYTES - 1u)) + size <= SE_PAGE_BYTES;
 }
 
+const uint8_t *SeMem_page_peek(const SeMem *m, uint64_t page_no)
+{
+    return lookup(m, page_no);
+}
+
 se_u128 SeMem_read(SeMem *m, se_u128 pa, unsigned size)
 {
     RWC_ASSERT(access_ok(pa, size));

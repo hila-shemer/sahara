@@ -376,3 +376,25 @@ they need a spec ruling more urgently than the rest.
     documented here rather than half-faked. Not a divergence risk for
     the suite: no shared test can reach live-mode RX (the harness
     injects no EVENTs and the tree's reply paths need real frames).
+
+36. **PLATFORM-SPEC 8 / trace.md 5.4 / ISA 7.6 — what a live WFI does
+    when the event feed is still open, and what cycle a WFI-woken
+    event records.** Headless `wfi_wait` jumps to the next known
+    event/timer cycle and halts on deadlock; live, "no future event"
+    is only true once the session ends, so halting is wrong. Chose,
+    per the GUI work order: with a front-end-set `live_yield` flag, a
+    WFI with no wake source returns an idle outcome — pc still at the
+    WFI, nothing retired, no records — and re-executes identically
+    once input is fed; the flag is never set headless, so `--replay`
+    and the deadlock halt are untouched. Second half, the stamp: the
+    front end stamps a WFI-woken event E = max(wfi_cycle + 1,
+    pacing target) and `wfi_wait` now wakes at a boundary of exactly
+    E (the timer keeps its frozen T+1 landing, root SPEC-ISSUES 20).
+    Root SPEC-ISSUES 32 anticipated this corner: a wake at E+1 would
+    re-stamp the event one cycle later on *every* replay generation,
+    so replay-of-a-recording could never be byte-identical across a
+    WFI stall. Stamp-at-E is the only fixed point; the trace shape is
+    EXEC(WFI)@C, EVENT@E, TRAP@E. **[divergence risk]** emu-py's
+    wfi wake may land events at E+1; no shared test WFIs across a
+    feed cycle today (root 32), so the cross-diff stays green until
+    one does — revisit root 32's "revisit then" with this reading.
