@@ -35,6 +35,22 @@ rwc_binary(
     deps = [":core"],
 )
 
+# The interactive front end. sdl_main.c is the sanctioned SDL shim
+# carve-out (emu-c-gui-frontend-prompt.md): allow_banned drops the
+# poison header, SDL2 comes from system headers + linkopts (no BCR
+# dep), and the TU stays out of the source audits below. Everything
+# with logic in it lives in :gui_core instead.
+rwc_binary(
+    name = "sahara-gui",
+    srcs = ["gui/sdl_main.c"],
+    allow_banned = True,
+    linkopts = ["-lSDL2"],
+    deps = [
+        ":core",
+        ":gui_core",
+    ],
+)
+
 # The SDL-free half of the GUI front end (translation, HID filter,
 # frame blit): full doctrine, unit-tested by test_gui. Only the SDL
 # shim below gets the carve-out.
