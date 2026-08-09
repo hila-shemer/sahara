@@ -68,19 +68,16 @@ def main(argv):
     if args.trace:
         trace_file = open(args.trace, "wb")
         tracer = trc.TraceWriter(trace_file, args.trace_level)
-        modes = []
-        if args.check_invtp:
-            modes.append("invtp")
-        if args.check_devorder is not None:
-            modes.append(f"devorder={args.check_devorder}")
-        if args.replay:
-            modes.append("replay")
+        # devspec/trace.md 2.3.7: the mandatory 7-key v1 META catalog,
+        # in catalog order, and nothing else.
         tracer.meta([
-            ("image", os.path.basename(args.image)),
-            ("sha256", hashlib.sha256(img_data).hexdigest()),
+            ("trace", 1),
             ("encoding", E.SPEC_VERSION),
             ("level", args.trace_level),
-            ("modes", ",".join(modes) or "none"),
+            ("mode", "replay" if args.replay else "live"),
+            ("image", args.image),
+            ("image_sha256", hashlib.sha256(img_data).hexdigest()),
+            ("platform", "1.0-draft"),
         ])
 
     m = machine.Machine(phys, tracer=tracer, check_invtp=args.check_invtp,
