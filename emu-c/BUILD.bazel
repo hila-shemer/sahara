@@ -51,6 +51,14 @@ rwc_binary(
     ],
 )
 
+# The record->replay keystone (run-gui-tests.sh): plays the front
+# end's role through SeCpu_feed against scripted guests, no SDL.
+rwc_binary(
+    name = "gui-seam-driver",
+    srcs = ["gui/seam_driver.c"],
+    deps = [":core"],
+)
+
 # The SDL-free half of the GUI front end (translation, HID filter,
 # frame blit): full doctrine, unit-tested by test_gui. Only the SDL
 # shim below gets the carve-out.
