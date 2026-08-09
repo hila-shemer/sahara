@@ -157,6 +157,15 @@ Both emulator implementations must match the readings marked
     surface any disagreement loudly. Recommend freezing: jump to
     exactly the pending cycle, then +1 for WFI's retire. **(emulators
     must match)**
+    *FROZEN 2026-08-09 as recommended: T = the first cycle >= the WFI's
+    own cycle at which an interrupt can become pending; execution
+    resumes at T + 1 (the retire increment lands after the jump). The
+    predicted disagreement did surface: the first full emu-c/emu-py
+    difftest diverged at c1_traps record 435 (post-WFI `mfsr cycle`
+    read 595 vs 596). emu-py already implemented this reading; emu-c
+    was aligned (cpu.c wfi_wait, which also mis-woke at c0+1 when
+    timecmp landed exactly on the retire cycle). emu-c SPEC-ISSUES 30
+    is superseded.*
 
 21. **emu-common-prompt, INVTP check mode: what "served stale" means**
     — the phantom translation cache "assert[s] if a translation would

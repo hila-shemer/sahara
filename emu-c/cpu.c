@@ -571,17 +571,24 @@ static void wr_pred(SeCpu *c, unsigned pi, bool val, Wb *o)
     o->pred_wb = pred_file(c);
 }
 
-/* WFI (7.6): called after the WFI instruction has retired. Advances
- * cycle straight to the next point an interrupt can become pending, or
- * halts when no such point exists. */
+/* WFI (7.6) under the root SPEC-ISSUES 20 freeze: from WFI's own cycle
+ * c0, virtual time jumps to T -- the first cycle >= c0 at which an
+ * interrupt can become pending -- and the retire increment lands after
+ * the jump, so execution resumes at T + 1. Our caller already applied
+ * the retire increment (cycle == c0 + 1 on entry), so every exit sets
+ * cycle = T + 1 explicitly. Halts when no such T exists. */
 static void wfi_wait(SeCpu *c)
 {
-    if (timer_pending(c) || ext_pending(c))
+    se_u128 c0 = c->cycle - 1u;
+    c->cycle = c0; /* pending conditions are evaluated at c0 */
+    if (timer_pending(c) || ext_pending(c)) {
+        c->cycle = c0 + 1u; /* T = c0 */
         return;
+    }
     se_u128 tc = c->sreg[SREG_TIMECMP];
     bool have = false;
     se_u128 next = 0;
-    if (tc != 0u && tc > c->cycle) {
+    if (tc != 0u && tc > c0) {
         next = tc;
         have = true;
     }
@@ -592,19 +599,22 @@ static void wfi_wait(SeCpu *c)
      * pending already -- so the wake never resumes execution early. */
     if (c->ev_next < c->ev_count) {
         se_u128 ec = (se_u128)c->ev[c->ev_next].cycle;
-        if (ec <= c->cycle)
-            return; /* applies at the imminent boundary */
+        if (ec <= c0) {
+            c->cycle = c0 + 1u; /* applies at the imminent boundary */
+            return;
+        }
         if (!have || ec < next) {
             next = ec;
             have = true;
         }
     }
     if (!have) {
+        c->cycle = c0 + 1u;
         c->state = SE_RUN_HALT;
         c->halt_note = "WFI deadlock: no future event can raise an interrupt";
         return;
     }
-    c->cycle = next;
+    c->cycle = next + 1u; /* T = next */
 }
 
 static void exec_insn(SeCpu *c, uint64_t insn)

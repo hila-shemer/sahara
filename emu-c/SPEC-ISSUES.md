@@ -223,14 +223,19 @@ they need a spec ruling more urgently than the rest.
     addend; FMIN/FMAX order -0 < +0.
 
 30. **ISA-SPEC 7.6 — exact cycle value after a WFI stall** (root
-    SPEC-ISSUES 20). Implemented: WFI retires normally (EXEC record at
+    SPEC-ISSUES 20). ~~Implemented: WFI retires normally (EXEC record at
     cycle N, cycle -> N+1), then virtual time jumps so that
     post-stall `cycle` equals **exactly the pending event's cycle**
     (timecmp); no extra +1. The root entry recommends freezing the
     other reading (jump, then +1 for the retire). c1 only asserts
     `cycle >= timecmp`, so both pass today; the TRAP record's cycle
-    field will differ in the cross-diff until Hila freezes one.
-    **[divergence risk]**
+    field will differ in the cross-diff until Hila freezes one.~~
+    *RESOLVED 2026-08-09: the cross-diff surfaced the divergence
+    (c1_traps record 435) and the root entry froze its recommended
+    reading — jump to T, then +1 for the retire. wfi_wait now
+    evaluates pending at WFI's own cycle c0 and resumes at T + 1;
+    this also fixed a latent edge where timecmp == c0 + 1 woke at
+    c0 + 1 instead of timecmp + 1.*
 
 31. **tests/gen_c2.py — test bug: ROOT2's code-page leaf drops the U
     bit, so the ptbase/asid switch window CHECKFAILs under root
