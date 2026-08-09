@@ -5,6 +5,8 @@ import math
 import random
 import struct
 
+import pytest
+
 import encoding as E
 import softfloat as sf
 from helpers import (HANDLER_PA, MASK128, asm, cause_handler, halt, ldi,
@@ -75,6 +77,8 @@ def test_f64_sqrt_vs_host():
         assert got == d2b(math.sqrt(a)), a
 
 
+@pytest.mark.skipif(not hasattr(math, "fma"),
+                    reason="math.fma requires Python >= 3.13")
 def test_f64_fma_vs_host():
     rng = random.Random(7)
     for _ in range(500):
