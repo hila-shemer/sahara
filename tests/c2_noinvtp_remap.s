@@ -39,7 +39,7 @@
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_die             # no trap is legitimate in this image
+        la.abs r21, h_die             # no trap is legitimate in this image
         mtsr vbase, r21
         li r21, ROOT_PA
         mtsr ptbase, r21
@@ -54,7 +54,7 @@ start:
         (!p1) b fail
         li r25, VA_TABLES + NODEB_E1_ADDR - 0x20000
         li r19, PTE_REMAP_LEAF
-        st128 r19, [r25]          # remap VA_P1 -> P2 ... but NO INVTP.
+        st128 [r25], r19          # remap VA_P1 -> P2 ... but NO INVTP.
         li r25, VA_P1
         lds.64 r22, [r25]         # cached 0x30000 vs fresh 0x40000:
                                   # --check-invtp must CHECKFAIL here

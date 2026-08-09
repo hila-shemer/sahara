@@ -3,10 +3,10 @@
 # generator and rerun (deterministic; output is committed).
 # Expected values computed in the generator from ISA-SPEC
 # 5.3/3.4 over an explicit little-endian byte model,
-# independent of any emulator. Bounded coverage (device
-# ordering, 64-bit device access, UNALIGNED-vs-DEVERR
-# priority) listed in gen_c7.py's docstring — SPEC-ISSUES 25.
-# Conventions per tests/README.md.
+# independent of any emulator. Device ordering, successful
+# 64-bit register access, and the UNALIGNED-before-DEVERR
+# precedence live in tests/c7_dev.s (bounded-coverage notes
+# in gen_c7.py's docstring). Conventions per tests/README.md.
 
         .org 0x1000
 start:
@@ -15,7 +15,7 @@ start:
 
         # ---- C7.1 load width/extension sweep over the box --
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         # test 1: lds.8 [box+0] -> 0xffffffffffffffffffffffffffffff80
         li r27, 1
         lds.8 r19, [r25 + 0]
@@ -447,9 +447,9 @@ start:
         # test 62: st.8 [box+0] writes only bytes 0..0
         li r27, 62
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d3c
-        st.8 r21, [r25 + 0]
+        st.8 [r25 + 0], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa500017fff3c
         cmpeq p1, r19, r20
@@ -458,9 +458,9 @@ start:
         # test 63: st.8 [box+1] writes only bytes 1..1
         li r27, 63
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d3d
-        st.8 r21, [r25 + 1]
+        st.8 [r25 + 1], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa500017f3d80
         cmpeq p1, r19, r20
@@ -469,9 +469,9 @@ start:
         # test 64: st.8 [box+2] writes only bytes 2..2
         li r27, 64
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d3e
-        st.8 r21, [r25 + 2]
+        st.8 [r25 + 2], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa500013eff80
         cmpeq p1, r19, r20
@@ -480,9 +480,9 @@ start:
         # test 65: st.8 [box+3] writes only bytes 3..3
         li r27, 65
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d3f
-        st.8 r21, [r25 + 3]
+        st.8 [r25 + 3], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa5003f7fff80
         cmpeq p1, r19, r20
@@ -491,9 +491,9 @@ start:
         # test 66: st.8 [box+4] writes only bytes 4..4
         li r27, 66
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d40
-        st.8 r21, [r25 + 4]
+        st.8 [r25 + 4], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa540017fff80
         cmpeq p1, r19, r20
@@ -502,9 +502,9 @@ start:
         # test 67: st.8 [box+5] writes only bytes 5..5
         li r27, 67
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d41
-        st.8 r21, [r25 + 5]
+        st.8 [r25 + 5], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5a4100017fff80
         cmpeq p1, r19, r20
@@ -513,9 +513,9 @@ start:
         # test 68: st.8 [box+6] writes only bytes 6..6
         li r27, 68
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d42
-        st.8 r21, [r25 + 6]
+        st.8 [r25 + 6], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe42a500017fff80
         cmpeq p1, r19, r20
@@ -524,9 +524,9 @@ start:
         # test 69: st.8 [box+7] writes only bytes 7..7
         li r27, 69
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d43
-        st.8 r21, [r25 + 7]
+        st.8 [r25 + 7], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001435aa500017fff80
         cmpeq p1, r19, r20
@@ -535,9 +535,9 @@ start:
         # test 70: st.8 [box+8] writes only bytes 8..8
         li r27, 70
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d44
-        st.8 r21, [r25 + 8]
+        st.8 [r25 + 8], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38044fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -546,9 +546,9 @@ start:
         # test 71: st.8 [box+9] writes only bytes 9..9
         li r27, 71
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d45
-        st.8 r21, [r25 + 9]
+        st.8 [r25 + 9], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc34501fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -557,9 +557,9 @@ start:
         # test 72: st.8 [box+10] writes only bytes 10..10
         li r27, 72
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d46
-        st.8 r21, [r25 + 10]
+        st.8 [r25 + 10], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97f468001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -568,9 +568,9 @@ start:
         # test 73: st.8 [box+11] writes only bytes 11..11
         li r27, 73
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d47
-        st.8 r21, [r25 + 11]
+        st.8 [r25 + 11], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e947c38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -579,9 +579,9 @@ start:
         # test 74: st.8 [box+12] writes only bytes 12..12
         li r27, 74
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d48
-        st.8 r21, [r25 + 12]
+        st.8 [r25 + 12], r21
         ld128 r19, [r25]
         li r20, 0x10ff00487fc38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -590,9 +590,9 @@ start:
         # test 75: st.8 [box+13] writes only bytes 13..13
         li r27, 75
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d49
-        st.8 r21, [r25 + 13]
+        st.8 [r25 + 13], r21
         ld128 r19, [r25]
         li r20, 0x10ff49e97fc38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -601,9 +601,9 @@ start:
         # test 76: st.8 [box+14] writes only bytes 14..14
         li r27, 76
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d4a
-        st.8 r21, [r25 + 14]
+        st.8 [r25 + 14], r21
         ld128 r19, [r25]
         li r20, 0x104a00e97fc38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -612,9 +612,9 @@ start:
         # test 77: st.8 [box+15] writes only bytes 15..15
         li r27, 77
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x5ac3c30ff0a5a596693cc3ff00d00d4b
-        st.8 r21, [r25 + 15]
+        st.8 [r25 + 15], r21
         ld128 r19, [r25]
         li r20, 0x4bff00e97fc38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -623,9 +623,9 @@ start:
         # test 78: st.16 [box+0] writes only bytes 0..1
         li r27, 78
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbeef
-        st.16 r21, [r25 + 0]
+        st.16 [r25 + 0], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa500017fbeef
         cmpeq p1, r19, r20
@@ -634,9 +634,9 @@ start:
         # test 79: st.16 [box+2] writes only bytes 2..3
         li r27, 79
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbef1
-        st.16 r21, [r25 + 2]
+        st.16 [r25 + 2], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa500bef1ff80
         cmpeq p1, r19, r20
@@ -645,9 +645,9 @@ start:
         # test 80: st.16 [box+4] writes only bytes 4..5
         li r27, 80
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbef3
-        st.16 r21, [r25 + 4]
+        st.16 [r25 + 4], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5abef3017fff80
         cmpeq p1, r19, r20
@@ -656,9 +656,9 @@ start:
         # test 81: st.16 [box+6] writes only bytes 6..7
         li r27, 81
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbef5
-        st.16 r21, [r25 + 6]
+        st.16 [r25 + 6], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001bef5a500017fff80
         cmpeq p1, r19, r20
@@ -667,9 +667,9 @@ start:
         # test 82: st.16 [box+8] writes only bytes 8..9
         li r27, 82
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbef7
-        st.16 r21, [r25 + 8]
+        st.16 [r25 + 8], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc3bef7fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -678,9 +678,9 @@ start:
         # test 83: st.16 [box+10] writes only bytes 10..11
         li r27, 83
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbef9
-        st.16 r21, [r25 + 10]
+        st.16 [r25 + 10], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e9bef98001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -689,9 +689,9 @@ start:
         # test 84: st.16 [box+12] writes only bytes 12..13
         li r27, 84
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbefb
-        st.16 r21, [r25 + 12]
+        st.16 [r25 + 12], r21
         ld128 r19, [r25]
         li r20, 0x10ffbefb7fc38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -700,9 +700,9 @@ start:
         # test 85: st.16 [box+14] writes only bytes 14..15
         li r27, 85
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xc3c30ff0a5a596693cc3ff00d00dbefd
-        st.16 r21, [r25 + 14]
+        st.16 [r25 + 14], r21
         ld128 r19, [r25]
         li r20, 0xbefd00e97fc38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -711,9 +711,9 @@ start:
         # test 86: st.32 [box+0] writes only bytes 0..3
         li r27, 86
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xff0a5a596693cc3ff00d00d8badf00d
-        st.32 r21, [r25 + 0]
+        st.32 [r25 + 0], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001fe5aa5008badf00d
         cmpeq p1, r19, r20
@@ -722,9 +722,9 @@ start:
         # test 87: st.32 [box+4] writes only bytes 4..7
         li r27, 87
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xff0a5a596693cc3ff00d00d8badf011
-        st.32 r21, [r25 + 4]
+        st.32 [r25 + 4], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc380018badf011017fff80
         cmpeq p1, r19, r20
@@ -733,9 +733,9 @@ start:
         # test 88: st.32 [box+8] writes only bytes 8..11
         li r27, 88
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xff0a5a596693cc3ff00d00d8badf015
-        st.32 r21, [r25 + 8]
+        st.32 [r25 + 8], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e98badf015fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -744,9 +744,9 @@ start:
         # test 89: st.32 [box+12] writes only bytes 12..15
         li r27, 89
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0xff0a5a596693cc3ff00d00d8badf019
-        st.32 r21, [r25 + 12]
+        st.32 [r25 + 12], r21
         ld128 r19, [r25]
         li r20, 0x8badf0197fc38001fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -755,9 +755,9 @@ start:
         # test 90: st.64 [box+0] writes only bytes 0..7
         li r27, 90
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x96693cc3ff00d00dfeedface8badf00d
-        st.64 r21, [r25 + 0]
+        st.64 [r25 + 0], r21
         ld128 r19, [r25]
         li r20, 0x10ff00e97fc38001feedface8badf00d
         cmpeq p1, r19, r20
@@ -766,9 +766,9 @@ start:
         # test 91: st.64 [box+8] writes only bytes 8..15
         li r27, 91
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x96693cc3ff00d00dfeedface8badf015
-        st.64 r21, [r25 + 8]
+        st.64 [r25 + 8], r21
         ld128 r19, [r25]
         li r20, 0xfeedface8badf015fe5aa500017fff80
         cmpeq p1, r19, r20
@@ -777,9 +777,9 @@ start:
         # test 92: st128 replaces the whole box
         li r27, 92
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x123456789abcdef1122334455667788
-        st128 r21, [r25]
+        st128 [r25], r21
         ld128 r19, [r25]
         li r20, 0x123456789abcdef1122334455667788
         cmpeq p1, r19, r20
@@ -788,9 +788,9 @@ start:
         # test 93: little-endian: st.64 then ldz.8 at each byte
         li r27, 93
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         li r21, 0x1032547698badcfe
-        st.64 r21, [r25]
+        st.64 [r25], r21
         ldz.8 r19, [r25 + 3]
         li r20, 0x98
         cmpeq p1, r19, r20
@@ -871,14 +871,14 @@ start:
         li r27, 103
         li r22, 6
         li r23, 0x51DE
-        st.64 r23, [r21 + r22 shl 3 + 8]   # slot 7
+        st.64 [r21 + r22 shl 3 + 8], r23   # slot 7
         lds.64 r19, [r21 + 56]
         li r20, 0x51de
         cmpeq p1, r19, r20
         (!p1) b fail
 
         # ---- C7.4 alignment: UNALIGNED, baddr = ea --------
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # test 104: lds.16 [box+1] traps UNALIGNED
@@ -899,7 +899,7 @@ c7a_104:
         # test 106: ...epc = the faulting access
         li r27, 106
         lds.64 r19, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, c7a_104
+        la.abs r20, c7a_104
         cmpeq p1, r19, r20
         (!p1) b fail
 
@@ -1011,7 +1011,7 @@ c7a_119:
         # test 121: st.16 [box+1] traps UNALIGNED
         li r27, 121
 c7a_121:
-        st.16 r19, [r25 + 1]
+        st.16 [r25 + 1], r19
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_UNALIGNED
         (!p1) b fail
@@ -1026,7 +1026,7 @@ c7a_121:
         # test 123: st.32 [box+2] traps UNALIGNED
         li r27, 123
 c7a_123:
-        st.32 r19, [r25 + 2]
+        st.32 [r25 + 2], r19
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_UNALIGNED
         (!p1) b fail
@@ -1041,7 +1041,7 @@ c7a_123:
         # test 125: st.64 [box+4] traps UNALIGNED
         li r27, 125
 c7a_125:
-        st.64 r19, [r25 + 4]
+        st.64 [r25 + 4], r19
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_UNALIGNED
         (!p1) b fail
@@ -1056,7 +1056,7 @@ c7a_125:
         # test 127: st128 [box+8] traps UNALIGNED
         li r27, 127
 c7a_127:
-        st128 r19, [r25 + 8]
+        st128 [r25 + 8], r19
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_UNALIGNED
         (!p1) b fail
@@ -1138,11 +1138,11 @@ c7a_135:
 
         # 8-bit accesses never trap, any address
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         # test 138: st.8 / ldz.8 at odd offsets succeed
         li r27, 138
         li r21, 0xC7
-        st.8 r21, [r25 + 3]
+        st.8 [r25 + 3], r21
         ldz.8 r19, [r25 + 3]
         li r20, 0xc7
         cmpeq p1, r19, r20
@@ -1151,7 +1151,7 @@ c7a_135:
         # test 139: lds.8 at offset 9 (0x80 seeded: sign-extends)
         li r27, 139
         li r19, 0x10ff00e97fc38001fe5aa500017fff80
-        st128 r19, [r25]
+        st128 [r25], r19
         lds.8 r19, [r25 + 9]
         li r20, 0xffffffffffffffffffffffffffffff80
         cmpeq p1, r19, r20
@@ -1232,7 +1232,7 @@ c7a_135:
         # test 150: st.8 on a device register traps DEVERR
         li r27, 150
         li r22, 0x11
-        st.8 r22, [r21]
+        st.8 [r21], r22
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_DEVERR
         (!p1) b fail
@@ -1240,7 +1240,7 @@ c7a_135:
         # test 151: st.16 on a device register traps DEVERR
         li r27, 151
         li r22, 0x11
-        st.16 r22, [r21]
+        st.16 [r21], r22
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_DEVERR
         (!p1) b fail
@@ -1248,7 +1248,7 @@ c7a_135:
         # test 152: st.32 on a device register traps DEVERR
         li r27, 152
         li r22, 0x11
-        st.32 r22, [r21]
+        st.32 [r21], r22
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_DEVERR
         (!p1) b fail
@@ -1256,7 +1256,7 @@ c7a_135:
         # test 153: st128 on a device register traps DEVERR
         li r27, 153
         li r22, 0x11
-        st128 r22, [r21]
+        st128 [r21], r22
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_DEVERR
         (!p1) b fail
@@ -1265,20 +1265,20 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
         # record cause/baddr/epc/status, skip the faulter
 h_rec:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + TRAP_STATUS_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_STATUS_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0

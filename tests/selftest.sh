@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Harness self-test — no emulator required. Validates:
+#   0. component unit tests (assembler, trace-q, trace.md 8 vectors)
 #   1. every MANIFEST source assembles (with tests/defs.s prepended)
 #   2. committed generated files match their generators byte-for-byte
 #   3. run-tests.sh passes against the stub, and FAILS when the stub
@@ -9,6 +10,9 @@
 # The stub executes nothing; semantic expectations are first exercised
 # when a real emulator arrives.
 set -u
+# selftest drives both REPLAY modes itself (step 3); an inherited
+# REPLAY=1 would leak into the plain run and break its summary check
+unset REPLAY
 
 die() { echo "selftest: FATAL: $*" >&2; exit 1; }
 
@@ -17,12 +21,37 @@ TESTS="$ROOT/tests"
 TMP=$(mktemp -d) || die mktemp
 trap 'rm -rf "$TMP"' EXIT
 
+echo "== 0. component unit tests =="
+for t in asm/test_asm.py asm/test_asmmd.py trace-q/test_traceq.py \
+         trace-q/test_vectors.py; do
+    python3 "$ROOT/$t" > "$TMP/unit.out" 2>&1 \
+        || { cat "$TMP/unit.out"; die "$t failed"; }
+    echo "ok: $t"
+done
+
 echo "== 1. assembly of every manifest source =="
 while read -r name src rest; do
     case "$name" in ""|\#*) continue;; esac
     python3 "$ROOT/asm/asm.py" -o "$TMP/$name.img" "$TESTS/defs.s" \
         "$TESTS/$src" || die "assembly of $src failed"
     echo "ok: $src"
+done < "$TESTS/MANIFEST"
+
+echo "== 1b. event feeds generate, parse, and are deterministic =="
+while read -r name src rest; do
+    case "$name" in ""|\#*) continue;; esac
+    ev=""
+    for tok in $rest; do
+        case "$tok" in events=*) ev="${tok#events=}";; esac
+    done
+    [ -n "$ev" ] || continue
+    python3 "$TESTS/events/$ev" "$TMP/$name.img" "$TMP/$name.ev1.trc" \
+        || die "event feed $ev failed"
+    python3 "$TESTS/events/$ev" "$TMP/$name.img" "$TMP/$name.ev2.trc" \
+        || die "event feed $ev failed (second run)"
+    cmp -s "$TMP/$name.ev1.trc" "$TMP/$name.ev2.trc" \
+        || die "event feed $ev is nondeterministic"
+    echo "ok: $ev"
 done < "$TESTS/MANIFEST"
 
 echo "== 2. generated files match generators =="
@@ -59,13 +88,38 @@ printf '#!/usr/bin/env bash\nexec python3 "%s" "$@"\n' \
 chmod +x "$FAKE"
 
 NTESTS=$(grep -cv '^\s*\(#\|$\)' "$TESTS/MANIFEST")
+NEV=$(grep -v '^\s*\(#\|$\)' "$TESTS/MANIFEST" | grep -c 'events=')
 
 echo "== 3. run-tests.sh against the stub =="
+# Without REPLAY=1 the event-fed tests must be SKIPPED (loudly,
+# counted) — an emulator without --replay cannot run them.
 EMU="$FAKE" "$TESTS/run-tests.sh" > "$TMP/rt.out" 2>&1 \
     || { cat "$TMP/rt.out"; die "run-tests should pass with the stub"; }
-grep -q "$NTESTS passed, 0 failed" "$TMP/rt.out" \
+grep -q "$((NTESTS - NEV)) passed, 0 failed, $NEV skipped" "$TMP/rt.out" \
     || { cat "$TMP/rt.out"; die "unexpected run-tests summary"; }
-echo "ok: stub passes ($NTESTS tests)"
+grep -q "SKIP c7_kbd:" "$TMP/rt.out" \
+    || { cat "$TMP/rt.out"; die "event-fed skip must be printed"; }
+echo "ok: stub passes ($((NTESTS - NEV)) tests, $NEV event-fed skipped)"
+
+# With REPLAY=1 the full suite runs, event-fed tests included: the
+# stub echoes the feed's EVENT records and emits check-satisfying
+# furniture, so everything must pass with zero skips.
+REPLAY=1 EMU="$FAKE" "$TESTS/run-tests.sh" > "$TMP/rt-ev.out" 2>&1 \
+    || { cat "$TMP/rt-ev.out"; die "REPLAY=1 full suite should pass"; }
+grep -q "$NTESTS passed, 0 failed, 0 skipped" "$TMP/rt-ev.out" \
+    || { cat "$TMP/rt-ev.out"; die "unexpected REPLAY=1 summary"; }
+echo "ok: REPLAY=1 stub passes all $NTESTS (event-fed included)"
+
+# A stub that loses an EVENT record must fail the test — via the
+# replay-divergence check or the feed-vs-trace byte equality in
+# checks/c7_kbd.py, whichever trips first. Both are loud.
+printf '#!/usr/bin/env bash\nFAKE_DROP_EVENT=1 exec python3 "%s" "$@"\n' \
+    "$TESTS/harness-selftest/fake-emu.py" > "$TMP/fake-noev"
+chmod +x "$TMP/fake-noev"
+REPLAY=1 EMU="$TMP/fake-noev" "$TESTS/run-tests.sh" c7_kbd \
+    > "$TMP/rt-ev2.out" 2>&1 \
+    && { cat "$TMP/rt-ev2.out"; die "a dropped EVENT record must fail the check"; }
+echo "ok: missing EVENT record caught"
 
 printf '#!/usr/bin/env bash\nFAKE_RC=7 exec python3 "%s" "$@"\n' \
     "$TESTS/harness-selftest/fake-emu.py" > "$TMP/fake-rc"
@@ -98,7 +152,8 @@ EMU="$TMP/fake-r0" "$TESTS/run-tests.sh" c2_noinvtp_remap \
     && { cat "$TMP/rt5.out"; die "run-tests must reject HALT where CHECKFAIL expected"; }
 echo "ok: expect=checkfail rejects a HALTing run"
 
-# REPLAY=1: extract-events + --replay re-run + diverge. The stub has
+# REPLAY=1: --replay re-run (fed the recorded trace, trace.md 5.1) +
+# diverge. The stub has
 # no EVENT records (0-event replay is still a meaningful determinism
 # re-run) and reproduces its trace, so this must pass...
 REPLAY=1 EMU="$FAKE" "$TESTS/run-tests.sh" c0_smoke > "$TMP/rt6.out" 2>&1 \
@@ -117,11 +172,22 @@ grep -q "REPLAY DIVERGENCE" "$TMP/rt7.out" \
 echo "ok: replay divergence caught"
 
 echo "== 4. difftest.sh =="
+# Without REPLAY=1: event-fed tests skipped, everything else identical.
 "$TESTS/difftest.sh" "$FAKE" "$FAKE" > "$TMP/dt.out" 2>&1 \
     || { cat "$TMP/dt.out"; die "difftest identical stubs should pass"; }
-grep -q "$NTESTS identical, 0 diverged" "$TMP/dt.out" \
+grep -q "$((NTESTS - NEV)) identical, 0 diverged" "$TMP/dt.out" \
     || { cat "$TMP/dt.out"; die "unexpected difftest summary"; }
-echo "ok: identical stubs identical"
+grep -q "$NEV skipped" "$TMP/dt.out" \
+    || { cat "$TMP/dt.out"; die "difftest must count event-fed skips"; }
+echo "ok: identical stubs identical ($NEV event-fed skipped)"
+
+# With REPLAY=1: event-fed tests run on both sides from one shared
+# feed and must come out identical too.
+REPLAY=1 "$TESTS/difftest.sh" "$FAKE" "$FAKE" > "$TMP/dt-ev.out" 2>&1 \
+    || { cat "$TMP/dt-ev.out"; die "REPLAY=1 difftest should pass"; }
+grep -q "$NTESTS identical, 0 diverged" "$TMP/dt-ev.out" \
+    || { cat "$TMP/dt-ev.out"; die "unexpected REPLAY=1 difftest summary"; }
+echo "ok: REPLAY=1 identical stubs identical (event-fed included)"
 
 printf '#!/usr/bin/env bash\nFAKE_WB=5 exec python3 "%s" "$@"\n' \
     "$TESTS/harness-selftest/fake-emu.py" > "$TMP/fake-wb"

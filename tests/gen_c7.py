@@ -26,12 +26,12 @@ Coverage (C7 outline):
 
 Bounded coverage — deliberately NOT here (no silent gaps):
 - successful 64-bit device-register accesses, device ordering rules
-  1-2 (--check-devorder, doorbell-after-stores), and device read side
-  effects need defined per-device behavior: devspec-gated, C7's
-  device-order tranche lands when devspec/INDEX.md exists.
-- UNALIGNED-vs-DEVERR priority for a misaligned device access is
-  unspecified (ISA 5.3 vs 9.2 both claim it); no test until the spec
-  picks — SPEC-ISSUES 25.
+  1-2 (--check-devorder, PRESENT/doorbell), device read side effects,
+  and the UNALIGNED-before-DEVERR precedence (SPEC-ISSUES 25, decided
+  by devspec) live in tests/c7_dev.s now that devspec/ landed.
+- device behavior that needs EVENT injection or the NIC translator
+  (queue pops with content, overflow, resize, TX/RX flows) remains
+  gated on the device-phase fixtures — see c7_dev.s's header.
 
 Deterministic; output is committed.
 """
@@ -119,7 +119,7 @@ def check_r19(expected):
 
 def seed_box():
     emit("        li r19, " + hexv(SEED))
-    emit("        st128 r19, [r25]")
+    emit("        st128 [r25], r19")
 
 
 def sfx(w):
@@ -154,14 +154,14 @@ def gen_stores():
                   f"{off}..{off + w // 8 - 1}")
             seed_box()
             emit(f"        li r21, {hexv(v)}")
-            emit(f"        st{sfx(w)} r21, [r25 + {off}]")
+            emit(f"        st{sfx(w)} [r25 + {off}], r21")
             emit("        ld128 r19, [r25]")
             check_r19(exp)
     v = 0x0123_4567_89AB_CDEF_1122_3344_5566_7788
     begin("st128 replaces the whole box")
     seed_box()
     emit(f"        li r21, {hexv(v)}")
-    emit("        st128 r21, [r25]")
+    emit("        st128 [r25], r21")
     emit("        ld128 r19, [r25]")
     check_r19(v)
     # cross-width overlap pins byte order: ISA-SPEC 1 says the machine
@@ -171,7 +171,7 @@ def gen_stores():
     begin("little-endian: st.64 then ldz.8 at each byte")
     seed_box()
     emit(f"        li r21, {hexv(q)}")
-    emit("        st.64 r21, [r25]")
+    emit("        st.64 [r25], r21")
     emit("        ldz.8 r19, [r25 + 3]")
     check_r19((q >> 24) & 0xFF)
     begin("little-endian: st.64 then ldz.16 at offset 6")
@@ -216,14 +216,14 @@ def gen_ea():
     begin("store through a composed ea, plain readback")
     emit("        li r22, 6")
     emit("        li r23, 0x51DE")
-    emit("        st.64 r23, [r21 + r22 shl 3 + 8]   # slot 7")
+    emit("        st.64 [r21 + r22 shl 3 + 8], r23   # slot 7")
     emit("        lds.64 r19, [r21 + 56]")
     check_r19(0x51DE)
 
 
 def gen_align():
     emit("        # ---- C7.4 alignment: UNALIGNED, baddr = ea --------")
-    emit("        li r21, h_rec")
+    emit("        la.abs r21, h_rec")
     emit("        mtsr vbase, r21")
     emit()
 
@@ -241,7 +241,7 @@ def gen_align():
         if check_epc:
             begin("...epc = the faulting access")
             emit("        lds.64 r19, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]")
-            emit(f"        li r20, {site}")
+            emit(f"        la.abs r20, {site}")
             emit("        cmpeq p1, r19, r20")
             emit("        (!p1) b fail")
             emit()
@@ -257,7 +257,7 @@ def gen_align():
     for mnem, off in [("st.16", 1), ("st.32", 2), ("st.64", 4),
                       ("st128", 8)]:
         trap_case(f"{mnem} [box+{off}] traps UNALIGNED",
-                  [f"{mnem} r19, [r25 + {off}]"], BOX + off)
+                  [f"{mnem} [r25 + {off}], r19"], BOX + off)
     # atomics: natural alignment required at 32/64/128 (ISA-SPEC 5.4);
     # the C3 generator's bounded-coverage bullet lands here.
     for mnem, off in [("amoadd.32", 2), ("amoadd.64", 4),
@@ -276,7 +276,7 @@ def gen_align():
     seed_box()
     begin("st.8 / ldz.8 at odd offsets succeed")
     emit("        li r21, 0xC7")
-    emit("        st.8 r21, [r25 + 3]")
+    emit("        st.8 [r25 + 3], r21")
     emit("        ldz.8 r19, [r25 + 3]")
     check_r19(0xC7)
     begin("lds.8 at offset 9 (0x80 seeded: sign-extends)")
@@ -313,7 +313,7 @@ def gen_devsize():
     for mnem in ("st.8", "st.16", "st.32", "st128"):
         begin(f"{mnem} on a device register traps DEVERR")
         emit("        li r22, 0x11")
-        emit(f"        {mnem} r22, [r21]")
+        emit(f"        {mnem} [r21], r22")
         emit("        lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]")
         check_r19_named("CAUSE_DEVERR")
 
@@ -324,10 +324,10 @@ def generate():
     emit("# generator and rerun (deterministic; output is committed).")
     emit("# Expected values computed in the generator from ISA-SPEC")
     emit("# 5.3/3.4 over an explicit little-endian byte model,")
-    emit("# independent of any emulator. Bounded coverage (device")
-    emit("# ordering, 64-bit device access, UNALIGNED-vs-DEVERR")
-    emit("# priority) listed in gen_c7.py's docstring — SPEC-ISSUES 25.")
-    emit("# Conventions per tests/README.md.")
+    emit("# independent of any emulator. Device ordering, successful")
+    emit("# 64-bit register access, and the UNALIGNED-before-DEVERR")
+    emit("# precedence live in tests/c7_dev.s (bounded-coverage notes")
+    emit("# in gen_c7.py's docstring). Conventions per tests/README.md.")
     emit()
     emit("        .org 0x1000")
     emit("start:")
@@ -343,20 +343,20 @@ def generate():
     emit("        li r0, PASS_MAGIC")
     emit("        halt")
     emit("fail:")
-    emit("        st.64 r27, [r24]")
+    emit("        st.64 [r24], r27")
     emit("        mov r0, r27")
     emit("        halt")
     emit()
     emit("        # record cause/baddr/epc/status, skip the faulter")
     emit("h_rec:")
     emit("        mfsr k0, cause0")
-    emit("        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, baddr0")
-    emit("        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, epc0")
-    emit("        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, status")
-    emit("        st.64 k0, [r24 + TRAP_STATUS_SLOT - FAIL_ADDR]")
+    emit("        st.64 [r24 + TRAP_STATUS_SLOT - FAIL_ADDR], k0")
     emit("        mfsr k0, epc0")
     emit("        add k0, k0, 8")
     emit("        mtsr epc0, k0")

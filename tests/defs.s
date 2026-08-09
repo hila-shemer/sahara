@@ -83,6 +83,17 @@
         .equ DEV_KBD_BASE, 0x0F010000
         .equ DEV_MOUSE_BASE, 0x0F020000
         .equ DEV_NIC_BASE, 0x0F030000
+        .equ DEV_PIXBUF_BASE, 0x10000000
+        # NIC window sub-regions (PLATFORM-SPEC section 7)
+        .equ DEV_NIC_TXBUF, 0x0F040000   # nic base + 0x1_0000
+        .equ DEV_NIC_RXBUF, 0x0F050000   # nic base + 0x2_0000
+        # devorder RAM slots (c7_dev; tests/README.md)
+        .equ ORDQ_SLOTS, 0x790
+        # event-fed tests' handler slots (c7_kbd / c7_resize /
+        # c7_kbd_ovf; tests/README.md)
+        .equ EVT_FLAG, 0x7C8    # handler-done flag
+        .equ EVT_COUNT, 0x7D0   # handler drain count
+        .equ EVT_SLOTS, 0x7D8   # popped words / geometry (3 slots)
 
         # raw instruction words (built from encoding.py field
         # positions; the assembler refuses to emit these, which

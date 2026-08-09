@@ -36,7 +36,7 @@ join1:
 after_jal:
         b fail                    # jumped over by jal's target path
 jt1:
-        li r20, after_jal
+        la.abs r20, after_jal
         cmpeq p1, r5, r20
         (!p1) b fail
 
@@ -46,23 +46,23 @@ jt1:
 after_jal2:
         b fail
 jt2:
-        li r20, after_jal2
+        la.abs r20, after_jal2
         cmpeq p1, ra, r20
         (!p1) b fail
 
         # -- C6.3 JALR: byte target, imm added, link written -----------
         li r27, 4
-        li r21, jt3
+        la.abs r21, jt3
         jalr r5, r21, 0
 after_jalr:
         b fail
 jt3:
-        li r20, after_jalr
+        la.abs r20, after_jalr
         cmpeq p1, r5, r20
         (!p1) b fail
 
         li r27, 5
-        li r21, jt4 - 16          # nonzero displacement path
+        la.abs r21, jt4 - 16          # nonzero displacement path
         jalr zero, r21, 16
         b fail
 jt4:
@@ -82,10 +82,10 @@ func1:
         #    epc = the jalr, no link write on the faulting path
 c6_4:
         li r27, 7
-        li r21, handler
+        la.abs r21, handler
         mtsr vbase, r21
         li r5, 1234               # must survive the faulting jalr
-        li r21, jt5 + 4           # 8-byte alignment violated
+        la.abs r21, jt5 + 4           # 8-byte alignment violated
 jalr_site:
         jalr r5, r21, 0           # traps; handler records and skips
 jt5:
@@ -94,12 +94,12 @@ jt5:
         (!p1) b fail
         li r27, 8
         lds.64 r22, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
-        li r20, jt5 + 4
+        la.abs r20, jt5 + 4
         cmpeq p1, r22, r20
         (!p1) b fail
         li r27, 9
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, jalr_site
+        la.abs r20, jalr_site
         cmpeq p1, r22, r20
         (!p1) b fail
         li r27, 10
@@ -211,8 +211,8 @@ jt5:
         li r21, 7
         cmpeq p2, r21, 8          # p2 = 0 for this whole section
         li r19, 55
-        (p2) st.64 r21, [r25]     # squashed store: no access
-        (p2) st128 r21, [r25]
+        (p2) st.64 [r25], r21     # squashed store: no access
+        (p2) st128 [r25], r21
         (p2) lds.64 r19, [r25]    # squashed load: r19 unchanged
         (p2) ld128 r19, [r25]
         cmpeq p1, r19, 55
@@ -265,18 +265,18 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
         # -- trap handler: record bank-0 fields, skip the instruction --
 handler:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         add k0, k0, 8
         mtsr epc0, k0
         iret

@@ -251,13 +251,13 @@ CODE = r"""
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # -- [1] enable mid-stream: ptbase/asid, INVTP, MMU_EN on ------
         li r27, 1
         li r19, 0xAB
-        st.64 r19, [r24 + SENTINEL_BOX - FAIL_ADDR]
+        st.64 [r24 + SENTINEL_BOX - FAIL_ADDR], r19
         li r21, ROOT_PA
         mtsr ptbase, r21
         li r21, 0xA
@@ -279,7 +279,7 @@ start:
         # -- [3] mapped store lands in the frame, not at the VA --------
         li r27, 3
         li r19, 0xC0DE
-        st.64 r19, [r25 + 8]
+        st.64 [r25 + 8], r19
         lds.64 r22, [r25 + 8]     # readback through the mapping
         cmpeq p1, r22, r19
         (!p1) b fail
@@ -317,7 +317,7 @@ start:
         li r25, VA_ALIAS_A
         li r23, VA_ALIAS_B
         li r19, 0xA11A5
-        st.64 r19, [r25]
+        st.64 [r25], r19
         lds.64 r22, [r23]
         cmpeq p1, r22, r19
         (!p1) b fail
@@ -337,13 +337,13 @@ c2_pf_site:
         (!p1) b fail
         li r27, 11
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, c2_pf_site
+        la.abs r20, c2_pf_site
         cmpeq p1, r22, r20
         (!p1) b fail
 
         # -- [12] PF_STORE on invalid entry ----------------------------
         li r27, 12
-        st.64 r19, [r25]
+        st.64 [r25], r19
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r22, CAUSE_PF_STORE
         (!p1) b fail
@@ -391,7 +391,7 @@ c2_pf_site:
         cmpeq p1, r22, M_RO
         (!p1) b fail
         li r27, 19
-        st.64 r19, [r25]
+        st.64 [r25], r19
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r22, CAUSE_PERM_STORE
         (!p1) b fail
@@ -404,7 +404,7 @@ c2_pf_site:
         li r27, 21
         li r25, VA_WONLY
         li r19, 0x570CE
-        st.64 r19, [r25]          # allowed: W set
+        st.64 [r25], r19          # allowed: W set
         lds.64 r22, [r25]         # PERM_LOAD, recorded and skipped
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r22, CAUSE_PERM_LOAD
@@ -421,10 +421,10 @@ c2_pf_site:
 
         # -- [23] PERM_FETCH: jump into an RW-noX page -----------------
         li r27, 23
-        li r21, h_fetch
+        la.abs r21, h_fetch
         mtsr vbase, r21
-        li r21, c2_after_nox
-        st.64 r21, [r24 + SENTINEL_BOX - FAIL_ADDR]   # h_fetch target
+        la.abs r21, c2_after_nox
+        st.64 [r24 + SENTINEL_BOX - FAIL_ADDR], r21   # h_fetch target
         li r25, VA_NOX
         jalr zero, r25, 0
 c2_after_nox:
@@ -442,15 +442,15 @@ c2_after_nox:
 
         # -- [26] PF_FETCH: jump into an unmapped page -----------------
         li r27, 26
-        li r21, c2_after_pff
-        st.64 r21, [r24 + SENTINEL_BOX - FAIL_ADDR]
+        la.abs r21, c2_after_pff
+        st.64 [r24 + SENTINEL_BOX - FAIL_ADDR], r21
         li r25, VA_UNMAPPED
         jalr zero, r25, 0
 c2_after_pff:
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r22, CAUSE_PF_FETCH
         (!p1) b fail
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # -- [27] atomics report load-before-store order (C3 bullet) ---
@@ -471,12 +471,12 @@ c2_after_pff:
         #    (the C1 bullet that needed a real MMU)
         li r27, 29
         li r19, 12345
-        st.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]  # sentinel
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], r19  # sentinel
         li r21, 7
         cmpeq p2, r21, 8          # p2 = 0
         li r25, VA_UNMAPPED
         (p2) lds.64 r22, [r25]    # squashed: no translation, no fault
-        (p2) st.64 r22, [r25]
+        (p2) st.64 [r25], r22
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         li r19, 12345
         cmpeq p1, r22, r19
@@ -487,11 +487,11 @@ c2_after_pff:
         li r27, 30
         li r25, VA_TABLES + NODEB_E7_ADDR - 0x20000   # entry[7] via the
         li r19, PTE_RUNTIME_LEAF                      # identity window
-        st128 r19, [r25]
+        st128 [r25], r19
         invtp
         li r25, VA_RUNTIME
         li r19, 0xB007ED
-        st.64 r19, [r25]
+        st.64 [r25], r19
         lds.64 r22, [r25]
         cmpeq p1, r22, r19
         (!p1) b fail
@@ -502,7 +502,7 @@ c2_after_pff:
         lds.64 r22, [r25]         # touch through the old mapping first
         li r25, VA_TABLES + NODEB_E1_ADDR - 0x20000
         li r19, PTE_REMAP_LEAF
-        st128 r19, [r25]
+        st128 [r25], r19
         invtp                     # the contract move (ISA-SPEC 8.7)
         li r25, VA_P1
         lds.64 r22, [r25]
@@ -530,11 +530,11 @@ c2_after_pff:
 
         # ==== U-bit gating in user mode ===============================
         li r27, 34
-        li r21, h_user
+        la.abs r21, h_user
         mtsr vbase, r21
         li r19, 0
-        st.64 r19, [r24 + PRIV_COUNT_SLOT - FAIL_ADDR]
-        li r21, user_entry
+        st.64 [r24 + PRIV_COUNT_SLOT - FAIL_ADDR], r19
+        la.abs r21, user_entry
         mtsr epc0, r21
         li r21, STATUS_MMU_ON     # PS=0 -> IRET drops to user, MMU on
         mtsr status, r21
@@ -561,18 +561,18 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
         # record cause/baddr/epc, skip the faulting instruction
 h_rec:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0
@@ -583,11 +583,11 @@ h_rec:
         # page; +8 would not help)
 h_fetch:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         lds.64 k0, [r24 + SENTINEL_BOX - FAIL_ADDR]
         mtsr epc0, k0
         iret
@@ -603,7 +603,7 @@ h_user:
         li r26, PRIV_COUNT_SLOT
         lds.64 k0, [r26]
         add k0, k0, 1
-        st.64 k0, [r26]
+        st.64 [r26], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0
@@ -619,7 +619,7 @@ CODE_NOINVTP_REMAP = r"""
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_die             # no trap is legitimate in this image
+        la.abs r21, h_die             # no trap is legitimate in this image
         mtsr vbase, r21
         li r21, ROOT_PA
         mtsr ptbase, r21
@@ -634,7 +634,7 @@ start:
         (!p1) b fail
         li r25, VA_TABLES + NODEB_E1_ADDR - 0x20000
         li r19, PTE_REMAP_LEAF
-        st128 r19, [r25]          # remap VA_P1 -> P2 ... but NO INVTP.
+        st128 [r25], r19          # remap VA_P1 -> P2 ... but NO INVTP.
         li r25, VA_P1
         lds.64 r22, [r25]         # cached 0x30000 vs fresh 0x40000:
                                   # --check-invtp must CHECKFAIL here
@@ -654,7 +654,7 @@ CODE_NOINVTP_PTBASE = r"""
         .org 0x1000
 start:
         li r24, FAIL_ADDR
-        li r21, h_die             # no trap is legitimate in this image
+        la.abs r21, h_die             # no trap is legitimate in this image
         mtsr vbase, r21
         li r21, ROOT_PA
         mtsr ptbase, r21

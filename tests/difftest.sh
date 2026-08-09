@@ -4,9 +4,10 @@
 #
 # Runs the full conformance suite on both emulators at trace level 1
 # (per toolchain-prompt) and reports the first trace divergence per
-# test via `trace-q diverge --ignore-meta`. Every divergence is either
-# a bug in one implementation or a spec ambiguity — this output is the
-# project's product, treat it accordingly.
+# test via `trace-q diverge` (which excludes the run-variant META keys
+# per devspec/trace.md 6.5.6). Every divergence is either a bug in one
+# implementation or a spec ambiguity — this output is the project's
+# product, treat it accordingly.
 #
 # stdout ("HALT r0=...") is compared too. A test failing *identically*
 # on both is a shared failure, reported but distinct from a divergence.
@@ -36,7 +37,7 @@ want_all=1
 declare -A want
 for t in "$@"; do want_all=0; want[$t]=1; done
 
-identical=0 diverged=0 shared_fail=0 broken=0 ran=0
+identical=0 diverged=0 shared_fail=0 broken=0 skipped=0 ran=0
 
 run_emu() {  # emu img trace flags... -> stdout to $run_out, rc in $run_rc
     local emu="$1" img="$2" trc="$3" errf="$4"; shift 4
@@ -53,20 +54,40 @@ while read -r name src rest; do
     [ $want_all -eq 1 ] || [ -n "${want[$name]:-}" ] || continue
     flags=()
     expect="$PASS_HEX"
+    events=""
     for tok in $rest; do
         case "$tok" in
             level=*) ;;
             expect=*) expect="${tok#expect=}";;
+            events=*) events="${tok#events=}";;
             *) flags+=("$tok");;
         esac
     done
     ran=$((ran+1))
+    if [ -n "$events" ] && [ "${REPLAY:-0}" != "1" ]; then
+        # EVENT-fed tests run under --replay on BOTH emulators (one
+        # shared feed file, byte-identical inputs); REPLAY=1 declares
+        # both implement it. Loud skip otherwise, never silent.
+        skipped=$((skipped+1))
+        echo "SKIP $name: EVENT-fed (needs --replay; set REPLAY=1)"
+        continue
+    fi
     img="$OUT/$name.img"
     if ! python3 "$ASM" -o "$img" "$TESTS/defs.s" "$TESTS/$src" 2>"$OUT/$name.asm.err"; then
         echo "BROKEN $name: assembly failed:"
         sed 's/^/    /' "$OUT/$name.asm.err"
         broken=$((broken+1))
         continue
+    fi
+    if [ -n "$events" ]; then
+        if ! python3 "$TESTS/events/$events" "$img" \
+                "$OUT/$name.events.trc" 2>"$OUT/$name.ev.err"; then
+            echo "BROKEN $name: event-feed generation failed:"
+            sed 's/^/    /' "$OUT/$name.ev.err"
+            broken=$((broken+1))
+            continue
+        fi
+        flags+=(--replay "$OUT/$name.events.trc")
     fi
     run_emu "$EMU_A" "$img" "$OUT/$name.A.trc" "$OUT/$name.A.err" \
         ${flags[@]+"${flags[@]}"}
@@ -104,9 +125,10 @@ while read -r name src rest; do
         continue
     fi
 
-    dv=$(python3 "$TRACEQ" diverge --ignore-meta \
-         "$OUT/$name.A.trc" "$OUT/$name.B.trc" --sym "$OUT/$name.sym" \
-         2>"$OUT/$name.dv.err")
+    # trace-q diverge exit codes (devspec/trace.md 6.2): 1 = identical,
+    # 0 = first divergence printed, 2 = malformed/unreadable trace.
+    dv=$(python3 "$TRACEQ" diverge \
+         "$OUT/$name.A.trc" "$OUT/$name.B.trc" 2>"$OUT/$name.dv.err")
     dv_rc=$?
     if [ $dv_rc -gt 1 ]; then
         echo "BROKEN $name: trace-q diverge failed:"
@@ -114,12 +136,12 @@ while read -r name src rest; do
         broken=$((broken+1))
         continue
     fi
-    if [ $dv_rc -eq 1 ] || [ "$out_a" != "$out_b" ] \
+    if [ $dv_rc -eq 0 ] || [ "$out_a" != "$out_b" ] \
         || [ "$rc_a" != "$rc_b" ]; then
         echo "DIVERGE $name:"
         [ "$out_a" != "$out_b" ] || [ "$rc_a" != "$rc_b" ] && \
             echo "    stdout/rc: A rc=$rc_a '$out_a' | B rc=$rc_b '$out_b'"
-        [ $dv_rc -eq 1 ] && echo "$dv" | sed 's/^/    /'
+        [ $dv_rc -eq 0 ] && echo "$dv" | sed 's/^/    /'
         diverged=$((diverged+1))
         continue
     fi
@@ -136,5 +158,6 @@ done < "$TESTS/MANIFEST"
 [ $ran -gt 0 ] || die "no tests matched"
 echo
 echo "difftest: $identical identical, $diverged diverged," \
-     "$shared_fail shared failures, $broken broken (of $ran)"
+     "$shared_fail shared failures, $broken broken," \
+     "$skipped skipped (of $ran)"
 [ $((diverged + broken)) -eq 0 ] || exit 1

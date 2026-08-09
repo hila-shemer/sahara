@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Sahara two-pass assembler — TOOLING-SPEC.md section 4.
+"""Sahara two-pass assembler `sasm` — TOOLING-SPEC.md section 4 as expanded
+by devspec/asm.md (grammar, value kinds, pseudo expansion algorithms, image
+emission, and the closed E001-E049 error catalog).
 
 Input: one or more .s files, concatenated in order.
 Output: IMAGE.img (TOOLING-SPEC section 1) + IMAGE.sym (section 2).
@@ -7,7 +9,9 @@ Output: IMAGE.img (TOOLING-SPEC section 1) + IMAGE.sym (section 2).
 Every encoding fact (field positions, opcode values, sreg names, width
 tables) comes from encoding.py. Nothing here hardcodes any of it.
 
-All errors are fatal and name file:line. Warnings do not exist.
+Errors are fatal, one line on stderr, `FILE:LINE: Ennn: message`, exit 1;
+usage/IO problems exit 2 without an E-code. On any error no output file
+survives (asm.md ASM-12). Warnings do not exist.
 """
 
 import os
@@ -22,149 +26,117 @@ MASK128 = (1 << 128) - 1
 IMM_SIGNED_MIN = -(1 << (E.IMM_BITS - 1))
 IMM_SIGNED_MAX = (1 << (E.IMM_BITS - 1)) - 1
 IMM_UNSIGNED_MAX = (1 << E.IMM_BITS) - 1
-DEFAULT_ORG = E.RESET_PC          # implicit first segment / default entry
-DEVTAB_BASE, DEVTAB_SIZE = 0x0800, 2048  # PLATFORM-SPEC section 1/2
+SREG_MAX = (1 << (E.IMM_BITS - 1)) - 1   # asm.md 5.9: CONST in [0, 2^21-1]
+DEVTAB_BASE, DEVTAB_END = 0x0800, 0x1000  # asm.md 7.5 window [0x800,0x1000)
 
 REG_ALIASES = {"sp": 28, "ra": 29, "k0": 30, "zero": 31}
 ZERO_REG = REG_ALIASES["zero"]
 RA_REG = REG_ALIASES["ra"]
 
 MOD_KINDS = {"shl": 1, "sxt": 2, "zxt": 3}
+FMT_TOKENS = ("f32", "f64", "i32", "i64", "i128")
 
-LABEL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.$]*):")
+LABEL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*:")
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
+IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]*")
+NUM_RE = re.compile(r"0[xX][0-9A-Fa-f]+|0[bB][01]+|[0-9]+")
+IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_.$]")
+
+CONST, ADDR = "CONST", "ADDR"
 
 
 class AsmError(Exception):
-    def __init__(self, pos, msg):
-        super().__init__(f"{pos[0]}:{pos[1]}: error: {msg}")
-        self.pos = pos
+    """One diagnostic from the closed catalog (asm.md section 10)."""
+
+    def __init__(self, pos, code, msg):
+        super().__init__(f"{pos[0]}:{pos[1]}: {code}: {msg}")
+        self.pos, self.code = pos, code
 
 
-class Unresolved(Exception):
-    """Expression references a symbol not yet defined (pass-1 only)."""
+# ---------------------------------------------------------- reserved names
 
 
-# --------------------------------------------------------------- expressions
-
-TOKEN_RE = re.compile(
-    r"\s*(?:"
-    r"(?P<hex>0[xX][0-9a-fA-F]+)|"
-    r"(?P<bin>0[bB][01]+)|"
-    r"(?P<dec>\d+)|"
-    r"(?P<char>'(?:\\.|[^\\'])')|"
-    r"(?P<sym>[A-Za-z_][A-Za-z0-9_.$]*)|"
-    r"(?P<op>[-+*()])"
-    r")"
-)
-
-ESCAPES = {"n": 10, "t": 9, "r": 13, "0": 0, "\\": 92, "'": 39, '"': 34}
-
-
-def char_value(lit, pos):
-    body = lit[1:-1]
-    if body.startswith("\\"):
-        e = body[1:]
-        if e in ESCAPES:
-            return ESCAPES[e]
-        if e.startswith("x") and len(e) == 3:
-            try:
-                return int(e[1:], 16)
-            except ValueError:
-                pass
-        raise AsmError(pos, f"unknown escape {body!r}")
-    return ord(body)
+def _valid_suffixes(name, fam):
+    """Width suffixes a mnemonic accepts (asm.md 5.3), for 2.3 reservation."""
+    if fam in ("ALU", "CMP", "ATOMIC"):
+        return ("32", "64", "128")
+    if fam == "MEM":
+        return ("8", "16", "32", "64")
+    if fam == "FP":
+        return ("f32", "f64")
+    if fam == "FCVT":
+        if name in ("FCVTFI", "FCVTFIU"):
+            return ("32", "64", "128")
+        return ("f32", "f64")
+    return ()
 
 
-def tokenize_expr(text, pos):
-    toks, i = [], 0
-    while i < len(text):
-        m = TOKEN_RE.match(text, i)
-        if not m or m.end() == m.start():
-            rest = text[i:].strip()
-            if not rest:
-                break
-            raise AsmError(pos, f"bad token in expression: {rest!r}")
-        i = m.end()
-        if m.group("hex"):
-            toks.append(("num", int(m.group("hex"), 16)))
-        elif m.group("bin"):
-            toks.append(("num", int(m.group("bin"), 2)))
-        elif m.group("dec"):
-            toks.append(("num", int(m.group("dec"), 10)))
-        elif m.group("char"):
-            toks.append(("num", char_value(m.group("char"), pos)))
-        elif m.group("sym"):
-            toks.append(("sym", m.group("sym")))
-        else:
-            toks.append(("op", m.group("op")))
-    return toks
+def _build_reserved():
+    s = set(REG_ALIASES)
+    s.update(f"r{i}" for i in range(32))
+    s.update(f"p{i}" for i in range(8))
+    s.update(E.SREGS)
+    for name, (_opv, fam, _spec) in E.OPCODES.items():
+        base = name.lower()
+        s.add(base)
+        for sfx in _valid_suffixes(name, fam):
+            s.add(base + "." + sfx)
+    s.update(("li", "la", "la.abs", "mov", "nop", "not", "neg", "ret"))
+    for sfx in ("32", "64", "128"):   # not/neg pass ALU widths through (6.4)
+        s.add("not." + sfx)
+        s.add("neg." + sfx)
+    s.update(MOD_KINDS)
+    s.update(FMT_TOKENS)
+    return s
 
 
-class ExprEval:
-    """+ - * ( ) over numbers, .equ names, and labels (TOOLING-SPEC 4.5).
-
-    Hand-written recursive-descent evaluator over the tokens above only;
-    Python's eval() is never used (no arbitrary code execution)."""
-
-    def __init__(self, asm, pos):
-        self.asm, self.pos = asm, pos
-
-    def eval(self, text):
-        self.toks = tokenize_expr(text, self.pos)
-        self.i = 0
-        if not self.toks:
-            raise AsmError(self.pos, "empty expression")
-        v = self.expr()
-        if self.i != len(self.toks):
-            raise AsmError(self.pos, f"trailing junk in expression: {text!r}")
-        return v
-
-    def peek(self):
-        return self.toks[self.i] if self.i < len(self.toks) else (None, None)
-
-    def next(self):
-        t = self.peek()
-        self.i += 1
-        return t
-
-    def expr(self):
-        v = self.term()
-        while self.peek() == ("op", "+") or self.peek() == ("op", "-"):
-            _, op = self.next()
-            w = self.term()
-            v = v + w if op == "+" else v - w
-        return v
-
-    def term(self):
-        v = self.factor()
-        while self.peek() == ("op", "*"):
-            self.next()
-            v = v * self.factor()
-        return v
-
-    def factor(self):
-        kind, val = self.next()
-        if kind == "num":
-            return val
-        if kind == "op" and val == "-":
-            return -self.factor()
-        if kind == "op" and val == "+":
-            return self.factor()
-        if kind == "op" and val == "(":
-            v = self.expr()
-            if self.next() != ("op", ")"):
-                raise AsmError(self.pos, "missing ')' in expression")
-            return v
-        if kind == "sym":
-            return self.asm.symbol_value(val, self.pos)
-        raise AsmError(self.pos, f"unexpected token in expression")
+RESERVED = _build_reserved()
 
 
-# ------------------------------------------------------------------- parsing
+# ------------------------------------------------------------------- values
+
+
+class Val:
+    """Expression result: 128-bit wrapped value + kind (asm.md 4.2) +
+    whether a label participated anywhere (for 4.4/E029)."""
+
+    __slots__ = ("v", "kind", "label")
+
+    def __init__(self, v, kind, label):
+        self.v = v & MASK128
+        self.kind = kind
+        self.label = label
+
+
+def sv(val):
+    """Signed (two's-complement 128-bit) view of a Val or raw value."""
+    v = val.v if isinstance(val, Val) else (val & MASK128)
+    return v - (1 << 128) if v >= (1 << 127) else v
+
+
+# ----------------------------------------------------------------- lexical
+
+ESCAPES = {"n": 10, "t": 9, "r": 13, "b": 8, "f": 12, "0": 0,
+           "\\": 92, '"': 34, "'": 39}
+
+
+def read_escape(text, i, pos):
+    """text[i] == '\\'. Returns (byte value, index after escape). E004."""
+    if i + 1 >= len(text):
+        raise AsmError(pos, "E004", "escape at end of literal")
+    e = text[i + 1]
+    if e in ESCAPES:
+        return ESCAPES[e], i + 2
+    if e == "x":
+        h = text[i + 2:i + 4]
+        if len(h) == 2 and all(c in "0123456789abcdefABCDEF" for c in h):
+            return int(h, 16), i + 4
+        raise AsmError(pos, "E004", r"\x needs exactly two hex digits")
+    raise AsmError(pos, "E004", f"unknown escape sequence \\{e}")
 
 
 def strip_comment(line):
+    """Remove '#'-to-EOL outside literals. Returns (text, open_quote)."""
     out, i, n = [], 0, len(line)
     quote = None
     while i < n:
@@ -185,7 +157,183 @@ def strip_comment(line):
             quote = c
         out.append(c)
         i += 1
-    return "".join(out)
+    return "".join(out), quote
+
+
+# Characters legal outside string/char literals (asm.md 2.1). Anything
+# else, and any byte >= 0x80, is E001.
+LEGAL_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                  "0123456789_.$ \t,:()[]+-*!'\"")
+
+
+def check_chars(text, pos):
+    quote = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+        elif c not in LEGAL_CHARS or ord(c) >= 0x80:
+            raise AsmError(pos, "E001", f"illegal character {c!r}")
+        i += 1
+
+
+def tokenize_expr(text, pos):
+    """Expression tokens: numbers (incl. char literals), symbols, + - * ( ).
+    E001/E002/E004/E005/E011 per catalog."""
+    toks, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "'":
+            if i + 1 < n and text[i + 1] == "\\":
+                b, j = read_escape(text, i + 1, pos)
+            elif i + 1 < n and text[i + 1] != "'":
+                b, j = ord(text[i + 1]), i + 2
+            else:
+                raise AsmError(pos, "E005", "empty character literal")
+            if j >= n or text[j] != "'":
+                raise AsmError(pos, "E005", "malformed character literal "
+                                            "(multi-character or "
+                                            "unterminated)")
+            toks.append(("num", b))
+            i = j + 1
+            continue
+        if c.isdigit():
+            m = NUM_RE.match(text, i)
+            j = m.end()
+            if j < n and IDENT_CHAR_RE.match(text[j]):
+                raise AsmError(pos, "E002",
+                               f"malformed number {text[i:j + 1]!r}")
+            t = m.group(0)
+            if t[:2].lower() == "0x":
+                v = int(t[2:], 16)
+            elif t[:2].lower() == "0b":
+                v = int(t[2:], 2)
+            else:
+                v = int(t, 10)
+            if v >= 1 << 128:
+                raise AsmError(pos, "E002",
+                               f"number {t} does not fit in 128 bits")
+            toks.append(("num", v))
+            i = j
+            continue
+        m = IDENT_RE.match(text, i)
+        if m:
+            toks.append(("sym", m.group(0)))
+            i = m.end()
+            continue
+        if c in "+-*()":
+            toks.append(("op", c))
+            i += 1
+            continue
+        if c in "[]!:,":
+            raise AsmError(pos, "E011", f"misplaced {c!r} in expression")
+        raise AsmError(pos, "E001", f"illegal character {c!r}")
+    return toks
+
+
+def has_mod_keyword(toks):
+    return any(k == "sym" and t.lower() in MOD_KINDS for k, t in toks)
+
+
+# --------------------------------------------------------------- expressions
+
+
+class ExprEval:
+    """+ - * ( ) over numbers, .equ names, and labels, with CONST/ADDR
+    kind tracking per asm.md 4.2 and 128-bit wrapping per 4.1.
+
+    atc = None for pass-2 contexts; (cutoff_ord, label_code) for
+    assembly-time-constant contexts (asm.md 4.4): labels are label_code
+    (E034, or E029 for li), symbols not textually earlier are E034."""
+
+    def __init__(self, asm, pos, atc=None):
+        self.asm, self.pos, self.atc = asm, pos, atc
+
+    def eval(self, text):
+        self.toks = tokenize_expr(text, self.pos)
+        self.i = 0
+        if not self.toks:
+            raise AsmError(self.pos, "E011", "empty expression")
+        v = self.expr()
+        if self.i != len(self.toks):
+            raise AsmError(self.pos, "E011",
+                           f"trailing junk in expression: {text!r}")
+        return v
+
+    def peek(self):
+        return self.toks[self.i] if self.i < len(self.toks) else (None, None)
+
+    def next(self):
+        t = self.peek()
+        self.i += 1
+        return t
+
+    def expr(self):
+        a = self.term()
+        while self.peek() in (("op", "+"), ("op", "-")):
+            _, op = self.next()
+            b = self.term()
+            if op == "+":
+                if a.kind == ADDR and b.kind == ADDR:
+                    raise AsmError(self.pos, "E033", "ADDR + ADDR is not "
+                                                     "a value (asm.md 4.2)")
+                kind = ADDR if (a.kind == ADDR or b.kind == ADDR) else CONST
+                a = Val(a.v + b.v, kind, a.label or b.label)
+            else:
+                if a.kind == CONST and b.kind == ADDR:
+                    raise AsmError(self.pos, "E033",
+                                   "CONST - ADDR is not a value (asm.md 4.2)")
+                kind = CONST if a.kind == b.kind else ADDR
+                a = Val(a.v - b.v, kind, a.label or b.label)
+        return a
+
+    def term(self):
+        a = self.factor()
+        while self.peek() == ("op", "*"):
+            self.next()
+            b = self.factor()
+            if a.kind == ADDR or b.kind == ADDR:
+                raise AsmError(self.pos, "E033",
+                               "multiplication involving an address "
+                               "(asm.md 4.2)")
+            a = Val(a.v * b.v, CONST, a.label or b.label)
+        return a
+
+    def factor(self):
+        kind, val = self.next()
+        if kind == "num":
+            return Val(val, CONST, False)
+        if kind == "op" and val == "-":
+            f = self.factor()
+            if f.kind == ADDR:
+                raise AsmError(self.pos, "E033",
+                               "unary minus on an address (asm.md 4.2)")
+            return Val(-f.v, CONST, f.label)
+        if kind == "op" and val == "+":
+            return self.factor()
+        if kind == "op" and val == "(":
+            v = self.expr()
+            if self.next() != ("op", ")"):
+                raise AsmError(self.pos, "E011", "missing ')' in expression")
+            return v
+        if kind == "sym":
+            return self.asm.resolve(val, self.pos, self.atc)
+        raise AsmError(self.pos, "E011", "malformed expression")
+
+
+# ------------------------------------------------------------------- parsing
 
 
 def split_operands(text, pos):
@@ -211,7 +359,7 @@ def split_operands(text, pos):
         elif c in "])":
             depth -= 1
             if depth < 0:
-                raise AsmError(pos, "unbalanced brackets")
+                raise AsmError(pos, "E011", "unbalanced brackets")
         elif c == "," and depth == 0:
             parts.append("".join(cur).strip())
             cur = []
@@ -219,10 +367,8 @@ def split_operands(text, pos):
             continue
         cur.append(c)
         i += 1
-    if quote:
-        raise AsmError(pos, "unterminated quote")
     if depth != 0:
-        raise AsmError(pos, "unbalanced brackets")
+        raise AsmError(pos, "E011", "unbalanced brackets")
     last = "".join(cur).strip()
     if last or parts:
         parts.append(last)
@@ -233,143 +379,209 @@ def parse_reg(tok):
     t = tok.strip().lower()
     if t in REG_ALIASES:
         return REG_ALIASES[t]
-    m = re.fullmatch(r"r(\d+)", t)
-    if m and 0 <= int(m.group(1)) <= 31:
+    m = re.fullmatch(r"r([0-9]|[12][0-9]|3[01])", t)  # no leading zeros
+    if m:
         return int(m.group(1))
     return None
 
 
 def parse_predreg(tok):
-    m = re.fullmatch(r"p(\d)", tok.strip().lower())
-    if m and 0 <= int(m.group(1)) <= 7:
+    m = re.fullmatch(r"p([0-7])", tok.strip().lower())
+    if m:
         return int(m.group(1))
     return None
 
 
-PRED_PREFIX_RE = re.compile(r"^\(\s*(!?)\s*[pP](\d)\s*\)\s*(.*)$")
+PRED_PREFIX_RE = re.compile(r"^\(\s*(!?)\s*([A-Za-z0-9_]+)\s*\)\s*(.*)$")
 
 
 class Stmt:
-    __slots__ = ("pos", "kind", "labels", "mnem", "suffix", "pred",
-                 "operands", "raw", "size", "chain", "la_plan", "addr",
-                 "seg")
+    __slots__ = ("pos", "ord", "kind", "labels", "mnem", "suffix", "pred",
+                 "operands", "size", "chain", "li_val", "la_promoted",
+                 "addr", "seg", "data_bytes", "org_base", "align_n",
+                 "unit")
 
-    def __init__(self, pos):
+    def __init__(self, pos, ordn):
         self.pos = pos
+        self.ord = ordn
         self.labels = []
         self.kind = None      # "insn" | "directive"
         self.mnem = None      # lowercase mnemonic or directive (with '.')
         self.suffix = None    # width suffix text or None
         self.pred = 0         # encoded pred field
         self.operands = []
-        self.raw = ""
         self.size = 0
-        self.chain = None     # li/la.abs chain length decided in pass 1
-        self.la_plan = None   # "lap" | "lap_add"
-        self.addr = None      # assigned in pass 1
+        self.chain = None     # li/la.abs chain length (pass 1)
+        self.li_val = None    # li constant (pass 1, ATC)
+        self.la_promoted = False
+        self.addr = None
         self.seg = None
+        self.data_bytes = None
+        self.org_base = None
+        self.align_n = None
+        self.unit = None
+
+
+class Segment:
+    def __init__(self, base, pos, ordn):
+        self.base = base
+        self.pos = pos
+        self.ord = ordn       # source order, for E042 attribution
+        self.size = 0         # layout size (bytes)
+        self.data = bytearray()
+        self.insn_end = 0     # end of last instruction emission (8.2 trim
+                              # floor: never trim into instruction bytes)
+
+
+DATA_UNITS = {".byte": 1, ".half": 2, ".word": 4, ".quad": 8, ".oct": 16}
+DIRECTIVES = set(DATA_UNITS) | {".org", ".entry", ".align", ".byte",
+                                ".half", ".word", ".quad", ".oct",
+                                ".ascii", ".asciiz", ".space", ".equ"}
 
 
 # ----------------------------------------------------------------- assembler
 
 
-class Segment:
-    def __init__(self, base, pos):
-        self.base = base
-        self.pos = pos
-        self.data = bytearray()
-
-
 class Assembler:
     def __init__(self):
         self.stmts = []
-        self.labels = {}          # name -> address
+        self.labels = {}          # name -> address (per layout)
         self.label_kinds = {}     # name -> 'T' | 'D'
-        self.equs = {}            # name -> (expr text, pos)
-        self.equ_values = {}      # memoized
+        self.label_names = set()  # syntactic (known after parse)
+        self.sym_defined = set()  # labels + equ names, for E031
+        self.equs = {}            # name -> (expr text, pos, ord)
+        self.equ_values = {}      # memoized Vals (cleared per layout)
         self.equ_evaluating = set()
         self.segments = []
-        self.entry_expr = None    # (text, pos)
-        self.pass_no = 0
+        self.entry = None         # (label name, pos)
 
     # ------------------------------------------------------------- symbols
 
-    def symbol_value(self, name, pos):
+    def resolve(self, name, pos, atc):
+        if name.lower() in RESERVED:
+            raise AsmError(pos, "E030",
+                           f"{name!r} is a reserved name and has no value "
+                           f"in expressions (asm.md 4.3)")
+        if atc is not None:
+            cutoff, label_code = atc
+            if name in self.equs:
+                _text, _epos, ordn = self.equs[name]
+                if ordn >= cutoff:
+                    raise AsmError(pos, "E034",
+                                   f"{name!r} is not defined before this "
+                                   f"point (assembly-time constant, "
+                                   f"asm.md 4.4)")
+                return self.eval_equ(name, atc)
+            if name in self.label_names:
+                raise AsmError(pos, label_code,
+                               f"{name!r} is a label; an assembly-time "
+                               f"constant is required here")
+            raise AsmError(pos, "E030", f"undefined symbol {name!r}")
         if name in self.labels:
-            return self.labels[name]
+            return Val(self.labels[name], ADDR, True)
         if name in self.equs:
-            if name in self.equ_values:
-                return self.equ_values[name]
-            if name in self.equ_evaluating:
-                raise AsmError(pos, f".equ cycle involving {name!r}")
-            self.equ_evaluating.add(name)
-            text, epos = self.equs[name]
-            try:
-                v = ExprEval(self, epos).eval(text)
-            finally:
-                self.equ_evaluating.discard(name)
+            return self.eval_equ(name, None)
+        raise AsmError(pos, "E030", f"undefined symbol {name!r}")
+
+    def eval_equ(self, name, atc):
+        if atc is None and name in self.equ_values:
+            return self.equ_values[name]
+        text, epos, _ordn = self.equs[name]
+        if name in self.equ_evaluating:
+            raise AsmError(epos, "E030",
+                           f".equ cycle involving {name!r} never resolves "
+                           f"to a value")
+        self.equ_evaluating.add(name)
+        try:
+            v = ExprEval(self, epos, atc).eval(text)
+        finally:
+            self.equ_evaluating.discard(name)
+        if atc is None:
             self.equ_values[name] = v
-            return v
-        if self.pass_no == 1:
-            raise Unresolved(name)
-        raise AsmError(pos, f"undefined symbol {name!r}")
+        return v
 
-    def try_eval(self, text, pos):
-        try:
-            return ExprEval(self, pos).eval(text)
-        except Unresolved:
-            return None
+    def eval_val(self, text, pos, atc=None):
+        return ExprEval(self, pos, atc).eval(text)
 
-    def must_eval(self, text, pos, why):
-        try:
-            return ExprEval(self, pos).eval(text)
-        except Unresolved as u:
-            raise AsmError(pos, f"{why} must not use forward references "
-                                f"(undefined here: {u.args[0]})")
+    def eval_atc(self, text, pos, stmt, label_code="E034"):
+        return self.eval_val(text, pos, (stmt.ord, label_code))
+
+    def def_symbol(self, name, pos, is_label):
+        if name.lower() in RESERVED:
+            raise AsmError(pos, "E032",
+                           f"{name!r} collides with a reserved name "
+                           f"(asm.md 2.3)")
+        if name in self.sym_defined:
+            raise AsmError(pos, "E031", f"duplicate symbol {name!r}")
+        self.sym_defined.add(name)
+        if is_label:
+            self.label_names.add(name)
 
     # ------------------------------------------------------------- parsing
 
     def parse_files(self, paths):
         for path in paths:
             try:
-                with open(path) as f:
+                # latin-1: byte-faithful; >=0x80 outside literals is E001.
+                with open(path, encoding="latin-1") as f:
                     lines = f.readlines()
             except OSError as e:
-                sys.exit(f"error: cannot read {path}: {e}")
+                usage_exit(f"cannot read {path}: {e}")
             for lineno, line in enumerate(lines, 1):
                 self.parse_line(path, lineno, line)
 
     def parse_line(self, path, lineno, line):
         pos = (path, lineno)
-        text = strip_comment(line).strip()
-        stmt = Stmt(pos)
+        line = line.rstrip("\n")
+        if line.endswith("\r"):
+            line = line[:-1]
+        text, open_quote = strip_comment(line)
+        if open_quote == '"':
+            raise AsmError(pos, "E003", "unterminated string literal")
+        if open_quote == "'":
+            raise AsmError(pos, "E005", "unterminated character literal")
+        check_chars(text, pos)
+        text = text.strip()
+        stmt = Stmt(pos, len(self.stmts))
         while True:
             m = LABEL_RE.match(text)
             if not m:
                 break
             stmt.labels.append(m.group(1))
             text = text[m.end():].strip()
+        if text.startswith(":"):
+            raise AsmError(pos, "E018", "malformed label definition")
         if not text:
             if stmt.labels:
                 self.stmts.append(stmt)
             return
-        m = PRED_PREFIX_RE.match(text)
-        if m:
-            stmt.pred = (int(m.group(2)) << 1) | (1 if m.group(1) else 0)
-            if int(m.group(2)) > 7:
-                raise AsmError(pos, "predicate index out of range")
+        # a ':' surviving into statement text is a malformed label (E018)
+        rest_nq, _ = _strip_literals(text)
+        if ":" in rest_nq:
+            raise AsmError(pos, "E018",
+                           "':' outside a label definition")
+        if text.startswith("("):
+            m = PRED_PREFIX_RE.match(text)
+            if not m:
+                raise AsmError(pos, "E017", "malformed predication prefix")
+            preg = parse_predreg(m.group(2))
+            if preg is None:
+                raise AsmError(pos, "E017",
+                               f"bad predicate register {m.group(2)!r}")
+            stmt.pred = (preg << 1) | (1 if m.group(1) else 0)
             text = m.group(3).strip()
-            if not text:
-                raise AsmError(pos, "predicate prefix without instruction")
+            if not text or text.startswith("."):
+                raise AsmError(pos, "E017",
+                               "predication prefix must precede an "
+                               "instruction")
         parts = text.split(None, 1)
         head = parts[0].lower()
         rest = parts[1] if len(parts) > 1 else ""
-        stmt.raw = text
         if head.startswith("."):
             stmt.kind = "directive"
             stmt.mnem = head
-            if stmt.pred:
-                raise AsmError(pos, "directives cannot be predicated")
+            if head not in DIRECTIVES:
+                raise AsmError(pos, "E010", f"unknown directive {head}")
             stmt.operands = split_operands(rest, pos)
         else:
             stmt.kind = "insn"
@@ -378,255 +590,267 @@ class Assembler:
                 stmt.mnem, stmt.suffix = base, suffix
             else:
                 stmt.mnem = head
+            if stmt.mnem not in PSEUDOS and stmt.mnem.upper() not in \
+                    E.OPCODES:
+                raise AsmError(pos, "E010",
+                               f"unknown mnemonic {stmt.mnem!r}")
             stmt.operands = split_operands(rest, pos)
         self.stmts.append(stmt)
 
-    # ------------------------------------------------------------- layout
+    # ------------------------------------------------------------- prescan
 
-    def cur_seg(self, pos):
-        if not self.segments:
-            self.segments.append(Segment(DEFAULT_ORG, pos))
-        return self.segments[-1]
-
-    def cur_addr(self, pos):
-        seg = self.cur_seg(pos)
-        return seg.base + len(seg.data)
-
-    # -------------------------------------------------------------- pass 1
-
-    def pass1(self):
-        self.pass_no = 1
-        # .equ must be registered before use; scan them all up front so a
-        # later .equ can be used by an earlier li (constant folding only —
-        # label-forward-refs still raise Unresolved).
-        for stmt in self.stmts:
-            if stmt.kind == "directive" and stmt.mnem == ".equ":
-                if len(stmt.operands) != 2:
-                    raise AsmError(stmt.pos, ".equ takes NAME, expr")
-                name = stmt.operands[0]
-                if not NAME_RE.match(name):
-                    raise AsmError(stmt.pos, f"bad .equ name {name!r}")
-                if name in self.equs:
-                    raise AsmError(stmt.pos, f"duplicate .equ {name!r}")
-                self.equs[name] = (stmt.operands[1], stmt.pos)
-
-        offset = 0  # emulated via segment data length; pass 1 tracks sizes
-        pending_labels = []
+    def prescan(self):
         for stmt in self.stmts:
             pos = stmt.pos
             for lbl in stmt.labels:
-                if lbl in self.labels or lbl in self.equs:
-                    raise AsmError(pos, f"duplicate symbol {lbl!r}")
-                self.labels[lbl] = self.cur_addr(pos)
-                pending_labels.append(lbl)
-            if stmt.kind is None:
+                self.def_symbol(lbl, pos, is_label=True)
+            if stmt.kind != "directive":
                 continue
-            if stmt.kind == "directive":
-                emitted = self.pass1_directive(stmt)
-                if emitted and pending_labels:
-                    for lbl in pending_labels:
-                        self.label_kinds[lbl] = "D"
-                    pending_labels = []
-            else:
-                stmt.size = self.insn_size(stmt)
-                stmt.addr = self.cur_addr(pos)
-                stmt.seg = len(self.segments) - 1
-                if stmt.addr % E.INSN_BYTES != 0:
-                    raise AsmError(pos, f"instruction at 0x{stmt.addr:x} is "
-                                        f"not {E.INSN_BYTES}-byte aligned")
-                self.cur_seg(pos).data.extend(b"\0" * stmt.size)
-                for lbl in pending_labels:
-                    self.label_kinds[lbl] = "T"
-                pending_labels = []
-        for lbl in pending_labels:
-            self.label_kinds[lbl] = "D"
-        # reset segment data for pass 2 (keep bases)
-        for seg in self.segments:
-            seg.pass1_len = len(seg.data)
-            seg.data = bytearray()
-
-    def pass1_directive(self, stmt):
-        """Returns True if the directive emits data (decides label kind)."""
-        d, pos, ops = stmt.mnem, stmt.pos, stmt.operands
-        if d == ".org":
-            if len(ops) != 1:
-                raise AsmError(pos, ".org takes one operand")
-            base = self.must_eval(ops[0], pos, ".org")
-            if base < 0 or base > MASK128:
-                raise AsmError(pos, ".org address out of 128-bit range")
-            self.segments.append(Segment(base, pos))
-            stmt.seg = len(self.segments) - 1
-            return False
-        if d == ".entry":
-            if len(ops) != 1:
-                raise AsmError(pos, ".entry takes one operand")
-            if self.entry_expr is not None:
-                raise AsmError(pos, "duplicate .entry")
-            self.entry_expr = (ops[0], pos)
-            return False
-        if d == ".equ":
-            return False  # handled in prescan
-        if d == ".align":
-            if len(ops) != 1:
-                raise AsmError(pos, ".align takes one operand")
-            n = self.must_eval(ops[0], pos, ".align")
-            if n <= 0 or (n & (n - 1)) != 0:
-                raise AsmError(pos, f".align {n}: not a power of two")
-            stmt.size = (-self.cur_addr(pos)) % n
-            self.cur_seg(pos).data.extend(b"\0" * stmt.size)
-            return False  # alignment padding does not decide label kind
-        if d == ".space":
-            if len(ops) != 1:
-                raise AsmError(pos, ".space takes one operand")
-            n = self.must_eval(ops[0], pos, ".space")
-            if n < 0:
-                raise AsmError(pos, f".space {n}: negative")
-            stmt.size = n
-            self.cur_seg(pos).data.extend(b"\0" * n)
-            return True
-        if d in (".byte", ".half", ".word", ".quad", ".oct"):
-            unit = {".byte": 1, ".half": 2, ".word": 4,
-                    ".quad": 8, ".oct": 16}[d]
-            if not ops:
-                raise AsmError(pos, f"{d} needs at least one value")
-            stmt.size = unit * len(ops)
-            self.cur_seg(pos).data.extend(b"\0" * stmt.size)
-            return True
-        if d in (".ascii", ".asciiz"):
-            data = self.string_bytes(stmt)
-            stmt.size = len(data)
-            self.cur_seg(pos).data.extend(b"\0" * stmt.size)
-            return True
-        raise AsmError(pos, f"unknown directive {d}")
+            d, ops = stmt.mnem, stmt.operands
+            if d == ".equ":
+                if len(ops) != 2:
+                    raise AsmError(pos, "E011", ".equ takes NAME, expr")
+                name = ops[0]
+                if not NAME_RE.match(name):
+                    raise AsmError(pos, "E011", f"bad .equ name {name!r}")
+                self.def_symbol(name, pos, is_label=False)
+                self.equs[name] = (ops[1], pos, stmt.ord)
+            elif d == ".entry":
+                if len(ops) != 1 or not NAME_RE.match(ops[0]):
+                    raise AsmError(pos, "E011", ".entry takes one label "
+                                                "name")
+                if self.entry is not None:
+                    raise AsmError(pos, "E046", "multiple .entry")
+                self.entry = (ops[0], pos)
+            elif d in (".org", ".align", ".space"):
+                if len(ops) != 1:
+                    raise AsmError(pos, "E011", f"{d} takes one operand")
+            elif d in DATA_UNITS:
+                if not ops:
+                    raise AsmError(pos, "E011",
+                                   f"{d} needs at least one value")
+            elif d in (".ascii", ".asciiz"):
+                if len(ops) != 1:
+                    raise AsmError(pos, "E011", f"{d} takes one string")
+                stmt.data_bytes = self.string_bytes(stmt)
 
     def string_bytes(self, stmt):
         pos = stmt.pos
+        s = stmt.operands[0].strip()
+        if len(s) < 2 or s[0] != '"' or s[-1] != '"':
+            raise AsmError(pos, "E003",
+                           f"{stmt.mnem}: expected a quoted string")
+        body, i = s[1:-1], 0
         out = bytearray()
-        if not stmt.operands:
-            raise AsmError(pos, f"{stmt.mnem} needs a string")
-        for op in stmt.operands:
-            s = op.strip()
-            if len(s) < 2 or s[0] != '"' or s[-1] != '"':
-                raise AsmError(pos, f"{stmt.mnem}: expected quoted string")
-            body, i = s[1:-1], 0
-            while i < len(body):
-                c = body[i]
-                if c == "\\":
-                    if i + 1 >= len(body):
-                        raise AsmError(pos, "trailing backslash in string")
-                    e = body[i + 1]
-                    if e in ESCAPES:
-                        out.append(ESCAPES[e])
-                        i += 2
-                        continue
-                    if e == "x" and i + 3 < len(body) + 1:
-                        try:
-                            out.append(int(body[i + 2:i + 4], 16))
-                            i += 4
-                            continue
-                        except ValueError:
-                            pass
-                    raise AsmError(pos, f"unknown escape \\{e} in string")
-                out.append(ord(c))
+        while i < len(body):
+            if body[i] == "\\":
+                b, i = read_escape(body, i, pos)
+                out.append(b)
+            else:
+                out.append(ord(body[i]))
                 i += 1
-            if stmt.mnem == ".asciiz":
-                out.append(0)
+        if stmt.mnem == ".asciiz":
+            out.append(0)
         return bytes(out)
 
-    # -------------------------------------------------- pseudo sizing (p1)
+    # ------------------------------------------------- sizing (pass 1)
 
-    def insn_size(self, stmt):
-        m = stmt.mnem
-        if m == "li" or (m == "la" and stmt.suffix == "abs"):
-            if len(stmt.operands) != 2:
-                raise AsmError(stmt.pos, f"{m} takes rd, value")
-            v = self.try_eval(stmt.operands[1], stmt.pos)
-            stmt.chain = 6 if v is None else minimal_chain_len(v)
-            return stmt.chain * E.INSN_BYTES
-        if m == "la":
-            if len(stmt.operands) != 2:
-                raise AsmError(stmt.pos, "la takes rd, label")
-            target = self.try_eval(stmt.operands[1], stmt.pos)
-            if target is None:
-                stmt.la_plan = "lap_add"
-                return 2 * E.INSN_BYTES
-            delta = target - self.cur_addr(stmt.pos)
-            if IMM_SIGNED_MIN <= delta <= IMM_SIGNED_MAX:
-                stmt.la_plan = "lap"
-                return E.INSN_BYTES
-            stmt.la_plan = "lap_add"
-            return 2 * E.INSN_BYTES
-        return E.INSN_BYTES
+    def size_stmts(self):
+        for stmt in self.stmts:
+            pos = stmt.pos
+            if stmt.kind == "directive":
+                d = stmt.mnem
+                if d == ".org":
+                    v = self.eval_atc(stmt.operands[0], pos, stmt)
+                    if sv(v) < 0:
+                        raise AsmError(pos, "E035",
+                                       ".org address must be >= 0")
+                    stmt.org_base = v.v
+                elif d == ".align":
+                    n = sv(self.eval_atc(stmt.operands[0], pos, stmt))
+                    if n < 1 or (n & (n - 1)) != 0:
+                        raise AsmError(pos, "E044",
+                                       f".align {n}: not a power of two "
+                                       f">= 1")
+                    stmt.align_n = n
+                elif d == ".space":
+                    n = sv(self.eval_atc(stmt.operands[0], pos, stmt))
+                    if n < 0:
+                        raise AsmError(pos, "E035",
+                                       f".space {n}: negative size")
+                    stmt.size = n
+                elif d in DATA_UNITS:
+                    stmt.unit = DATA_UNITS[d]
+                    stmt.size = stmt.unit * len(stmt.operands)
+                elif d in (".ascii", ".asciiz"):
+                    stmt.size = len(stmt.data_bytes)
+                continue
+            if stmt.kind != "insn":
+                continue
+            m = stmt.mnem
+            if m == "li":
+                if stmt.suffix is not None:
+                    raise AsmError(pos, "E015", "li takes no width suffix")
+                if len(stmt.operands) != 2:
+                    raise AsmError(pos, "E011", "li takes rd, constant")
+                v = self.eval_atc(stmt.operands[1], pos, stmt,
+                                  label_code="E029")
+                stmt.li_val = v.v
+                stmt.chain = minimal_chain_len(v.v)
+                stmt.size = stmt.chain * E.INSN_BYTES
+            elif m == "la" and stmt.suffix == "abs":
+                if len(stmt.operands) != 2:
+                    raise AsmError(pos, "E011", "la.abs takes rd, target")
+                stmt.chain = 6
+                stmt.size = 6 * E.INSN_BYTES
+            elif m == "la":
+                if stmt.suffix is not None:
+                    raise AsmError(pos, "E015",
+                                   "la takes no width suffix (la.abs for "
+                                   "absolute)")
+                if len(stmt.operands) != 2:
+                    raise AsmError(pos, "E011", "la takes rd, target")
+                stmt.size = E.INSN_BYTES  # provisional; relaxation promotes
+            else:
+                stmt.size = E.INSN_BYTES
+
+    # -------------------------------------------------------------- layout
+
+    def layout(self):
+        self.segments = []
+        self.labels = {}
+        self.label_kinds = {}
+        self.equ_values = {}      # label addresses may have moved
+        pending = []
+        seg = None
+
+        def flush(kind):
+            for lbl in pending:
+                self.label_kinds[lbl] = kind
+            pending.clear()
+
+        for stmt in self.stmts:
+            pos = stmt.pos
+            if stmt.labels:
+                if seg is None:
+                    raise AsmError(pos, "E041",
+                                   "label defined before the first .org")
+                for lbl in stmt.labels:
+                    self.labels[lbl] = seg.base + seg.size
+                    pending.append(lbl)
+            if stmt.kind is None:
+                continue
+            if stmt.kind == "directive":
+                d = stmt.mnem
+                if d == ".org":
+                    flush("D")
+                    seg = Segment(stmt.org_base, pos, len(self.segments))
+                    self.segments.append(seg)
+                    stmt.seg = seg.ord
+                    continue
+                if d in (".equ", ".entry"):
+                    continue
+                if seg is None:
+                    raise AsmError(pos, "E040",
+                                   f"{d} before the first .org")
+                if d == ".align":
+                    stmt.size = (-(seg.base + seg.size)) % stmt.align_n
+                stmt.addr = seg.base + seg.size
+                stmt.seg = seg.ord
+                seg.size += stmt.size
+                if stmt.size:
+                    flush("D")
+                continue
+            # instruction
+            if seg is None:
+                raise AsmError(pos, "E040",
+                               "instruction before the first .org")
+            if stmt.mnem == "la" and stmt.suffix is None:
+                stmt.size = (2 if stmt.la_promoted else 1) * E.INSN_BYTES
+            addr = seg.base + seg.size
+            if addr % E.INSN_BYTES != 0:
+                raise AsmError(pos, "E043",
+                               f"instruction at 0x{addr:x} is not "
+                               f"{E.INSN_BYTES}-byte aligned")
+            stmt.addr = addr
+            stmt.seg = seg.ord
+            seg.size += stmt.size
+            flush("T")
+        flush("D")
+
+    def relax(self):
+        """One promotion sweep of asm.md 6.2; True if anything grew."""
+        changed = False
+        for stmt in self.stmts:
+            if (stmt.kind == "insn" and stmt.mnem == "la"
+                    and stmt.suffix is None and not stmt.la_promoted):
+                target = self.eval_val(stmt.operands[1], stmt.pos)
+                delta = sv(target) - stmt.addr
+                if not IMM_SIGNED_MIN <= delta <= IMM_SIGNED_MAX:
+                    stmt.la_promoted = True
+                    changed = True
+        return changed
+
+    def pass1(self):
+        self.prescan()
+        self.size_stmts()
+        self.layout()
+        while self.relax():
+            self.layout()
 
     # -------------------------------------------------------------- pass 2
 
     def pass2(self):
-        self.pass_no = 2
-        seg_i = -1
+        for seg in self.segments:
+            seg.data = bytearray()
         for stmt in self.stmts:
-            pos = stmt.pos
             if stmt.kind == "directive":
                 self.pass2_directive(stmt)
                 continue
             if stmt.kind != "insn":
                 continue
             seg = self.segments[stmt.seg]
-            if len(seg.data) != stmt.addr - seg.base:
-                raise AsmError(pos, "internal: pass1/pass2 layout mismatch")
+            assert seg.base + len(seg.data) == stmt.addr, \
+                f"{stmt.pos}: pass1/pass2 layout mismatch"
             words = self.encode(stmt)
-            if len(words) * E.INSN_BYTES != stmt.size:
-                raise AsmError(pos, "internal: pass1/pass2 size mismatch")
+            assert len(words) * E.INSN_BYTES == stmt.size, \
+                f"{stmt.pos}: pass1/pass2 size mismatch"
             for w in words:
                 seg.data.extend(struct.pack("<Q", w))
+            seg.insn_end = len(seg.data)
         for seg in self.segments:
-            if len(seg.data) != seg.pass1_len:
-                raise AsmError(seg.pos, "internal: segment length mismatch")
+            assert len(seg.data) == seg.size, "segment length mismatch"
 
     def pass2_directive(self, stmt):
-        d, pos, ops = stmt.mnem, stmt.pos, stmt.operands
-        seg = self.segments[stmt.seg] if stmt.seg is not None else None
-        if d == ".org":
+        d, pos = stmt.mnem, stmt.pos
+        if d in (".org", ".entry", ".equ"):
             return
-        if d in (".entry", ".equ"):
+        seg = self.segments[stmt.seg]
+        if d in (".align", ".space"):
+            seg.data.extend(b"\0" * stmt.size)
             return
-        cur = self.cur_seg2()
-        if d == ".align":
-            cur.data.extend(b"\0" * stmt.size)
-            return
-        if d == ".space":
-            cur.data.extend(b"\0" * stmt.size)
-            return
-        if d in (".byte", ".half", ".word", ".quad", ".oct"):
-            unit = {".byte": 1, ".half": 2, ".word": 4,
-                    ".quad": 8, ".oct": 16}[d]
-            for op in ops:
-                v = ExprEval(self, pos).eval(op)
-                lo, hi = -(1 << (unit * 8 - 1)), (1 << (unit * 8)) - 1
+        if d in DATA_UNITS:
+            unit = stmt.unit
+            lo, hi = -(1 << (unit * 8 - 1)), (1 << (unit * 8)) - 1
+            for op in stmt.operands:
+                v = sv(self.eval_val(op, pos))
                 if not lo <= v <= hi:
-                    raise AsmError(pos, f"{d} value {v} does not fit in "
-                                        f"{unit} bytes")
-                cur.data.extend((v & hi if v >= 0 else v + (1 << (unit * 8)))
+                    raise AsmError(pos, "E035",
+                                   f"{d} value {v} does not fit in "
+                                   f"{unit} byte(s)")
+                seg.data.extend((v % (1 << (unit * 8)))
                                 .to_bytes(unit, "little"))
             return
         if d in (".ascii", ".asciiz"):
-            cur.data.extend(self.string_bytes(stmt))
+            seg.data.extend(stmt.data_bytes)
             return
-        raise AsmError(pos, f"unknown directive {d}")
-
-    def cur_seg2(self):
-        # pass 2 walks segments in the same order; the current segment is
-        # the last one whose data is still growing.
-        for seg in self.segments:
-            if len(seg.data) < seg.pass1_len:
-                return seg
-        return self.segments[-1]
+        raise AssertionError(f"unhandled directive {d}")
 
     # ------------------------------------------------------------ encoding
 
     def field(self, word, name, value):
         lsb, width = E.FIELDS[name]
-        if not 0 <= value < (1 << width):
-            raise AssertionError(f"internal: field {name} value {value}")
+        assert 0 <= value < (1 << width), f"field {name} value {value}"
         return word | (value << lsb)
 
     def build(self, opval, pred=0, **fields):
@@ -636,87 +860,110 @@ class Assembler:
             w = self.field(w, name, val)
         return w
 
-    def imm_signed(self, v, pos, what="immediate"):
+    def imm_signed(self, v, pos, code="E020", what="immediate"):
         if not IMM_SIGNED_MIN <= v <= IMM_SIGNED_MAX:
-            raise AsmError(pos, f"{what} {v} does not fit in signed "
-                                f"{E.IMM_BITS}-bit field")
+            raise AsmError(pos, code,
+                           f"{what} {v} does not fit in signed "
+                           f"{E.IMM_BITS}-bit field")
         return v & IMM_UNSIGNED_MAX
 
-    def imm_unsigned(self, v, pos, what="immediate"):
+    def imm_unsigned(self, v, pos, code="E021", what="immediate"):
         if not 0 <= v <= IMM_UNSIGNED_MAX:
-            raise AsmError(pos, f"{what} {v} does not fit in unsigned "
-                                f"{E.IMM_BITS}-bit field")
+            raise AsmError(pos, code,
+                           f"{what} {v} does not fit in unsigned "
+                           f"{E.IMM_BITS}-bit field")
         return v
 
-    def need_reg(self, tok, pos, what):
-        r = parse_reg(tok)
+    def need_reg(self, tok, pos, what, code="E012"):
+        parts = tok.split()
+        r = parse_reg(parts[0]) if parts else None
         if r is None:
-            raise AsmError(pos, f"{what}: expected register, got {tok!r}")
+            raise AsmError(pos, code,
+                           f"{what}: expected a register, got {tok!r}")
+        if len(parts) > 1:
+            if parts[1].lower() in MOD_KINDS:
+                raise AsmError(pos, "E019",
+                               f"{what}: no modifier allowed here")
+            raise AsmError(pos, code, f"{what}: junk after register "
+                                      f"{tok!r}")
         return r
 
     def need_pred(self, tok, pos, what):
         p = parse_predreg(tok)
         if p is None:
-            raise AsmError(pos, f"{what}: expected predicate register, "
-                                f"got {tok!r}")
+            raise AsmError(pos, "E013",
+                           f"{what}: expected a predicate register "
+                           f"(p0-p7), got {tok!r}")
         return p
 
     def width_code(self, stmt, fam):
-        """Map a width suffix to the width-field value for a family."""
+        """Suffix -> width field per asm.md 5.3; E015/E016."""
         pos, sfx = stmt.pos, stmt.suffix
         widths = E.FAMILIES[fam]["widths"]
         if fam in ("ALU", "CMP", "ATOMIC"):
-            want = 128 if sfx is None else (
-                int(sfx) if sfx in ("32", "64", "128") else None)
-            if want is None or want not in widths:
-                raise AsmError(pos, f"bad width suffix .{sfx} for "
-                                    f"{stmt.mnem}")
-            return widths.index(want)
+            if sfx is None:
+                return widths.index(128)
+            if sfx in ("32", "64", "128"):
+                return widths.index(int(sfx))
+            raise AsmError(pos, "E015",
+                           f"bad width suffix .{sfx} for {stmt.mnem}")
         if fam == "MEM":
-            if sfx not in ("8", "16", "32", "64"):
-                raise AsmError(pos, f"{stmt.mnem} needs a width suffix "
-                                    f".8/.16/.32/.64")
-            return widths.index(int(sfx))
+            if sfx is None:
+                raise AsmError(pos, "E016",
+                               f"{stmt.mnem} needs a width suffix "
+                               f".8/.16/.32/.64")
+            if sfx in ("8", "16", "32", "64"):
+                return widths.index(int(sfx))
+            raise AsmError(pos, "E015",
+                           f"bad width suffix .{sfx} for {stmt.mnem}")
         if fam == "FP":
-            m = {"f32": "FP32", "f64": "FP64"}
-            if sfx not in m or m[sfx] not in widths:
-                raise AsmError(pos, f"{stmt.mnem} needs .f32 or .f64")
-            return widths.index(m[sfx])
+            if sfx is None:
+                raise AsmError(pos, "E016",
+                               f"{stmt.mnem} needs .f32 or .f64")
+            if sfx in ("f32", "f64"):
+                return widths.index("FP32" if sfx == "f32" else "FP64")
+            raise AsmError(pos, "E015",
+                           f"bad width suffix .{sfx} for {stmt.mnem}")
         if sfx is not None:
-            raise AsmError(pos, f"{stmt.mnem} takes no width suffix")
+            raise AsmError(pos, "E015",
+                           f"{stmt.mnem} takes no width suffix")
         return 0
 
-    def parse_b_operand(self, tok, pos):
-        """ALU/CMP operand b: register [mod amount] or expression.
+    def mod_amount(self, text, pos, stmt):
+        amount = sv(self.eval_atc(text, pos, stmt))
+        if not 0 <= amount <= 63:
+            raise AsmError(pos, "E024",
+                           f"modifier amount {amount} out of range 0-63")
+        return amount
 
-        Returns ("reg", src2, mod) or ("imm", value).
-        """
+    def parse_b_operand(self, stmt, tok, pos):
+        """ALU/CMP operand b: register [mod amount] or expression.
+        Returns ("reg", src2, mod) or ("imm", signed value)."""
         parts = tok.split()
         r = parse_reg(parts[0]) if parts else None
         if r is not None:
-            mod = 0
-            if len(parts) == 3:
-                kind = parts[1].lower()
-                if kind not in MOD_KINDS:
-                    raise AsmError(pos, f"unknown src2 modifier {parts[1]!r}")
-                amount = self.must_eval(parts[2], pos, "modifier amount")
-                if not 0 <= amount <= 63:
-                    raise AsmError(pos, f"modifier amount {amount} out of "
-                                        f"range 0-63")
-                mod = (amount << 2) | MOD_KINDS[kind]
-            elif len(parts) != 1:
-                raise AsmError(pos, f"bad operand {tok!r}")
-            return ("reg", r, mod)
-        v = ExprEval(self, pos).eval(tok)
-        return ("imm", v, None)
+            if len(parts) == 1:
+                return ("reg", r, 0)
+            kind = parts[1].lower()
+            if kind not in MOD_KINDS or len(parts) < 3:
+                raise AsmError(pos, "E019",
+                               f"malformed src2 modifier in {tok!r}")
+            amount = self.mod_amount(" ".join(parts[2:]), pos, stmt)
+            return ("reg", r, (amount << 2) | MOD_KINDS[kind])
+        toks = tokenize_expr(tok, pos)
+        if has_mod_keyword(toks):
+            raise AsmError(pos, "E019",
+                           "modifier after an immediate operand")
+        v = self.eval_val(tok, pos)
+        return ("imm", sv(v))
 
-    def parse_mem(self, tok, pos, allow_index=True):
+    def parse_mem(self, stmt, tok, pos, allow_index=True):
         """[base + index mod n + disp] -> (src1, src2, mod, disp)."""
         t = tok.strip()
         if not (t.startswith("[") and t.endswith("]")):
-            raise AsmError(pos, f"expected memory operand [..], got {tok!r}")
+            raise AsmError(pos, "E014",
+                           f"expected memory operand [..], got {tok!r}")
         inner = t[1:-1].strip()
-        # split at top-level + and - (keep sign with the term)
         terms, depth, cur, sign = [], 0, [], "+"
         for c in inner:
             if c in "([":
@@ -731,50 +978,58 @@ class Assembler:
         if "".join(cur).strip():
             terms.append((sign, "".join(cur).strip()))
         if not terms:
-            raise AsmError(pos, "empty memory operand")
+            raise AsmError(pos, "E014", "empty memory operand")
         base = parse_reg(terms[0][1])
         if base is None or terms[0][0] == "-":
-            raise AsmError(pos, f"memory operand must start with a base "
-                                f"register: {tok!r}")
-        src2, mod, disp_terms = ZERO_REG, 0, []
+            raise AsmError(pos, "E014",
+                           f"memory operand must start with a base "
+                           f"register: {tok!r}")
+        src2, mod, disp_terms, have_index = ZERO_REG, 0, [], False
         for sign, term in terms[1:]:
             parts = term.split()
             r = parse_reg(parts[0])
             if r is not None:
                 if not allow_index:
-                    raise AsmError(pos, "atomic address is [base + imm] "
-                                        "only (no index register)")
+                    raise AsmError(pos, "E014",
+                                   "atomic address is [base + imm] only "
+                                   "(no index register, ISA-SPEC 5.4)")
                 if sign == "-":
-                    raise AsmError(pos, "index register cannot be negated")
-                if src2 != ZERO_REG or mod != 0:
-                    raise AsmError(pos, "more than one index register")
-                if len(parts) == 3:
+                    raise AsmError(pos, "E014",
+                                   "index register cannot be negated")
+                if have_index:
+                    raise AsmError(pos, "E014",
+                                   "more than one index register")
+                if disp_terms:
+                    raise AsmError(pos, "E014",
+                                   "index register after displacement")
+                have_index = True
+                if len(parts) >= 2:
                     kind = parts[1].lower()
-                    if kind not in MOD_KINDS:
-                        raise AsmError(pos, f"unknown index modifier "
-                                            f"{parts[1]!r}")
-                    amount = self.must_eval(parts[2], pos, "modifier amount")
-                    if not 0 <= amount <= 63:
-                        raise AsmError(pos, f"modifier amount {amount} "
-                                            f"out of range 0-63")
+                    if kind not in MOD_KINDS or len(parts) < 3:
+                        raise AsmError(pos, "E019",
+                                       f"malformed index modifier "
+                                       f"{term!r}")
+                    amount = self.mod_amount(" ".join(parts[2:]), pos,
+                                             stmt)
                     mod = (amount << 2) | MOD_KINDS[kind]
-                elif len(parts) != 1:
-                    raise AsmError(pos, f"bad index term {term!r}")
                 src2 = r
-                if src2 == ZERO_REG and mod == 0:
-                    pass  # index zero: same encoding as no index
             else:
+                toks = tokenize_expr(term, pos)
+                if has_mod_keyword(toks):
+                    raise AsmError(pos, "E019",
+                                   "modifier after an immediate term")
                 disp_terms.append((sign, term))
         disp = 0
         for sign, term in disp_terms:
-            v = ExprEval(self, pos).eval(term)
+            v = sv(self.eval_val(term, pos))
             disp += v if sign == "+" else -v
         return base, src2, mod, disp
 
     def nops(self, stmt, n):
         if len(stmt.operands) != n:
-            raise AsmError(stmt.pos, f"{stmt.mnem} takes {n} operand(s), "
-                                     f"got {len(stmt.operands)}")
+            raise AsmError(stmt.pos, "E011",
+                           f"{stmt.mnem} takes {n} operand(s), got "
+                           f"{len(stmt.operands)}")
 
     def encode(self, stmt):
         m = stmt.mnem
@@ -783,7 +1038,7 @@ class Assembler:
             return PSEUDOS[m](self, stmt)
         name = m.upper()
         if name not in E.OPCODES:
-            raise AsmError(pos, f"unknown mnemonic {stmt.mnem!r}")
+            raise AsmError(pos, "E010", f"unknown mnemonic {stmt.mnem!r}")
         opval, fam, opspec = E.OPCODES[name]
         pred = stmt.pred
 
@@ -802,66 +1057,76 @@ class Assembler:
             else:
                 dst = self.need_reg(dsttok, pos, "destination")
             src1 = self.need_reg(s1tok, pos, "src1")
-            b = self.parse_b_operand(btok, pos)
+            b = self.parse_b_operand(stmt, btok, pos)
             if b[0] == "reg":
                 return [self.build(opval, pred, dst=dst, src1=src1,
-                                   src2=b[1], mod=b[2], src3=src3, width=wc)]
+                                   src2=b[1], mod=b[2], src3=src3,
+                                   width=wc)]
             return [self.build(opval + 1, pred, dst=dst, src1=src1,
                                imm=self.imm_signed(b[1], pos), src3=src3,
                                width=wc)]
 
-        if fam == "MEM" or fam == "MEM128":
-            wc = self.width_code(stmt, "MEM") if fam == "MEM" else 0
+        if fam in ("MEM", "MEM128"):
+            wc = self.width_code(stmt, "MEM") if fam == "MEM" else \
+                self.width_code(stmt, "MEM128")
             self.nops(stmt, 2)
             if opspec == "dm":           # loads: rd, [ea]
                 dst = self.need_reg(stmt.operands[0], pos, "destination")
-                base, src2, mod, disp = self.parse_mem(stmt.operands[1], pos)
+                base, src2, mod, disp = self.parse_mem(stmt,
+                                                       stmt.operands[1],
+                                                       pos)
                 return [self.build(opval, pred, dst=dst, src1=base,
                                    src2=src2, mod=mod, width=wc,
                                    imm=self.imm_signed(disp, pos,
-                                                       "displacement"))]
-            else:                        # stores: rs3, [ea]
-                src3 = self.need_reg(stmt.operands[0], pos, "store value")
-                base, src2, mod, disp = self.parse_mem(stmt.operands[1], pos)
-                return [self.build(opval, pred, src3=src3, src1=base,
-                                   src2=src2, mod=mod, width=wc,
-                                   imm=self.imm_signed(disp, pos,
-                                                       "displacement"))]
+                                                       what="displacement"
+                                                       ))]
+            # stores: [ea], rs (data register last, asm.md 5.5)
+            src3 = self.need_reg(stmt.operands[1], pos, "store value")
+            base, src2, mod, disp = self.parse_mem(stmt, stmt.operands[0],
+                                                   pos)
+            return [self.build(opval, pred, src3=src3, src1=base,
+                               src2=src2, mod=mod, width=wc,
+                               imm=self.imm_signed(disp, pos,
+                                                   what="displacement"))]
 
         if fam == "ATOMIC":
             wc = self.width_code(stmt, fam)
             if opspec == "da23":         # CAS: rd, [ea], rexp, rnew
                 self.nops(stmt, 4)
                 dst = self.need_reg(stmt.operands[0], pos, "destination")
-                base, _, _, disp = self.parse_mem(stmt.operands[1], pos,
-                                                  allow_index=False)
-                src2 = self.need_reg(stmt.operands[2], pos, "expected value")
-                src3 = self.need_reg(stmt.operands[3], pos, "new value")
+                base, _, _, disp = self.parse_mem(stmt, stmt.operands[1],
+                                                  pos, allow_index=False)
+                src2 = self.need_reg(stmt.operands[2], pos,
+                                     "expected value", code="E027")
+                src3 = self.need_reg(stmt.operands[3], pos, "new value",
+                                     code="E027")
                 return [self.build(opval, pred, dst=dst, src1=base,
                                    src2=src2, src3=src3, width=wc,
                                    imm=self.imm_signed(disp, pos,
-                                                       "displacement"))]
-            else:                        # AMO*: rd, [ea], rs2
-                self.nops(stmt, 3)
-                dst = self.need_reg(stmt.operands[0], pos, "destination")
-                base, _, _, disp = self.parse_mem(stmt.operands[1], pos,
-                                                  allow_index=False)
-                src2 = self.need_reg(stmt.operands[2], pos, "operand")
-                return [self.build(opval, pred, dst=dst, src1=base,
-                                   src2=src2, width=wc,
-                                   imm=self.imm_signed(disp, pos,
-                                                       "displacement"))]
+                                                       what="displacement"
+                                                       ))]
+            self.nops(stmt, 3)           # AMO*: rd, [ea], rs2
+            dst = self.need_reg(stmt.operands[0], pos, "destination")
+            base, _, _, disp = self.parse_mem(stmt, stmt.operands[1], pos,
+                                              allow_index=False)
+            src2 = self.need_reg(stmt.operands[2], pos, "operand",
+                                 code="E027")
+            return [self.build(opval, pred, dst=dst, src1=base, src2=src2,
+                               width=wc,
+                               imm=self.imm_signed(disp, pos,
+                                                   what="displacement"))]
 
         if fam == "CTRL":
             if stmt.suffix is not None:
-                raise AsmError(pos, f"{stmt.mnem} takes no width suffix")
+                raise AsmError(pos, "E015",
+                               f"{stmt.mnem} takes no width suffix")
             if name == "B":
                 self.nops(stmt, 1)
                 return [self.build(opval, pred,
                                    imm=self.branch_disp(stmt.operands[0],
                                                         stmt.addr, pos))]
             if name == "JAL":
-                if len(stmt.operands) == 1:      # bare jal label
+                if len(stmt.operands) == 1:      # bare jal target (6.4)
                     dst, target = RA_REG, stmt.operands[0]
                 else:
                     self.nops(stmt, 2)
@@ -870,54 +1135,57 @@ class Assembler:
                 return [self.build(opval, pred, dst=dst,
                                    imm=self.branch_disp(target, stmt.addr,
                                                         pos))]
-            if name == "JALR":
-                self.nops(stmt, 3)
-                dst = self.need_reg(stmt.operands[0], pos, "link")
-                src1 = self.need_reg(stmt.operands[1], pos, "target base")
-                off = ExprEval(self, pos).eval(stmt.operands[2])
-                return [self.build(opval, pred, dst=dst, src1=src1,
-                                   imm=self.imm_signed(off, pos))]
+            # JALR: byte-offset immediate, E020 (asm.md 5.7)
+            self.nops(stmt, 3)
+            dst = self.need_reg(stmt.operands[0], pos, "link")
+            src1 = self.need_reg(stmt.operands[1], pos, "target base")
+            off = sv(self.eval_val(stmt.operands[2], pos))
+            return [self.build(opval, pred, dst=dst, src1=src1,
+                               imm=self.imm_signed(off, pos))]
 
         if fam == "CONST":
             if stmt.suffix is not None:
-                raise AsmError(pos, f"{stmt.mnem} takes no width suffix")
+                raise AsmError(pos, "E015",
+                               f"{stmt.mnem} takes no width suffix")
             if name == "LDI":
                 self.nops(stmt, 2)
                 dst = self.need_reg(stmt.operands[0], pos, "destination")
-                v = ExprEval(self, pos).eval(stmt.operands[1])
+                v = sv(self.eval_val(stmt.operands[1], pos))
                 return [self.build(opval, pred, dst=dst,
                                    imm=self.imm_signed(v, pos))]
             if name == "SHORI":
                 self.nops(stmt, 3)
                 dst = self.need_reg(stmt.operands[0], pos, "destination")
                 src1 = self.need_reg(stmt.operands[1], pos, "source")
-                v = ExprEval(self, pos).eval(stmt.operands[2])
+                v = sv(self.eval_val(stmt.operands[2], pos))
                 return [self.build(opval, pred, dst=dst, src1=src1,
                                    imm=self.imm_unsigned(v, pos))]
-            if name == "LAP":
-                # operand is a target address; imm = target - pc (bytes)
-                self.nops(stmt, 2)
-                dst = self.need_reg(stmt.operands[0], pos, "destination")
-                target = ExprEval(self, pos).eval(stmt.operands[1])
-                delta = target - stmt.addr
-                return [self.build(opval, pred, dst=dst,
-                                   imm=self.imm_signed(delta, pos,
-                                                       "lap displacement"))]
+            # LAP: operand is the target byte address; imm = target - pc
+            self.nops(stmt, 2)
+            dst = self.need_reg(stmt.operands[0], pos, "destination")
+            target = sv(self.eval_val(stmt.operands[1], pos))
+            delta = target - stmt.addr
+            return [self.build(opval, pred, dst=dst,
+                               imm=self.imm_signed(delta, pos,
+                                                   code="E023",
+                                                   what="lap "
+                                                        "displacement"))]
 
         if fam == "PREDF":
             if stmt.suffix is not None:
-                raise AsmError(pos, f"{stmt.mnem} takes no width suffix")
+                raise AsmError(pos, "E015",
+                               f"{stmt.mnem} takes no width suffix")
             self.nops(stmt, 1)
             if name == "PRD":
                 dst = self.need_reg(stmt.operands[0], pos, "destination")
                 return [self.build(opval, pred, dst=dst)]
-            if name == "PWR":
-                src1 = self.need_reg(stmt.operands[0], pos, "source")
-                return [self.build(opval, pred, src1=src1)]
+            src1 = self.need_reg(stmt.operands[0], pos, "source")
+            return [self.build(opval, pred, src1=src1)]
 
         if fam == "SYS":
             if stmt.suffix is not None:
-                raise AsmError(pos, f"{stmt.mnem} takes no width suffix")
+                raise AsmError(pos, "E015",
+                               f"{stmt.mnem} takes no width suffix")
             if name == "MFSR":
                 self.nops(stmt, 2)
                 dst = self.need_reg(stmt.operands[0], pos, "destination")
@@ -934,24 +1202,42 @@ class Assembler:
         if fam in ("FP", "FCVT"):
             return self.encode_fp(stmt, opval, fam, opspec)
 
-        raise AsmError(pos, f"internal: unhandled family {fam}")
+        raise AssertionError(f"unhandled family {fam}")
 
     def branch_disp(self, target_expr, pc, pos):
-        target = ExprEval(self, pos).eval(target_expr)
+        target = sv(self.eval_val(target_expr, pos))
         delta = target - pc
         if delta % E.INSN_BYTES != 0:
-            raise AsmError(pos, f"branch target 0x{target:x} not "
-                                f"{E.INSN_BYTES}-byte aligned relative to "
-                                f"branch")
-        return self.imm_signed(delta // E.INSN_BYTES, pos,
-                               "branch displacement (instructions)")
+            raise AsmError(pos, "E022",
+                           f"branch target 0x{target & MASK128:x} minus "
+                           f"pc is not a multiple of {E.INSN_BYTES}")
+        return self.imm_signed(delta // E.INSN_BYTES, pos, code="E023",
+                               what="branch displacement (instructions)")
 
     def sreg_index(self, tok, pos):
-        t = tok.strip().lower()
-        if t in E.SREGS:
-            return E.SREGS[t]
-        v = ExprEval(self, pos).eval(tok)
-        return self.imm_unsigned(v, pos, "sreg index")
+        """asm.md 5.9: sreg name, or CONST in [0, 2^21-1]; E026 with
+        precedence over E030 for a lone unresolvable identifier."""
+        t = tok.strip()
+        low = t.lower()
+        if low in E.SREGS:
+            return E.SREGS[low]
+        if NAME_RE.match(t):
+            defined = t in self.labels or t in self.equs
+            if not defined:
+                raise AsmError(pos, "E026",
+                               f"{t!r} is neither a sreg name nor a "
+                               f"defined CONST symbol")
+            v = self.eval_val(t, pos)
+            if v.kind != CONST or not 0 <= sv(v) <= SREG_MAX:
+                raise AsmError(pos, "E026",
+                               f"{t!r} is not a CONST in [0, 2^21-1]")
+            return sv(v)
+        v = self.eval_val(tok, pos)
+        if v.kind != CONST or not 0 <= sv(v) <= SREG_MAX:
+            raise AsmError(pos, "E026",
+                           f"sreg operand must be a name or a CONST in "
+                           f"[0, 2^21-1]")
+        return sv(v)
 
     # FP format codes per ISA-SPEC 10.4: 0 = 32-bit, 1 = 64-bit,
     # 2 = 128-bit (integer only).
@@ -971,102 +1257,119 @@ class Assembler:
                 dst = self.need_pred(ops[0], pos, "compare destination")
             else:
                 dst = self.need_reg(ops[0], pos, "destination")
-            src1 = self.need_reg(ops[1], pos, "src1")
-            src2 = self.need_reg(ops[2], pos, "src2") if regs_needed >= 3 \
-                else 0
-            src3 = self.need_reg(ops[3], pos, "src3") if regs_needed == 4 \
-                else 0
+            # FP sources are register-only: E027 (asm.md 5.11)
+            src1 = self.need_reg(ops[1], pos, "src1", code="E027")
+            src2 = self.need_reg(ops[2], pos, "src2", code="E027") \
+                if regs_needed >= 3 else 0
+            src3 = self.need_reg(ops[3], pos, "src3", code="E027") \
+                if regs_needed == 4 else 0
             return [self.build(opval, pred, dst=dst, src1=src1, src2=src2,
                                src3=src3, width=wc)]
-        # FCVT: width = dest format code, mod bits 1:0 = source format code
-        # Syntax: fcvtfi.32 rd, rs1, f64   (dest suffix, source trailing)
+        # FCVT: width = dest format code, mod bits 1:0 = source format
+        sfx = stmt.suffix
+        if sfx is None:
+            raise AsmError(pos, "E016",
+                           f"{stmt.mnem} needs a destination format "
+                           f"suffix")
+        dst_map = self.INT_DST_SFX if name in ("FCVTFI", "FCVTFIU") \
+            else self.FP_DST_SFX
+        if sfx not in dst_map:
+            raise AsmError(pos, "E015",
+                           f"bad width suffix .{sfx} for {stmt.mnem}")
         self.nops(stmt, 3)
         dst = self.need_reg(stmt.operands[0], pos, "destination")
         src1 = self.need_reg(stmt.operands[1], pos, "source")
         srcfmt_tok = stmt.operands[2].strip().lower()
-        sfx = stmt.suffix
+        wc = dst_map[sfx]
         if name in ("FCVTFI", "FCVTFIU"):     # FP -> int
-            if sfx not in self.INT_DST_SFX:
-                raise AsmError(pos, f"{stmt.mnem} needs .32/.64/.128 "
-                                    f"(integer destination width)")
-            if srcfmt_tok not in self.FP_SRC_FMT:
-                raise AsmError(pos, f"{stmt.mnem} source format must be "
-                                    f"f32 or f64")
-            wc = self.INT_DST_SFX[sfx]
-            sf = self.FP_SRC_FMT[srcfmt_tok]
+            src_map = self.FP_SRC_FMT
         elif name in ("FCVTIF", "FCVTUIF"):   # int -> FP
-            if sfx not in self.FP_DST_SFX:
-                raise AsmError(pos, f"{stmt.mnem} needs .f32/.f64 "
-                                    f"(FP destination format)")
-            if srcfmt_tok not in self.INT_SRC_FMT:
-                raise AsmError(pos, f"{stmt.mnem} source format must be "
-                                    f"i32, i64, or i128")
-            wc = self.FP_DST_SFX[sfx]
-            sf = self.INT_SRC_FMT[srcfmt_tok]
-        elif name == "FCVTFF":                # FP -> FP, 32 <-> 64
-            if sfx not in self.FP_DST_SFX:
-                raise AsmError(pos, f"fcvtff needs .f32/.f64")
-            if srcfmt_tok not in self.FP_SRC_FMT:
-                raise AsmError(pos, f"fcvtff source format must be f32 "
-                                    f"or f64")
-            wc = self.FP_DST_SFX[sfx]
-            sf = self.FP_SRC_FMT[srcfmt_tok]
-            if wc == sf:
-                raise AsmError(pos, "fcvtff source and destination formats "
-                                    "must differ (32 <-> 64)")
-        else:
-            raise AsmError(pos, f"internal: unhandled FCVT {name}")
+            src_map = self.INT_SRC_FMT
+        else:                                 # FCVTFF: FP -> FP, 32<->64
+            src_map = self.FP_SRC_FMT
+        if srcfmt_tok not in src_map:
+            raise AsmError(pos, "E025",
+                           f"{stmt.mnem}: illegal source format "
+                           f"{stmt.operands[2].strip()!r} (asm.md 5.10)")
+        sf = src_map[srcfmt_tok]
+        if name == "FCVTFF" and wc == sf:
+            raise AsmError(pos, "E025",
+                           "fcvtff source and destination formats must "
+                           "differ (32 <-> 64)")
         return [self.build(opval, pred, dst=dst, src1=src1, width=wc,
                            mod=sf)]
 
     # ------------------------------------------------------------- output
 
     def check_layout(self):
-        occupied = []
-        if any(seg.data for seg in self.segments):
-            occupied.append((DEVTAB_BASE, DEVTAB_BASE + DEVTAB_SIZE,
-                             "(device table)"))
-        for seg in self.segments:
-            if not seg.data:
-                continue
-            occupied.append((seg.base, seg.base + len(seg.data),
-                             f"segment at {seg.pos[0]}:{seg.pos[1]}"))
-        occupied.sort()
-        for (a0, a1, na), (b0, b1, nb) in zip(occupied, occupied[1:]):
+        first_pos = self.segments[0].pos if self.segments else \
+            self.stmts[0].pos if self.stmts else ("<input>", 1)
+        for seg in self.segments:                       # E045 first
+            if seg.size == 0:
+                raise AsmError(seg.pos, "E045",
+                               f"empty segment at 0x{seg.base:x} (use "
+                               f".space for reserved regions)")
+        exts = sorted(((seg.base, seg.base + seg.size, seg)
+                       for seg in self.segments),
+                      key=lambda t: (t[0], t[1]))
+        for (a0, a1, sa), (b0, b1, sb) in zip(exts, exts[1:]):  # E042
             if b0 < a1:
-                raise AsmError((na.split(" at ")[-1].split(":")[0], 0)
-                               if " at " in na else ("<image>", 0),
-                               f"overlap: {na} [0x{a0:x},0x{a1:x}) and "
-                               f"{nb} [0x{b0:x},0x{b1:x})")
+                later = sb if sb.ord > sa.ord else sa
+                raise AsmError(later.pos, "E042",
+                               f"segment [0x{b0:x},0x{b1:x}) overlaps "
+                               f"segment [0x{a0:x},0x{a1:x})")
+        for seg in self.segments:                       # E042 (devtab)
+            if seg.base < DEVTAB_END and seg.base + seg.size > DEVTAB_BASE:
+                raise AsmError(seg.pos, "E042",
+                               f"segment [0x{seg.base:x},"
+                               f"0x{seg.base + seg.size:x}) overlaps the "
+                               f"device table window [0x{DEVTAB_BASE:x},"
+                               f"0x{DEVTAB_END:x})")
+        if not any(seg.base <= E.RESET_PC < seg.base + seg.size
+                   for seg in self.segments):           # E049
+            raise AsmError(first_pos, "E049",
+                           f"no segment covers the reset PC "
+                           f"0x{E.RESET_PC:x}")
 
     def entry_value(self):
-        if self.entry_expr is None:
-            return DEFAULT_ORG
-        text, pos = self.entry_expr
-        v = ExprEval(self, pos).eval(text)
+        if self.entry is None:
+            return E.RESET_PC
+        name, pos = self.entry
+        if name not in self.labels:
+            raise AsmError(pos, "E046",
+                           f".entry label {name!r} is not defined")
+        v = self.labels[name]
         if v % E.INSN_BYTES != 0:
-            raise AsmError(pos, f"entry 0x{v:x} is not "
-                                f"{E.INSN_BYTES}-byte aligned")
-        if not 0 <= v <= MASK128:
-            raise AsmError(pos, "entry out of 128-bit range")
+            raise AsmError(pos, "E047",
+                           f"entry 0x{v:x} is not {E.INSN_BYTES}-byte "
+                           f"aligned")
+        if not any(seg.base <= v < seg.base + seg.size
+                   for seg in self.segments):
+            raise AsmError(pos, "E048",
+                           f"entry 0x{v:x} is not inside any segment")
         return v
 
     def write_image(self, out_img):
-        entry = self.entry_value()
-        segs = [s for s in self.segments if s.data]
-        if not segs:
-            sys.exit("error: nothing assembled (empty image)")
         self.check_layout()
-        header = b"SAHIMG01" + pack_u128(entry) + struct.pack("<Q", len(segs))
-        desc_bytes = 48 * len(segs)
-        file_off = len(header) + desc_bytes
+        entry = self.entry_value()
+        header = b"SAHIMG01" + pack_u128(entry) + \
+            struct.pack("<Q", len(self.segments))
+        file_off = len(header) + 48 * len(self.segments)
         descs, blobs = [], []
-        for seg in segs:
+        for seg in self.segments:
+            # asm.md 8.2: file_len trims the trailing zero-byte run —
+            # but never into instruction-emitted bytes: T4's segment 1
+            # (file_len 32, halt's zero bytes kept) and trace.md TV-1
+            # (whose sha256 is embedded in TV-2's META) both pin whole
+            # instruction words in the file. SPEC-ISSUES.md 33.
+            flen = len(seg.data)
+            while flen > seg.insn_end and seg.data[flen - 1] == 0:
+                flen -= 1
             descs.append(pack_u128(seg.base) +
-                         struct.pack("<QQQQ", file_off, len(seg.data),
+                         struct.pack("<QQQQ", file_off, flen,
                                      len(seg.data), 0))
-            blobs.append(bytes(seg.data))
-            file_off += len(seg.data)
+            blobs.append(bytes(seg.data[:flen]))
+            file_off += flen
         with open(out_img, "wb") as f:
             f.write(header)
             for d in descs:
@@ -1077,11 +1380,11 @@ class Assembler:
     def write_sym(self, out_sym):
         entries = []
         for name, addr in self.labels.items():
-            kind = self.label_kinds.get(name, "D")
-            entries.append((addr & MASK128, kind, name))
+            entries.append((addr & MASK128, self.label_kinds[name], name))
         for name in self.equs:
-            v = self.symbol_value(name, self.equs[name][1])
-            entries.append((v & MASK128, "A", name))
+            v = self.eval_equ(name, None)
+            if v.kind == CONST:      # ADDR-kind .equs get no row (8.3)
+                entries.append((v.v, "A", name))
         entries.sort(key=lambda e: (e[0], e[2]))
         with open(out_sym, "w") as f:
             for addr, kind, name in entries:
@@ -1089,15 +1392,41 @@ class Assembler:
 
 
 def pack_u128(v):
-    return struct.pack("<QQ", v & 0xFFFFFFFFFFFFFFFF, (v >> 64) &
-                       0xFFFFFFFFFFFFFFFF)
+    return struct.pack("<QQ", v & 0xFFFFFFFFFFFFFFFF,
+                       (v >> 64) & 0xFFFFFFFFFFFFFFFF)
+
+
+def _strip_literals(text):
+    """Replace string/char literal bodies with spaces; returns
+    (stripped text, open quote or None)."""
+    out, i, n = [], 0, len(text)
+    quote = None
+    while i < n:
+        c = text[i]
+        if quote:
+            out.append(" ")
+            if c == "\\" and i + 1 < n:
+                out.append(" ")
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            out.append(" ")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out), quote
 
 
 # ------------------------------------------------------------------ pseudos
 
 
 def minimal_chain_len(value):
-    """Minimal LDI + (n-1) x SHORI chain length for a 128-bit constant."""
+    """Minimal LDI + (n-1) x SHORI chain length per asm.md 6.1."""
     v = value & MASK128
     for n in range(1, 7):
         k = E.IMM_BITS * (n - 1)
@@ -1111,17 +1440,18 @@ def minimal_chain_len(value):
 
 
 def chain_words(asm, dst, value, n, pred, pos):
-    """Emit LDI + SHORI words building `value` in register dst."""
+    """Emit LDI + SHORI words building `value` in register dst.
+
+    asm.md 6.1: imm of the leading LDI is chunk c_{n-1} VERBATIM —
+    (V >> 22(n-1)) & 0x3FFFFF, no sign adjustment (for n = 6 the chunk
+    has only 18 significant bits and is emitted as-is; LDI's
+    sign-extension excess shifts out of bit 127)."""
     v = value & MASK128
     k = E.IMM_BITS * (n - 1)
-    bits = 128 - k
-    top = v >> k
-    if top >= 1 << (bits - 1):
-        top -= 1 << bits
     ldi_val, _, _ = E.OPCODES["LDI"]
     shori_val, _, _ = E.OPCODES["SHORI"]
     words = [asm.build(ldi_val, pred, dst=dst,
-                       imm=asm.imm_signed(top, pos))]
+                       imm=(v >> k) & IMM_UNSIGNED_MAX)]
     for i in range(1, n):
         chunk = (v >> (k - E.IMM_BITS * i)) & IMM_UNSIGNED_MAX
         words.append(asm.build(shori_val, pred, dst=dst, src1=dst,
@@ -1130,51 +1460,38 @@ def chain_words(asm, dst, value, n, pred, pos):
 
 
 def pseudo_li(asm, stmt):
-    pos = stmt.pos
-    asm.nops(stmt, 2)
-    if stmt.mnem == "li" and stmt.suffix is not None:
-        raise AsmError(pos, "li takes no width suffix")
-    dst = asm.need_reg(stmt.operands[0], pos, "destination")
-    v = ExprEval(asm, pos).eval(stmt.operands[1])
-    if not -(1 << 127) <= v < (1 << 128):
-        raise AsmError(pos, f"li constant does not fit in 128 bits")
-    n = stmt.chain
-    if minimal_chain_len(v) > n:
-        raise AsmError(pos, "internal: li chain shorter than value needs")
-    return chain_words(asm, dst, v, n, stmt.pred, pos)
+    dst = asm.need_reg(stmt.operands[0], stmt.pos, "destination")
+    return chain_words(asm, dst, stmt.li_val, stmt.chain, stmt.pred,
+                       stmt.pos)
 
 
 def pseudo_la(asm, stmt):
     pos = stmt.pos
-    if stmt.suffix == "abs":
-        return pseudo_li(asm, stmt)
-    if stmt.suffix is not None:
-        raise AsmError(pos, "la takes no width suffix (la.abs for absolute)")
-    asm.nops(stmt, 2)
+    if stmt.suffix == "abs":         # asm.md 6.3: fixed 6-chain
+        dst = asm.need_reg(stmt.operands[0], pos, "destination")
+        v = asm.eval_val(stmt.operands[1], pos)
+        return chain_words(asm, dst, v.v, 6, stmt.pred, pos)
     dst = asm.need_reg(stmt.operands[0], pos, "destination")
-    target = ExprEval(asm, pos).eval(stmt.operands[1])
+    target = sv(asm.eval_val(stmt.operands[1], pos))
     lap_val, _, _ = E.OPCODES["LAP"]
     add_val, _, _ = E.OPCODES["ADD"]
     delta = target - stmt.addr
-    if stmt.la_plan == "lap":
+    if not stmt.la_promoted:
         return [asm.build(lap_val, stmt.pred, dst=dst,
-                          imm=asm.imm_signed(delta, pos,
-                                             "la displacement"))]
-    # LAP + immediate ADD: split delta across the two signed 22-bit fields.
-    if delta >= 0:
-        first = min(delta, IMM_SIGNED_MAX)
-    else:
-        first = max(delta, IMM_SIGNED_MIN)
-    second = delta - first
-    if not IMM_SIGNED_MIN <= second <= IMM_SIGNED_MAX:
-        raise AsmError(pos, f"la target is 0x{abs(delta):x} bytes away; "
-                            f"beyond LAP+ADD range — use la.abs")
-    # ADD.128 immediate form: width code for 128 in the ALU family
+                          imm=asm.imm_signed(delta, pos, code="E023",
+                                             what="la displacement"))]
+    # LAP + immediate ADD: d1 = clamp(delta), d2 = delta - d1 (asm.md 6.2)
+    d1 = max(IMM_SIGNED_MIN, min(delta, IMM_SIGNED_MAX))
+    d2 = delta - d1
+    if not IMM_SIGNED_MIN <= d2 <= IMM_SIGNED_MAX:
+        raise AsmError(pos, "E028",
+                       f"la target is {delta:#x} bytes away, beyond the "
+                       f"position-independent LAP+ADD range - use la.abs")
     w128 = E.FAMILIES["ALU"]["widths"].index(128)
     return [asm.build(lap_val, stmt.pred, dst=dst,
-                      imm=asm.imm_signed(first, pos)),
-            asm.build(add_val + 1, stmt.pred, dst=dst, src1=dst, width=w128,
-                      imm=asm.imm_signed(second, pos))]
+                      imm=asm.imm_signed(d1, pos)),
+            asm.build(add_val + 1, stmt.pred, dst=dst, src1=dst,
+                      width=w128, imm=asm.imm_signed(d2, pos))]
 
 
 def alu_reg_word(asm, name, stmt, dst, src1, src2, width_bits=128):
@@ -1185,28 +1502,37 @@ def alu_reg_word(asm, name, stmt, dst, src1, src2, width_bits=128):
 
 
 def pseudo_mov(asm, stmt):
-    asm.nops(stmt, 2)
     if stmt.suffix is not None:
-        raise AsmError(stmt.pos, "mov takes no width suffix")
+        raise AsmError(stmt.pos, "E015", "mov takes no width suffix")
+    asm.nops(stmt, 2)
     dst = asm.need_reg(stmt.operands[0], stmt.pos, "destination")
     src = asm.need_reg(stmt.operands[1], stmt.pos, "source")
     return [alu_reg_word(asm, "OR", stmt, dst, src, ZERO_REG)]
 
 
 def pseudo_nop(asm, stmt):
+    if stmt.suffix is not None:
+        raise AsmError(stmt.pos, "E015", "nop takes no width suffix")
     asm.nops(stmt, 0)
     return [alu_reg_word(asm, "OR", stmt, ZERO_REG, ZERO_REG, ZERO_REG)]
+
+
+def _alu_width(asm, stmt, base):
+    """Width code for not/neg width pass-through (asm.md 6.4)."""
+    opval, fam, _ = E.OPCODES[base]
+    saved = stmt.mnem
+    stmt.mnem = base.lower()
+    try:
+        return opval, asm.width_code(stmt, fam)
+    finally:
+        stmt.mnem = saved
 
 
 def pseudo_not(asm, stmt):
     asm.nops(stmt, 2)
     dst = asm.need_reg(stmt.operands[0], stmt.pos, "destination")
     src = asm.need_reg(stmt.operands[1], stmt.pos, "source")
-    opval, fam, _ = E.OPCODES["XOR"]
-    saved = stmt.mnem
-    stmt.mnem = "xor"
-    wc = asm.width_code(stmt, fam)
-    stmt.mnem = saved
+    opval, wc = _alu_width(asm, stmt, "XOR")
     return [asm.build(opval + 1, stmt.pred, dst=dst, src1=src, width=wc,
                       imm=asm.imm_signed(-1, stmt.pos))]
 
@@ -1215,44 +1541,38 @@ def pseudo_neg(asm, stmt):
     asm.nops(stmt, 2)
     dst = asm.need_reg(stmt.operands[0], stmt.pos, "destination")
     src = asm.need_reg(stmt.operands[1], stmt.pos, "source")
-    opval, fam, _ = E.OPCODES["SUB"]
-    saved = stmt.mnem
-    stmt.mnem = "sub"
-    wc = asm.width_code(stmt, fam)
-    stmt.mnem = saved
+    opval, wc = _alu_width(asm, stmt, "SUB")
     return [asm.build(opval, stmt.pred, dst=dst, src1=ZERO_REG, src2=src,
                       width=wc)]
 
 
 def pseudo_ret(asm, stmt):
+    if stmt.suffix is not None:
+        raise AsmError(stmt.pos, "E015", "ret takes no width suffix")
     asm.nops(stmt, 0)
     opval, _, _ = E.OPCODES["JALR"]
     return [asm.build(opval, stmt.pred, dst=ZERO_REG, src1=RA_REG, imm=0)]
 
 
 def pseudo_sub(asm, stmt):
-    """sub rd, imm, rs — reverse-subtract form. TOOLING-SPEC 4.4 lists it
-    as a one-instruction expansion; only imm == 0 (neg) is expressible in
-    one instruction. Anything else is a loud error (see SPEC-ISSUES.md)."""
+    """sub rd, imm, rs — reverse-subtract form; legal only for imm = 0
+    (asm.md 6.4), anything else is E036."""
     pos = stmt.pos
     if len(stmt.operands) == 3 and \
             parse_reg(stmt.operands[1]) is None and \
             parse_reg(stmt.operands[2]) is not None:
-        v = ExprEval(asm, pos).eval(stmt.operands[1])
+        v = sv(asm.eval_val(stmt.operands[1], pos))
         if v != 0:
-            raise AsmError(pos, "sub rd, imm, rs is only expressible for "
-                                "imm = 0 (neg); use li + sub")
+            raise AsmError(pos, "E036",
+                           "sub rd, imm, rs has no one-instruction "
+                           "expansion for imm != 0 - use li + sub, or "
+                           "neg + add")
         dst = asm.need_reg(stmt.operands[0], pos, "destination")
         src = asm.need_reg(stmt.operands[2], pos, "source")
-        opval, fam, _ = E.OPCODES["SUB"]
-        saved = stmt.mnem
-        stmt.mnem = "sub"
-        wc = asm.width_code(stmt, fam)
-        stmt.mnem = saved
+        opval, wc = _alu_width(asm, stmt, "SUB")
         return [asm.build(opval, stmt.pred, dst=dst, src1=ZERO_REG,
                           src2=src, width=wc)]
-    # ordinary sub
-    del PSEUDOS["sub"]
+    del PSEUDOS["sub"]                       # ordinary sub
     try:
         return asm.encode(stmt)
     finally:
@@ -1284,6 +1604,11 @@ def assemble(paths, out_img, out_sym):
     return asm
 
 
+def usage_exit(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)                      # usage / I-O errors: exit 2 (asm.md 1)
+
+
 def main(argv):
     out = None
     inputs = []
@@ -1292,26 +1617,40 @@ def main(argv):
         a = argv[i]
         if a == "-o":
             if i + 1 >= len(argv):
-                sys.exit("error: -o needs an argument")
+                usage_exit("-o needs an argument")
             out = argv[i + 1]
             i += 2
             continue
         if a.startswith("-"):
-            sys.exit(f"error: unknown option {a}\n"
-                     f"usage: asm.py [-o OUT.img] input.s ...")
+            usage_exit(f"unknown option {a}\n"
+                       f"usage: sasm [-o OUT.img] IN1.s [IN2.s ...]")
         inputs.append(a)
         i += 1
     if not inputs:
-        sys.exit("usage: asm.py [-o OUT.img] input.s ...")
+        usage_exit("usage: sasm [-o OUT.img] IN1.s [IN2.s ...]")
     if out is None:
         out = os.path.splitext(inputs[0])[0] + ".img"
-    if not out.endswith(".img"):
-        sys.exit("error: output must end in .img")
-    out_sym = out[:-4] + ".sym"
+    out_sym = (out[:-4] if out.endswith(".img") else out) + ".sym"
+
+    def remove_outputs():
+        """ASM-12: on any assembly error no output file exists afterward,
+        even if one existed before the run."""
+        for p in (out, out_sym):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
     try:
         assemble(inputs, out, out_sym)
     except AsmError as e:
-        sys.exit(str(e))
+        remove_outputs()
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        remove_outputs()
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

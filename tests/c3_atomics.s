@@ -14,7 +14,7 @@ start:
         li r27, 1
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoadd.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -29,7 +29,7 @@ start:
         li r27, 2
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amoadd.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -44,7 +44,7 @@ start:
         li r27, 3
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amoadd.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -59,7 +59,7 @@ start:
         li r27, 4
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoadd.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -74,7 +74,7 @@ start:
         li r27, 5
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amoadd.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -89,7 +89,7 @@ start:
         li r27, 6
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amoadd.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -104,7 +104,7 @@ start:
         li r27, 7
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoadd r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -119,7 +119,7 @@ start:
         li r27, 8
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amoadd r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -134,7 +134,7 @@ start:
         li r27, 9
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amoadd r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -149,7 +149,7 @@ start:
         li r27, 10
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoand.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -164,7 +164,7 @@ start:
         li r27, 11
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amoand.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -179,7 +179,7 @@ start:
         li r27, 12
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amoand.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -194,7 +194,7 @@ start:
         li r27, 13
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoand.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -209,7 +209,7 @@ start:
         li r27, 14
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amoand.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -224,7 +224,7 @@ start:
         li r27, 15
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amoand.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -239,7 +239,7 @@ start:
         li r27, 16
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoand r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -254,7 +254,7 @@ start:
         li r27, 17
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amoand r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -269,7 +269,7 @@ start:
         li r27, 18
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amoand r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -284,7 +284,7 @@ start:
         li r27, 19
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoor.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -299,7 +299,7 @@ start:
         li r27, 20
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amoor.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -314,7 +314,7 @@ start:
         li r27, 21
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amoor.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -329,7 +329,7 @@ start:
         li r27, 22
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoor.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -344,7 +344,7 @@ start:
         li r27, 23
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amoor.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -359,7 +359,7 @@ start:
         li r27, 24
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amoor.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -374,7 +374,7 @@ start:
         li r27, 25
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoor r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -389,7 +389,7 @@ start:
         li r27, 26
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amoor r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -404,7 +404,7 @@ start:
         li r27, 27
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amoor r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -419,7 +419,7 @@ start:
         li r27, 28
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoxor.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -434,7 +434,7 @@ start:
         li r27, 29
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amoxor.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -449,7 +449,7 @@ start:
         li r27, 30
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amoxor.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -464,7 +464,7 @@ start:
         li r27, 31
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoxor.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -479,7 +479,7 @@ start:
         li r27, 32
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amoxor.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -494,7 +494,7 @@ start:
         li r27, 33
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amoxor.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -509,7 +509,7 @@ start:
         li r27, 34
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoxor r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -524,7 +524,7 @@ start:
         li r27, 35
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amoxor r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -539,7 +539,7 @@ start:
         li r27, 36
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amoxor r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -554,7 +554,7 @@ start:
         li r27, 37
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoswap.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -569,7 +569,7 @@ start:
         li r27, 38
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amoswap.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -584,7 +584,7 @@ start:
         li r27, 39
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amoswap.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -599,7 +599,7 @@ start:
         li r27, 40
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoswap.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -614,7 +614,7 @@ start:
         li r27, 41
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amoswap.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -629,7 +629,7 @@ start:
         li r27, 42
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amoswap.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -644,7 +644,7 @@ start:
         li r27, 43
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amoswap r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -659,7 +659,7 @@ start:
         li r27, 44
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amoswap r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -674,7 +674,7 @@ start:
         li r27, 45
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amoswap r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -689,7 +689,7 @@ start:
         li r27, 46
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomin.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -704,7 +704,7 @@ start:
         li r27, 47
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amomin.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -719,7 +719,7 @@ start:
         li r27, 48
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amomin.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -734,7 +734,7 @@ start:
         li r27, 49
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778800000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomin.32 r19, [r21], r23
         li r20, 0x0
@@ -749,7 +749,7 @@ start:
         li r27, 50
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomin.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -764,7 +764,7 @@ start:
         li r27, 51
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomin.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -779,7 +779,7 @@ start:
         li r27, 52
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amomin.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -794,7 +794,7 @@ start:
         li r27, 53
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amomin.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -809,7 +809,7 @@ start:
         li r27, 54
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233440000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomin.64 r19, [r21], r23
         li r20, 0x0
@@ -824,7 +824,7 @@ start:
         li r27, 55
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomin.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -839,7 +839,7 @@ start:
         li r27, 56
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomin r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -854,7 +854,7 @@ start:
         li r27, 57
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amomin r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -869,7 +869,7 @@ start:
         li r27, 58
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amomin r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -884,7 +884,7 @@ start:
         li r27, 59
         li r21, ATOMIC_BOX
         li r22, 0x0
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomin r19, [r21], r23
         li r20, 0x0
@@ -899,7 +899,7 @@ start:
         li r27, 60
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomin r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -914,7 +914,7 @@ start:
         li r27, 61
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomax.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -929,7 +929,7 @@ start:
         li r27, 62
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amomax.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -944,7 +944,7 @@ start:
         li r27, 63
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amomax.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -959,7 +959,7 @@ start:
         li r27, 64
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778800000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomax.32 r19, [r21], r23
         li r20, 0x0
@@ -974,7 +974,7 @@ start:
         li r27, 65
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomax.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -989,7 +989,7 @@ start:
         li r27, 66
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomax.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -1004,7 +1004,7 @@ start:
         li r27, 67
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amomax.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -1019,7 +1019,7 @@ start:
         li r27, 68
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amomax.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1034,7 +1034,7 @@ start:
         li r27, 69
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233440000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomax.64 r19, [r21], r23
         li r20, 0x0
@@ -1049,7 +1049,7 @@ start:
         li r27, 70
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomax.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -1064,7 +1064,7 @@ start:
         li r27, 71
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomax r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -1079,7 +1079,7 @@ start:
         li r27, 72
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amomax r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -1094,7 +1094,7 @@ start:
         li r27, 73
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amomax r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1109,7 +1109,7 @@ start:
         li r27, 74
         li r21, ATOMIC_BOX
         li r22, 0x0
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomax r19, [r21], r23
         li r20, 0x0
@@ -1124,7 +1124,7 @@ start:
         li r27, 75
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomax r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -1139,7 +1139,7 @@ start:
         li r27, 76
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amominu.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -1154,7 +1154,7 @@ start:
         li r27, 77
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amominu.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -1169,7 +1169,7 @@ start:
         li r27, 78
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amominu.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1184,7 +1184,7 @@ start:
         li r27, 79
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778800000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amominu.32 r19, [r21], r23
         li r20, 0x0
@@ -1199,7 +1199,7 @@ start:
         li r27, 80
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amominu.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -1214,7 +1214,7 @@ start:
         li r27, 81
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amominu.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -1229,7 +1229,7 @@ start:
         li r27, 82
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amominu.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -1244,7 +1244,7 @@ start:
         li r27, 83
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amominu.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1259,7 +1259,7 @@ start:
         li r27, 84
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233440000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amominu.64 r19, [r21], r23
         li r20, 0x0
@@ -1274,7 +1274,7 @@ start:
         li r27, 85
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amominu.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -1289,7 +1289,7 @@ start:
         li r27, 86
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amominu r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -1304,7 +1304,7 @@ start:
         li r27, 87
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amominu r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -1319,7 +1319,7 @@ start:
         li r27, 88
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amominu r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1334,7 +1334,7 @@ start:
         li r27, 89
         li r21, ATOMIC_BOX
         li r22, 0x0
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amominu r19, [r21], r23
         li r20, 0x0
@@ -1349,7 +1349,7 @@ start:
         li r27, 90
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amominu r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -1364,7 +1364,7 @@ start:
         li r27, 91
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomaxu.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -1379,7 +1379,7 @@ start:
         li r27, 92
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677887fffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1180000000
         amomaxu.32 r19, [r21], r23
         li r20, 0x7fffffff
@@ -1394,7 +1394,7 @@ start:
         li r27, 93
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344556677880f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xff096691234abcdef55aa1111110ff0
         amomaxu.32 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1409,7 +1409,7 @@ start:
         li r27, 94
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778800000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomaxu.32 r19, [r21], r23
         li r20, 0x0
@@ -1424,7 +1424,7 @@ start:
         li r27, 95
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomaxu.32 r19, [r21], r23
         li r20, 0xffffffffffffffffffffffff80000000
@@ -1439,7 +1439,7 @@ start:
         li r27, 96
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomaxu.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -1454,7 +1454,7 @@ start:
         li r27, 97
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233447fffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa118000000000000000
         amomaxu.64 r19, [r21], r23
         li r20, 0x7fffffffffffffff
@@ -1469,7 +1469,7 @@ start:
         li r27, 98
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344000000000f0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x1234abcdef55aa110000000011110ff0
         amomaxu.64 r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1484,7 +1484,7 @@ start:
         li r27, 99
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233440000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomaxu.64 r19, [r21], r23
         li r20, 0x0
@@ -1499,7 +1499,7 @@ start:
         li r27, 100
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomaxu.64 r19, [r21], r23
         li r20, 0xffffffffffffffff8000000000000000
@@ -1514,7 +1514,7 @@ start:
         li r27, 101
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomaxu r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -1529,7 +1529,7 @@ start:
         li r27, 102
         li r21, ATOMIC_BOX
         li r22, 0x7fffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x80000000000000000000000000000000
         amomaxu r19, [r21], r23
         li r20, 0x7fffffffffffffffffffffffffffffff
@@ -1544,7 +1544,7 @@ start:
         li r27, 103
         li r21, ATOMIC_BOX
         li r22, 0xf0fa5a5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x11110ff0
         amomaxu r19, [r21], r23
         li r20, 0xf0fa5a5
@@ -1559,7 +1559,7 @@ start:
         li r27, 104
         li r21, ATOMIC_BOX
         li r22, 0x0
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0xffffffffffffffffffffffffffffffff
         amomaxu r19, [r21], r23
         li r20, 0x0
@@ -1574,7 +1574,7 @@ start:
         li r27, 105
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r23, 0x0
         amomaxu r19, [r21], r23
         li r20, 0x80000000000000000000000000000000
@@ -1590,7 +1590,7 @@ start:
         li r27, 106
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778800000005
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xff096691234abcdef55aa1100000005
         li r26, 0xff096691234abcdef55aa1100000009
         cas.32 r19, [r21], r25, r26
@@ -1606,7 +1606,7 @@ start:
         li r27, 107
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778800000005
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xff096691234abcdef55aa1100000006
         li r26, 0xff096691234abcdef55aa1100000009
         cas.32 r19, [r21], r25, r26
@@ -1622,7 +1622,7 @@ start:
         li r27, 108
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778880000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xff096691234abcdef55aa1180000000
         li r26, 0x0
         cas.32 r19, [r21], r25, r26
@@ -1638,7 +1638,7 @@ start:
         li r27, 109
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd1122334455667788ffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xffffffffffffffffffffffffffffffff
         li r26, 0xff096691234abcdef55aa1100000001
         cas.32 r19, [r21], r25, r26
@@ -1654,7 +1654,7 @@ start:
         li r27, 110
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233445566778800000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xffffffffffffffffffffffff00000000
         li r26, 0xff096691234abcdef55aa1100000007
         cas.32 r19, [r21], r25, r26
@@ -1670,7 +1670,7 @@ start:
         li r27, 111
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233440000000000000005
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x1234abcdef55aa110000000000000005
         li r26, 0x1234abcdef55aa110000000000000009
         cas.64 r19, [r21], r25, r26
@@ -1686,7 +1686,7 @@ start:
         li r27, 112
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233440000000000000005
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x1234abcdef55aa110000000000000006
         li r26, 0x1234abcdef55aa110000000000000009
         cas.64 r19, [r21], r25, r26
@@ -1702,7 +1702,7 @@ start:
         li r27, 113
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233448000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x1234abcdef55aa118000000000000000
         li r26, 0x0
         cas.64 r19, [r21], r25, r26
@@ -1718,7 +1718,7 @@ start:
         li r27, 114
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd11223344ffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xffffffffffffffffffffffffffffffff
         li r26, 0x1234abcdef55aa110000000000000001
         cas.64 r19, [r21], r25, r26
@@ -1734,7 +1734,7 @@ start:
         li r27, 115
         li r21, ATOMIC_BOX
         li r22, 0xaabbccdd112233440000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xffffffffffffffff0000000000000000
         li r26, 0x1234abcdef55aa110000000000000007
         cas.64 r19, [r21], r25, r26
@@ -1750,7 +1750,7 @@ start:
         li r27, 116
         li r21, ATOMIC_BOX
         li r22, 0x5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x5
         li r26, 0x9
         cas r19, [r21], r25, r26
@@ -1766,7 +1766,7 @@ start:
         li r27, 117
         li r21, ATOMIC_BOX
         li r22, 0x5
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x6
         li r26, 0x9
         cas r19, [r21], r25, r26
@@ -1782,7 +1782,7 @@ start:
         li r27, 118
         li r21, ATOMIC_BOX
         li r22, 0x80000000000000000000000000000000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x80000000000000000000000000000000
         li r26, 0x0
         cas r19, [r21], r25, r26
@@ -1798,7 +1798,7 @@ start:
         li r27, 119
         li r21, ATOMIC_BOX
         li r22, 0xffffffffffffffffffffffffffffffff
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0xffffffffffffffffffffffffffffffff
         li r26, 0x1
         cas r19, [r21], r25, r26
@@ -1814,7 +1814,7 @@ start:
         li r27, 120
         li r21, ATOMIC_BOX
         li r22, 0x0
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x0
         li r26, 0x7
         cas r19, [r21], r25, r26
@@ -1830,7 +1830,7 @@ start:
         li r27, 121
         li r21, ATOMIC_BOX - 0x20
         li r22, 0xaabbccdd112233440000000000000042
-        st128 r22, [r21 + 0x20]
+        st128 [r21 + 0x20], r22
         li r25, 0x42
         li r26, 0x77
         cas.64 r19, [r21 + 0x20], r25, r26
@@ -1852,7 +1852,7 @@ start:
         li r27, 122
         li r21, ATOMIC_BOX
         li r22, 0x10000000000002000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x10000000000002000
         li r26, 0x20000000000003000
         cas r19, [r21], r25, r26
@@ -1867,7 +1867,7 @@ start:
         # test 123: fat-pointer CAS: stale (A,1) loses against (A,3)
         li r27, 123
         li r22, 0x30000000000002000
-        st128 r22, [r21]
+        st128 [r21], r22
         li r25, 0x10000000000002000    # stale snapshot
         li r26, 0x40000000000003000
         cas r19, [r21], r25, r26
@@ -1883,6 +1883,6 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt

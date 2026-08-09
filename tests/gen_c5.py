@@ -357,7 +357,7 @@ def gen_imm_edges():
     # LAP: la (LAP-based, backward label) == absolute address via li
     begin("lap: pc-relative address == absolute")
     emit("        la r19, start")
-    emit("        li r20, start")
+    emit("        la.abs r20, start")
     emit("        cmpeq p1, r19, r20")
     emit("        (!p1) b fail")
     emit()
@@ -452,7 +452,7 @@ def generate():
     emit("        li r0, 0x600D")
     emit("        halt")
     emit("fail:")
-    emit("        st.64 r27, [r24]")
+    emit("        st.64 [r24], r27")
     emit("        mov r0, r27")
     emit("        halt")
     emit()

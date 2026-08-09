@@ -2251,10 +2251,10 @@ start:
         # ==== reserved rounding mode: MTSR is permitted; the NEXT FP
         # op that rounds traps ILLEGAL (ISA-SPEC 10.3, SPEC-ISSUES 19)
         li r27, 910
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
         li r19, 12345
-        st.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]  # sentinel
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], r19  # sentinel
         li r22, 5 * RM_UNIT       # rm=5 (reserved)
         mtsr fcsr, r22            # must NOT trap here
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
@@ -2270,7 +2270,7 @@ rm5_site:
         (!p1) b fail
         li r27, 912
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, rm5_site
+        la.abs r20, rm5_site
         cmpeq p1, r22, r20
         (!p1) b fail
         mtsr fcsr, zero           # back to RNE, flags clear
@@ -2312,16 +2312,16 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
         # trap handler: record cause/epc, skip the faulting instruction
 h_rec:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0

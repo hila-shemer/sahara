@@ -37,7 +37,7 @@ start:
 # phase runs with interrupts disabled, so every delivery below is also
 # an IE=0 fault-delivery check.
 
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
 
         # -- A1: ILLEGAL raw word: cause, epc, no baddr contract; -------
@@ -50,7 +50,7 @@ a1_site:
         (!p1) b fail
         li r27, 2
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, a1_site
+        la.abs r20, a1_site
         cmpeq p1, r22, r20
         (!p1) b fail
         li r27, 3                 # status seen by handler: S=1, TL=1
@@ -78,13 +78,13 @@ a2_site:
         (!p1) b fail
         li r27, 7
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, a2_site
+        la.abs r20, a2_site
         cmpeq p1, r22, r20
         (!p1) b fail
 
         # -- A3: UNALIGNED store (4-byte at +2) ------------------------
         li r27, 8
-        st.32 r19, [r24 + SENTINEL_BOX + 2 - FAIL_ADDR]    # ea 0x71a
+        st.32 [r24 + SENTINEL_BOX + 2 - FAIL_ADDR], r19    # ea 0x71a
         lds.64 r22, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r22, CAUSE_UNALIGNED
         (!p1) b fail
@@ -102,7 +102,7 @@ a4_site:
         (!p1) b fail
         li r27, 11
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, a4_site
+        la.abs r20, a4_site
         cmpeq p1, r22, r20
         (!p1) b fail
 
@@ -127,9 +127,9 @@ a4_site:
         #    bank 1 = second fault, bank 0 intact with the first;
         #    IRET at TL=2 selects bank 1
         li r27, 14
-        li r21, h_bad             # handler that faults immediately
+        la.abs r21, h_bad             # handler that faults immediately
         mtsr vbase, r21
-        li r21, h_df
+        la.abs r21, h_df
         mtsr dfbase, r21
 b1_site:
         lds.64 r19, [r24 + SENTINEL_BOX + 1 - FAIL_ADDR]   # first fault
@@ -147,9 +147,9 @@ b1_cont:
 
         # -- B2: SYSCALL at TL=1 double-faults (spec consequence) ------
         li r27, 16
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21           # must NOT be used by this delivery
-        li r21, h_df2
+        la.abs r21, h_df2
         mtsr dfbase, r21
         li r21, STATUS_S + STATUS_TL_UNIT
         mtsr status, r21          # claim TL=1 by software consent
@@ -164,7 +164,7 @@ b2_cont:
         #    handler saves bank 0 + status, TL<-0, takes a legitimate
         #    nested fault, restores, IRETs twice
         li r27, 17
-        li r21, h_tl
+        la.abs r21, h_tl
         mtsr vbase, r21
 b3_site:
         lds.64 r19, [r24 + SENTINEL_BOX + 1 - FAIL_ADDR]   # outer fault
@@ -183,7 +183,7 @@ b3_site:
         (!p1) b fail
         li r27, 20
         lds.64 r22, [r24 + TLSAVE_EPC - FAIL_ADDR]
-        li r20, b3_site
+        la.abs r20, b3_site
         cmpeq p1, r22, r20
         (!p1) b fail
 
@@ -191,10 +191,10 @@ b3_site:
 
         # -- T1: IE=0 defers the timer ---------------------------------
         li r27, 21
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
         li r19, 12345
-        st.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]  # sentinel
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], r19  # sentinel
         li r21, 1
         mtsr timecmp, r21         # cycle >= 1 already: pending, masked
         nop
@@ -206,7 +206,7 @@ b3_site:
 
         # -- T2: enabling IE delivers; epc = next instruction ----------
         li r27, 22
-        li r21, h_timer
+        la.abs r21, h_timer
         mtsr vbase, r21
         li r21, STATUS_S + STATUS_IE
         mtsr status, r21          # IE=1; pending timer delivers at the
@@ -217,7 +217,7 @@ t2_next:                          # next boundary; epc = t2_next
         (!p1) b fail
         li r27, 23
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, t2_next
+        la.abs r20, t2_next
         cmpeq p1, r22, r20
         (!p1) b fail
         li r21, STATUS_S          # IE<-0 again for what follows
@@ -237,7 +237,7 @@ t2_next:                          # next boundary; epc = t2_next
 
         # -- T4: WFI with IE=1: delivery, epc = instruction after WFI --
         li r27, 25
-        li r21, h_timer
+        la.abs r21, h_timer
         mtsr vbase, r21
         mfsr r19, cycle
         add r20, r19, 200
@@ -251,7 +251,7 @@ t4_next:
         (!p1) b fail
         li r27, 26
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, t4_next
+        la.abs r20, t4_next
         cmpeq p1, r22, r20
         (!p1) b fail
         li r21, STATUS_S
@@ -263,16 +263,16 @@ t4_next:
 # would add a cycle). IE=0, timecmp=0: nothing else can interfere.
 
         li r27, 27
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
         li r19, 12345
-        st.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]  # sentinel again
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], r19  # sentinel again
         li r21, 7
         cmpeq p2, r21, 8          # p2 = 0 for the squash block
         mfsr r19, cycle
         .quad RAW_ILLEGAL_P2      # (p2) ILLEGAL      — squashed
         (p2) lds.64 r22, [r24 + SENTINEL_BOX + 1 - FAIL_ADDR]  # unaligned
-        (p2) st.64 r22, [r24 + SENTINEL_BOX + 1 - FAIL_ADDR]   # unaligned
+        (p2) st.64 [r24 + SENTINEL_BOX + 1 - FAIL_ADDR], r22   # unaligned
         (p2) syscall              #                   — squashed
         (p2) mtsr cycle, r21      # would be PRIV     — squashed
         mfsr r20, cycle
@@ -289,11 +289,11 @@ t4_next:
 
         # -- U1: enter user mode: IRET at TL=0 (saturation) with PS=0 --
         li r27, 29
-        li r21, h_user
+        la.abs r21, h_user
         mtsr vbase, r21
         li r19, 0
-        st.64 r19, [r24 + PRIV_COUNT_SLOT - FAIL_ADDR]
-        li r21, user_entry
+        st.64 [r24 + PRIV_COUNT_SLOT - FAIL_ADDR], r19
+        la.abs r21, user_entry
         mtsr epc0, r21
         li r21, STATUS_S          # PS=0, PIE=0, TL=0
         mtsr status, r21
@@ -332,7 +332,7 @@ u_cont:
         # -- U2: supervisor again; syscall-from-user bookkeeping -------
         li r27, 31
         lds.64 r22, [r24 + USER_EPC_SLOT - FAIL_ADDR]
-        li r20, u_sys_site        # epc = the SYSCALL instruction itself
+        la.abs r20, u_sys_site        # epc = the SYSCALL instruction itself
         cmpeq p1, r22, r20
         (!p1) b fail
         li r27, 32                # status at delivery: S=1, PS=0 (came
@@ -345,7 +345,7 @@ pass:
         li r0, PASS_MAGIC
         halt
 fail:
-        st.64 r27, [r24]
+        st.64 [r24], r27
         mov r0, r27
         halt
 
@@ -354,13 +354,13 @@ fail:
         # record bank-0 fields + status, skip the faulting instruction
 h_rec:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TRAP_BADDR_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_BADDR_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + TRAP_STATUS_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_STATUS_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0
@@ -369,9 +369,9 @@ h_rec:
         # timer handler: record cause/epc, disarm, return
 h_timer:
         mfsr k0, cause0
-        st.64 k0, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], k0
         mfsr k0, epc0
-        st.64 k0, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + TRAP_EPC_SLOT - FAIL_ADDR], k0
         mtsr timecmp, zero        # disarm: timecmp = 0 never pends
         iret                      # epc unchanged: resume where deferred
 
@@ -396,7 +396,7 @@ h_df:
         (!p1) b fail
         li r27, 42
         mfsr k0, epc1
-        li r26, h_bad
+        la.abs r26, h_bad
         cmpeq p1, k0, r26
         (!p1) b fail
         li r27, 43
@@ -409,10 +409,10 @@ h_df:
         (!p1) b fail
         li r27, 45
         mfsr k0, epc0
-        li r26, b1_site
+        la.abs r26, b1_site
         cmpeq p1, k0, r26
         (!p1) b fail
-        li r26, b1_cont
+        la.abs r26, b1_cont
         mtsr epc1, r26            # IRET at TL=2 must use bank 1
         iret
 
@@ -424,10 +424,10 @@ h_df2:
         (!p1) b fail
         li r27, 47
         mfsr k0, epc1
-        li r26, b2_site
+        la.abs r26, b2_site
         cmpeq p1, k0, r26
         (!p1) b fail
-        li r26, b2_cont
+        la.abs r26, b2_cont
         mtsr epc1, r26
         iret
 
@@ -435,14 +435,14 @@ h_df2:
         # TL<-0, deliberately fault (handled by h_rec), restore, IRET.
 h_tl:
         mfsr k0, epc0
-        st.64 k0, [r24 + TLSAVE_EPC - FAIL_ADDR]
+        st.64 [r24 + TLSAVE_EPC - FAIL_ADDR], k0
         mfsr k0, cause0
-        st.64 k0, [r24 + TLSAVE_CAUSE - FAIL_ADDR]
+        st.64 [r24 + TLSAVE_CAUSE - FAIL_ADDR], k0
         mfsr k0, baddr0
-        st.64 k0, [r24 + TLSAVE_BADDR - FAIL_ADDR]
+        st.64 [r24 + TLSAVE_BADDR - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + TLSAVE_STATUS - FAIL_ADDR]
-        li k0, h_rec
+        st.64 [r24 + TLSAVE_STATUS - FAIL_ADDR], k0
+        la.abs k0, h_rec
         mtsr vbase, k0
         li k0, STATUS_S           # TL<-0 by software consent
         mtsr status, k0
@@ -471,16 +471,16 @@ h_user:
         li r26, PRIV_COUNT_SLOT
         lds.64 k0, [r26]
         add k0, k0, 1
-        st.64 k0, [r26]
+        st.64 [r26], k0
         mfsr k0, epc0
         add k0, k0, 8
         mtsr epc0, k0
         iret
 h_user_sys:
         mfsr k0, epc0
-        st.64 k0, [r24 + USER_EPC_SLOT - FAIL_ADDR]
+        st.64 [r24 + USER_EPC_SLOT - FAIL_ADDR], k0
         mfsr k0, status
-        st.64 k0, [r24 + USER_STATUS_SLOT - FAIL_ADDR]
+        st.64 [r24 + USER_STATUS_SLOT - FAIL_ADDR], k0
         li k0, STATUS_S           # supervisor, TL=0, IE=0
         mtsr status, k0
         b u_cont
