@@ -124,17 +124,101 @@ static void meta_check_grammar(const char *text, uint64_t off)
             malformed(off, "META missing a mandatory v1 key");
 }
 
+static uint64_t get_u64(const uint8_t *b)
+{
+    uint64_t v = 0;
+    for (unsigned i = 0; i < 8u; i++)
+        v |= (uint64_t)b[i] << (8u * i);
+    return v;
+}
+
+/* Double the event array; the old allocation is returned to the host. */
+static SeEvRec *ev_grow(SeEvRec *evs, uint64_t *cap, uint64_t count)
+{
+    if (count < *cap)
+        return evs;
+    uint64_t ncap = *cap ? *cap * 2u : 64u;
+    SeEvRec *nv = se_host_alloc((size_t)ncap * sizeof *nv);
+    if (*cap) {
+        memcpy(nv, evs, (size_t)count * sizeof *evs);
+        se_host_free(evs, (size_t)*cap * sizeof *evs);
+    }
+    *cap = ncap;
+    return nv;
+}
+
+/* An EVENT record's device index and inner payload, validated per
+ * devspec/trace.md 4 against the reference device table (index 0
+ * display, 1 kbd, 2 mouse, 3 nic -- the boot.md V1 order): unknown
+ * index or a payload violating its device's encoding is a malformed
+ * trace (4.5 / 2.4 class 2). The drop flag VALUE is not checked --
+ * replay recomputes it (5.4) -- but its reserved bits are. inner is
+ * the payload bytes at head + 20 (at most 32: both admitted types fit;
+ * validated before anything is copied out of head's 52 bytes). */
+static void validate_event(uint64_t off, uint64_t device, uint32_t inner,
+                           const uint8_t *p)
+{
+    switch (device) {
+    case SE_DEVIDX_DISPLAY: {
+        if (inner != 32u)
+            malformed(off, "resize payload is not 32 bytes (trace.md 4.4)");
+        uint64_t w = get_u64(p), h = get_u64(p + 8u);
+        uint64_t s = get_u64(p + 16u), fmt = get_u64(p + 24u);
+        /* Geometry must satisfy display.md 3.4 at all times; a feed
+         * publishing an invalid mode is not a v1 trace. */
+        uint64_t win = se_lo64(SE_PLAT_PIXBUF_SIZE);
+        if (fmt != 1u)
+            malformed(off, "resize format is not 1 (trace.md 4.4)");
+        if (w == 0u || h == 0u || w > 0xFFFFFFFFull || h > 0xFFFFFFFFull)
+            malformed(off, "resize width/height not nonzero 32-bit "
+                           "(display.md 3.4)");
+        if (s < 4u * w || s % 16u != 0u)
+            malformed(off, "resize stride under 4*width or not 16-aligned "
+                           "(display.md 3.4)");
+        if (h > win / s || w > win / s)
+            malformed(off, "resize frame exceeds the pixel window "
+                           "(display.md 3.4)");
+        return;
+    }
+    case SE_DEVIDX_KBD:
+    case SE_DEVIDX_MOUSE: {
+        if (inner != 9u)
+            malformed(off, "input event payload is not 9 bytes "
+                           "(trace.md 4.1/4.2)");
+        uint64_t word = get_u64(p);
+        if (p[8] & 0xFEu)
+            malformed(off, "input event flags bits 7:1 set");
+        if (device == SE_DEVIDX_KBD ? (word >> 33) != 0u
+                                    : (word >> 40) != 0u)
+            malformed(off, "input event word reserved bits set");
+        return;
+    }
+    case SE_DEVIDX_NIC:
+        /* Valid per trace.md 4.3, but the NIC RX model (64-frame
+         * queue, buffer exposure -- nic.md 4) does not exist yet;
+         * consuming the record would silently drop the frame, so fail
+         * loud instead (SPEC-ISSUES 35 records the NIC gap). */
+        die("--replay contains NIC EVENT records; NIC RX injection not "
+            "implemented");
+        return;
+    default:
+        malformed(off, "EVENT device index outside the reference device "
+                       "table (trace.md 4.5)");
+    }
+}
+
 /* Replay input validation: a strict trace read per devspec/trace.md
  * 2.4 + 5.1. Record 0 must be a META record whose trace/encoding/
  * image_sha256 keys match this run; any malformed record (bad reserved
- * bytes, type, fixed payload length, EVENT inner length, EXEC flag
- * bits 7:3, duplicate META, decreasing cycle) is fatal; a torn tail
- * (killed-emulator artifact) keeps the complete-record prefix and gets
- * a stderr diagnostic with the offset and bytes discarded. EVENT
- * records are still rejected outright: the device phase that would
- * consume them does not exist yet (they would silently vanish
- * otherwise -- loud failure instead). */
-static void validate_replay(const char *path, const char *sha_hex)
+ * bytes, type, fixed payload length, EVENT inner length or encoding,
+ * EXEC flag bits 7:3, duplicate META, decreasing cycle) is fatal; a
+ * torn tail (killed-emulator artifact) keeps the complete-record
+ * prefix and gets a stderr diagnostic with the offset and bytes
+ * discarded. EVENT records are collected -- they are the replay's sole
+ * input source (5.2) -- and returned in file order for the CPU's
+ * boundary phase; *count_out receives how many. */
+static SeEvRec *validate_replay(const char *path, const char *sha_hex,
+                                uint64_t *count_out)
 {
     /* Fixed payload lengths per trace.md 2.1; 0 = variable. */
     static const uint32_t fixed_plen[8] = { 0, 50u, 41u, 41u, 49u, 0, 41u,
@@ -145,6 +229,8 @@ static void validate_replay(const char *path, const char *sha_hex)
     uint8_t hdr[8];
     uint64_t off = 0, records = 0, prev_cycle = 0;
     bool saw_meta = false;
+    SeEvRec *evs = NULL;
+    uint64_t ev_cap = 0, ev_count = 0;
     for (;;) {
         size_t got = fread(hdr, 1u, 8u, f);
         if (got == 0u)
@@ -228,9 +314,7 @@ static void validate_replay(const char *path, const char *sha_hex)
                     off, 8u + total);
             break;
         }
-        uint64_t cycle = 0;
-        for (unsigned i = 0; i < 8u; i++)
-            cycle |= (uint64_t)head[i] << (8u * i);
+        uint64_t cycle = get_u64(head);
         if (records > 1u && cycle < prev_cycle)
             malformed(off, "record cycle decreases");
         prev_cycle = cycle;
@@ -242,8 +326,14 @@ static void validate_replay(const char *path, const char *sha_hex)
                 inner |= (uint32_t)head[16u + i] << (8u * i);
             if (inner != plen - 20u)
                 malformed(off, "EVENT inner payload_len mismatch");
-            die("--replay contains EVENT records; device phase not "
-                "implemented yet");
+            uint64_t device = get_u64(head + 8u);
+            validate_event(off, device, inner, head + 20u);
+            evs = ev_grow(evs, &ev_cap, ev_count);
+            SeEvRec *e = &evs[ev_count++];
+            e->cycle = cycle;
+            e->device = (uint8_t)device;
+            e->len = (uint8_t)inner;
+            memcpy(e->payload, head + 20u, inner);
         }
         records++;
         off += 8u + plen;
@@ -251,6 +341,8 @@ static void validate_replay(const char *path, const char *sha_hex)
     if (!saw_meta)
         die("--replay file has no META record");
     fclose(f);
+    *count_out = ev_count;
+    return evs;
 }
 
 static void meta_record(SeTrace *tr, const char *image_arg,
@@ -338,8 +430,10 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < 32u; i++)
         snprintf(sha_hex + 2u * i, 3u, "%02x", sha[i]);
 
+    SeEvRec *evs = NULL;
+    uint64_t ev_count = 0;
     if (replay_path)
-        validate_replay(replay_path, sha_hex);
+        evs = validate_replay(replay_path, sha_hex, &ev_count);
 
     SeTrace tr = { .f = NULL, .level = level };
     if (trace_path) {
@@ -358,6 +452,8 @@ int main(int argc, char **argv)
     SeCpu *cpu = se_host_alloc(sizeof *cpu); /* one startup allocation */
     SeCpu_reset(cpu, &mem, &tr);
     cpu->dev = &dev;
+    cpu->ev = evs;
+    cpu->ev_count = ev_count;
     cpu->check_invtp = check_invtp;
     cpu->devorder_depth = devorder;
     if (devorder != 0u)
