@@ -43,6 +43,9 @@ enum {
 void SeDev_reset(SeDev *d)
 {
     memset(d, 0, sizeof *d);
+    d->disp_width = DISP_REF_WIDTH;
+    d->disp_height = DISP_REF_HEIGHT;
+    d->disp_stride = DISP_REF_STRIDE;
 }
 
 static SeDevAcc acc_fault(void)
@@ -60,9 +63,9 @@ SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp, uint64_t off)
     switch (sp) {
     case SE_SPACE_DISPLAY:
         switch (off) {
-        case DISP_WIDTH: return acc_val(DISP_REF_WIDTH);
-        case DISP_HEIGHT: return acc_val(DISP_REF_HEIGHT);
-        case DISP_STRIDE: return acc_val(DISP_REF_STRIDE);
+        case DISP_WIDTH: return acc_val(d->disp_width);
+        case DISP_HEIGHT: return acc_val(d->disp_height);
+        case DISP_STRIDE: return acc_val(d->disp_stride);
         case DISP_FORMAT: return acc_val(DISP_REF_FORMAT);
         case DISP_IRQ_STATUS: return acc_val(d->display_irq_status);
         default:
@@ -71,18 +74,24 @@ SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp, uint64_t off)
             return acc_fault(); /* PRESENT/IRQ_ACK are write-only (D-03) */
         }
     case SE_SPACE_KBD:
-    case SE_SPACE_MOUSE:
+    case SE_SPACE_MOUSE: {
+        SeInputQ *q = sp == SE_SPACE_KBD ? &d->kbd : &d->mouse;
         switch (off) {
-        case INPUT_DATA:
-            /* Pop the oldest event; the queues are empty until EVENT
-             * injection lands, so this is always the all-ones empty
-             * sentinel (input.md rule 4), idempotently. */
-            return acc_val(~0ull);
+        case INPUT_DATA: {
+            if (q->count == 0u)
+                return acc_val(~0ull); /* empty sentinel, no effect
+                                          (input.md rule 4) */
+            uint64_t w = q->ev[q->head];
+            q->head = (q->head + 1u) % SE_INPUT_QDEPTH;
+            q->count -= 1u;
+            return acc_val(w); /* pop the oldest (FIFO, input.md 4.3) */
+        }
         case INPUT_STATUS:
-            return acc_val(0); /* queue depth */
+            return acc_val(q->count); /* queue depth */
         default:
             return acc_fault(); /* unlisted offset (input.md rule 3) */
         }
+    }
     case SE_SPACE_NIC:
         switch (off) {
         case NIC_TX_STATUS: return acc_val(0); /* always 0 in v1.0 */
@@ -153,12 +162,33 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
     }
 }
 
+bool SeDev_inject_input(SeDev *d, bool kbd, uint64_t word)
+{
+    SeInputQ *q = kbd ? &d->kbd : &d->mouse;
+    if (q->count == SE_INPUT_QDEPTH)
+        return true; /* drop-newest (input.md 4.2): never visible via
+                        DATA/STATUS, never contributes to EXTINT */
+    q->ev[(q->head + q->count) % SE_INPUT_QDEPTH] = word;
+    q->count += 1u;
+    return false;
+}
+
+void SeDev_inject_resize(SeDev *d, uint64_t width, uint64_t height,
+                         uint64_t stride)
+{
+    d->disp_width = width;
+    d->disp_height = height;
+    d->disp_stride = stride;
+    d->display_irq_status |= 1u; /* idempotent if already set (6.2) */
+}
+
 bool SeDev_ext_pending(const SeDev *d)
 {
-    /* Keyboard/mouse queue non-empty would OR in here; the queues do
-     * not exist yet (always empty), so only the display and NIC
-     * conditions are live (PLATFORM-SPEC 3). */
-    return d->display_irq_status != 0u || d->nic_rx_len != 0u;
+    /* Level-triggered OR of every device pending condition
+     * (PLATFORM-SPEC 3): input queue non-empty, display IRQ_STATUS
+     * nonzero, NIC frame exposed. */
+    return d->kbd.count != 0u || d->mouse.count != 0u ||
+           d->display_irq_status != 0u || d->nic_rx_len != 0u;
 }
 
 /* ---------------------------------------------------- device table */

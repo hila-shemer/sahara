@@ -126,12 +126,62 @@ static void test_registers(void)
     RWC_ASSERT(!SeDev_ext_pending(&d));
 }
 
+static void test_input_queue(void)
+{
+    SeDev d;
+    SeDev_reset(&d);
+    /* FIFO pop order and depth (input.md 4.3), kbd/mouse independent. */
+    RWC_ASSERT(!SeDev_inject_input(&d, true, 0x100000004ull));
+    RWC_ASSERT(!SeDev_inject_input(&d, true, 0x4ull));
+    RWC_ASSERT(!SeDev_inject_input(&d, false, 0xC80064ull));
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 8u).val == 2u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_MOUSE, 8u).val == 1u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 0u).val == 0x100000004ull);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 0u).val == 0x4ull);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 0u).val == ~0ull);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_MOUSE, 0u).val == 0xC80064ull);
+    RWC_ASSERT(!SeDev_ext_pending(&d));
+    /* Overflow at exactly 256: the 257th is dropped-newest and the
+     * queue keeps its 256 (input.md 8.5 shape). */
+    for (unsigned i = 0; i < 256u; i++)
+        RWC_ASSERT(!SeDev_inject_input(&d, true, i));
+    RWC_ASSERT(SeDev_inject_input(&d, true, 999u));
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 8u).val == 256u);
+    for (unsigned i = 0; i < 256u; i++)
+        RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 0u).val == i);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 0u).val == ~0ull);
+}
+
+static void test_resize_inject(void)
+{
+    SeDev d;
+    SeDev_reset(&d);
+    /* Atomic register update + sticky IRQ bit; ack clears; a second
+     * event re-asserts (display.md 6.2/6.4, V5 shape). */
+    SeDev_inject_resize(&d, 800u, 600u, 3200u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 8u).val == 800u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 16u).val == 600u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 24u).val == 3200u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 40u).val == 1u);
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 48u, 1u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 40u).val == 0u);
+    RWC_ASSERT(!SeDev_ext_pending(&d));
+    SeDev_inject_resize(&d, 640u, 480u, 2560u);
+    SeDev_inject_resize(&d, 640u, 480u, 2560u); /* idempotent IRQ bit */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 40u).val == 1u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 8u).val == 640u);
+}
+
 int main(void)
 {
     test_devtable_v1();
     test_mac_packing();
     test_classify();
     test_registers();
+    test_input_queue();
+    test_resize_inject();
     printf("test_dev: all passed\n");
     return 0;
 }
