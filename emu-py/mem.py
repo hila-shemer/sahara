@@ -149,6 +149,17 @@ class PhysMap:
         if dev is not None:
             if pa + n > dev.base + dev.size:
                 raise AccessError(pa)
+            # PROBLEMS.md P9 / DECISIONS.md D10: drain unconditionally,
+            # before the device sees the access, even if dev.store then
+            # faults. A successful device store must see the queue
+            # already drained (test_devorder_device_store_is_release_drain
+            # pins this: the drain is observable *at* store time, so it
+            # cannot be deferred until after dev.store returns). Devices
+            # validate offset/size/value inside store() itself, so
+            # whether a given access will fault is not known until it is
+            # attempted — there is no way to drain only on eventual
+            # success without that visibility. See D10 for why draining
+            # unconditionally is also correct, not just expedient.
             self.drain()                    # release fence: rule 9.2(1)
             dev.store(pa - dev.base, n, val)
             return dev
