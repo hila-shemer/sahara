@@ -4442,7 +4442,7 @@ start:
         # test 510: lap: pc-relative address == absolute
         li r27, 510
         la r19, start
-        li r20, start
+        la.abs r20, start
         cmpeq p1, r19, r20
         (!p1) b fail
 

@@ -37,7 +37,7 @@ want_all=1
 declare -A want
 for t in "$@"; do want_all=0; want[$t]=1; done
 
-identical=0 diverged=0 shared_fail=0 broken=0 ran=0
+identical=0 diverged=0 shared_fail=0 broken=0 skipped=0 ran=0
 
 run_emu() {  # emu img trace flags... -> stdout to $run_out, rc in $run_rc
     local emu="$1" img="$2" trc="$3" errf="$4"; shift 4
@@ -54,20 +54,40 @@ while read -r name src rest; do
     [ $want_all -eq 1 ] || [ -n "${want[$name]:-}" ] || continue
     flags=()
     expect="$PASS_HEX"
+    events=""
     for tok in $rest; do
         case "$tok" in
             level=*) ;;
             expect=*) expect="${tok#expect=}";;
+            events=*) events="${tok#events=}";;
             *) flags+=("$tok");;
         esac
     done
     ran=$((ran+1))
+    if [ -n "$events" ] && [ "${REPLAY:-0}" != "1" ]; then
+        # EVENT-fed tests run under --replay on BOTH emulators (one
+        # shared feed file, byte-identical inputs); REPLAY=1 declares
+        # both implement it. Loud skip otherwise, never silent.
+        skipped=$((skipped+1))
+        echo "SKIP $name: EVENT-fed (needs --replay; set REPLAY=1)"
+        continue
+    fi
     img="$OUT/$name.img"
     if ! python3 "$ASM" -o "$img" "$TESTS/defs.s" "$TESTS/$src" 2>"$OUT/$name.asm.err"; then
         echo "BROKEN $name: assembly failed:"
         sed 's/^/    /' "$OUT/$name.asm.err"
         broken=$((broken+1))
         continue
+    fi
+    if [ -n "$events" ]; then
+        if ! python3 "$TESTS/events/$events" "$img" \
+                "$OUT/$name.events.trc" 2>"$OUT/$name.ev.err"; then
+            echo "BROKEN $name: event-feed generation failed:"
+            sed 's/^/    /' "$OUT/$name.ev.err"
+            broken=$((broken+1))
+            continue
+        fi
+        flags+=(--replay "$OUT/$name.events.trc")
     fi
     run_emu "$EMU_A" "$img" "$OUT/$name.A.trc" "$OUT/$name.A.err" \
         ${flags[@]+"${flags[@]}"}
@@ -138,5 +158,6 @@ done < "$TESTS/MANIFEST"
 [ $ran -gt 0 ] || die "no tests matched"
 echo
 echo "difftest: $identical identical, $diverged diverged," \
-     "$shared_fail shared failures, $broken broken (of $ran)"
+     "$shared_fail shared failures, $broken broken," \
+     "$skipped skipped (of $ran)"
 [ $((diverged + broken)) -eq 0 ] || exit 1

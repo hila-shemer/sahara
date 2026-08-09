@@ -380,7 +380,7 @@ EPILOGUE = """
         # ==== reserved rounding mode: MTSR is permitted; the NEXT FP
         # op that rounds traps ILLEGAL (ISA-SPEC 10.3, SPEC-ISSUES 19)
         li r27, 910
-        li r21, h_rec
+        la.abs r21, h_rec
         mtsr vbase, r21
         li r19, 12345
         st.64 [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR], r19  # sentinel
@@ -399,7 +399,7 @@ rm5_site:
         (!p1) b fail
         li r27, 912
         lds.64 r22, [r24 + TRAP_EPC_SLOT - FAIL_ADDR]
-        li r20, rm5_site
+        la.abs r20, rm5_site
         cmpeq p1, r22, r20
         (!p1) b fail
         mtsr fcsr, zero           # back to RNE, flags clear
