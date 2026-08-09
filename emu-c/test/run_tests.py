@@ -891,12 +891,37 @@ def test_replay_reader():
             + bytes(8) + (99).to_bytes(4, "little") + bytes(4)
         expect_reject("malformed-event-innerlen", TV2_TRC + ev,
                       b"payload_len")
-        # A well-formed EVENT is framing-valid but still refused: the
-        # device phase that would consume it does not exist yet.
-        ev = bytes([5, 0, 0, 0]) + (24).to_bytes(4, "little") + maxc \
-            + bytes(8) + (4).to_bytes(4, "little") + bytes(4)
-        expect_reject("wellformed-event-refused", TV2_TRC + ev,
-                      b"device phase")
+        # EVENT payload validation (trace.md 4): device index resolves
+        # against the fixed reference table, payload shape per type.
+        def ev_rec(device, payload):
+            return bytes([5, 0, 0, 0]) \
+                + (20 + len(payload)).to_bytes(4, "little") + maxc \
+                + device.to_bytes(8, "little") \
+                + len(payload).to_bytes(4, "little") + payload
+
+        kbd = (0x100000004).to_bytes(8, "little") + b"\x00"
+        p = replay(TV2_TRC + ev_rec(1, kbd), "wellformed-kbd.trc")
+        check("wellformed-event-accepted",
+              p.returncode == 0 and p.stdout == halt,
+              f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}")
+        expect_reject("event-device-oob", TV2_TRC + ev_rec(4, kbd),
+                      b"device index")
+        expect_reject("event-resize-bad-len", TV2_TRC + ev_rec(0, kbd),
+                      b"32 bytes")
+        resize_fmt2 = b"".join(v.to_bytes(8, "little")
+                               for v in (640, 480, 2560, 2))
+        expect_reject("event-resize-bad-format",
+                      TV2_TRC + ev_rec(0, resize_fmt2), b"format")
+        kbd_hi = (1 << 40 | 4).to_bytes(8, "little") + b"\x00"
+        expect_reject("event-kbd-reserved-word-bits",
+                      TV2_TRC + ev_rec(1, kbd_hi), b"reserved bits")
+        kbd_flags = (0x100000004).to_bytes(8, "little") + b"\x02"
+        expect_reject("event-flags-reserved-bits",
+                      TV2_TRC + ev_rec(1, kbd_flags), b"flags bits")
+        # NIC EVENTs are trace-valid (4.3) but the RX model is the one
+        # missing device piece - refused loudly, never dropped.
+        expect_reject("nic-event-refused", TV2_TRC + ev_rec(3, bytes(64)),
+                      b"NIC")
 
         # Level nesting (trace.md 5.3): filtering the level-2 trace to
         # level-1 record types must equal the level-1 trace post-META,
