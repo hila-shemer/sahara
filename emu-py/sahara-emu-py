@@ -43,10 +43,32 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
-def load_events(path):
+def load_replay(path, img_sha256):
+    """Reads a --replay feed: validates its META (trace.md 5.1 — trace,
+    encoding, image_sha256 only; level/mode/image/platform are NOT
+    checked, DECISIONS.md D13) and collects its EVENT records."""
     events = []
     with open(path, "rb") as f:
-        for typ, payload in trc.read_records(f):
+        records = trc.read_records(f)
+        try:
+            typ, payload = next(records)
+        except StopIteration:
+            raise ValueError(f"{path}: empty replay trace, missing META")
+        if typ != trc.T_META:
+            raise ValueError(f"{path}: first record is not META")
+        meta = trc.parse_meta(payload)
+        if meta.get("trace") != "1":
+            raise ValueError(
+                f"{path}: META trace={meta.get('trace')!r}, want '1'")
+        if meta.get("encoding") != E.SPEC_VERSION:
+            raise ValueError(
+                f"{path}: META encoding={meta.get('encoding')!r}, want "
+                f"{E.SPEC_VERSION!r}")
+        if meta.get("image_sha256") != img_sha256:
+            raise ValueError(
+                f"{path}: META image_sha256 does not match the loaded "
+                f"image")
+        for typ, payload in records:
             if typ == trc.T_EVENT:
                 events.append(trc.parse_event(payload))
     return events
@@ -65,14 +87,19 @@ def main(argv):
     kbd = devices.Input(devices.KBD_BASE, devices.KBD_SIZE)
     mouse = devices.Input(devices.MOUSE_BASE, devices.MOUSE_SIZE)
     mac = devices.pack_mac(devices.REFERENCE_MAC_OCTETS)
-    nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac)
     pixbuf = devices.Buffer(devices.PIXBUF_BASE, devices.PIXBUF_SIZE)
     nic_tx = devices.Buffer(devices.NIC_BASE + devices.NIC_TX_OFFSET,
                             0x10000)
     nic_rx = devices.Buffer(devices.NIC_BASE + devices.NIC_RX_OFFSET,
                             0x10000)
+    nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac, nic_rx)
     for dev in (display, kbd, mouse, nic, pixbuf, nic_tx, nic_rx):
         phys.add_device(dev)
+
+    # trace.md 4/boot.md V1: EVENT device indices are 0-based positions
+    # among the device-table *entries*, not phys.devices (which also
+    # carries the pixel/TX/RX buffer routing windows) — PROBLEMS.md P12.
+    event_devices = [display, kbd, mouse, nic]
 
     # PLATFORM-SPEC 2 device table: table entries advertise the
     # register-window base/size the table type owns (params per type),
@@ -90,7 +117,8 @@ def main(argv):
     image.write_device_table(phys, phys.ram_regions[0][1],
                              devices=dev_entries)
 
-    events = load_events(args.replay) if args.replay else []
+    img_sha256 = hashlib.sha256(img_data).hexdigest()
+    events = load_replay(args.replay, img_sha256) if args.replay else []
 
     tracer = None
     trace_file = None
@@ -105,12 +133,12 @@ def main(argv):
             ("level", args.trace_level),
             ("mode", "replay" if args.replay else "live"),
             ("image", args.image),
-            ("image_sha256", hashlib.sha256(img_data).hexdigest()),
+            ("image_sha256", img_sha256),
             ("platform", "1.0-draft"),
         ])
 
     m = machine.Machine(phys, tracer=tracer, check_invtp=args.check_invtp,
-                        events=events)
+                        events=events, event_devices=event_devices)
     try:
         outcome = m.run(maxcycles=args.maxcycles)
     except machine.CheckFail as cf:

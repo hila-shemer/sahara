@@ -63,7 +63,8 @@ class _WalkFault(Exception):
 
 
 class Machine:
-    def __init__(self, phys, tracer=None, check_invtp=False, events=()):
+    def __init__(self, phys, tracer=None, check_invtp=False, events=(),
+                 event_devices=()):
         self.phys = phys
         self.trace = tracer
         self.regs = [0] * 32
@@ -77,7 +78,15 @@ class Machine:
         self.triple_fault = False
         self.check_invtp = check_invtp
         self.invtp_cache = {}                  # (asid, vpn) -> (frame, perms)
-        self.events = sorted(events)           # [(cycle, device_idx, bytes)]
+        # [(cycle, device_idx, bytes)], stable on cycle only: events
+        # sharing a cycle must stay in feed order (trace.md 3.3 rule 1),
+        # not get reordered by comparing device_idx/payload.
+        self.events = sorted(events, key=lambda e: e[0])
+        # trace.md 4/boot.md V1: EVENT device indices are 0-based
+        # positions among the device-table entries, not phys.devices
+        # (which also carries pixel/TX/RX buffer routing windows) —
+        # PROBLEMS.md P12.
+        self.event_devices = list(event_devices)
 
     # ------------------------------------------------------------- state
     def rreg(self, i):
@@ -137,13 +146,16 @@ class Machine:
     def process_events(self):
         while self.events and self.events[0][0] <= self.cycle:
             ecycle, dev_idx, payload = self.events.pop(0)
-            if dev_idx >= len(self.phys.devices):
+            if dev_idx < 0 or dev_idx >= len(self.event_devices):
                 raise RuntimeError(
                     f"event for nonexistent device {dev_idx} at cycle "
                     f"{ecycle}")
+            # D11: apply first, then record what the device model itself
+            # decided (e.g. the recomputed drop flag) — never echo the
+            # feed's own bytes.
+            recorded = self.event_devices[dev_idx].event(payload)
             if self.trace:
-                self.trace.event(ecycle, dev_idx, payload)
-            self.phys.devices[dev_idx].event(payload)
+                self.trace.event(ecycle, dev_idx, recorded)
 
     def pending_interrupt(self):
         """Fixed priority: timer, then external (ISA-SPEC 7.5)."""

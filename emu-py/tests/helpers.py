@@ -222,6 +222,7 @@ class QueueDevice(mem_.Device):
 
     def event(self, payload):
         self.queue.append(payload)
+        return payload
 
     def pending(self):
         return bool(self.queue)
@@ -261,7 +262,7 @@ def dfbase_setup(pa=DF_PA):
 # ------------------------------------------------------------ running
 def make_machine(words, ram=1 << 24, data=None, check_invtp=False,
                  tracer=None, events=(), devorder=None, devices=(),
-                 dev_base=None):
+                 dev_base=None, event_devices=None):
     phys = mem_.PhysMap(ram, devorder=devorder, dev_base=dev_base)
     for dev in devices:
         phys.add_device(dev)
@@ -269,8 +270,10 @@ def make_machine(words, ram=1 << 24, data=None, check_invtp=False,
     phys.write_raw(E.RESET_PC, prog)
     for pa, blob in (data or []):
         phys.write_raw(pa, blob)
+    if event_devices is None:
+        event_devices = devices
     return machine.Machine(phys, tracer=tracer, check_invtp=check_invtp,
-                           events=events)
+                           events=events, event_devices=event_devices)
 
 
 def run_words(words, maxcycles=100_000, **kw):

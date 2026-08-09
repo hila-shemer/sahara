@@ -86,6 +86,19 @@ def read_records(f):
         yield typ, payload
 
 
+def parse_meta(payload):
+    """META payload -> dict of str key -> str value (trace.md 2.3.7:
+    lines 'key=value', LF-terminated)."""
+    text = payload.decode("utf-8")
+    meta = {}
+    for line in text.split("\n"):
+        if not line:
+            continue
+        key, _, val = line.partition("=")
+        meta[key] = val
+    return meta
+
+
 def parse_event(payload):
     """EVENT payload -> (cycle, device, bytes)."""
     cycle = int.from_bytes(payload[0:8], "little")

@@ -111,9 +111,13 @@ def test_mouse_same_shape_as_keyboard_but_separate_instance():
 
 # ----------------------------------------------------------------- nic
 
-def _nic():
+def _nic(rx_buffer=None):
     mac = devices.pack_mac(devices.REFERENCE_MAC_OCTETS)
-    return devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac)
+    if rx_buffer is None:
+        rx_buffer = devices.Buffer(
+            devices.NIC_BASE + devices.NIC_RX_OFFSET, 0x10000)
+    return devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac,
+                       rx_buffer)
 
 
 def test_nic_reference_mac_and_status_defaults():

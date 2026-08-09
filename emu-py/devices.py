@@ -1,15 +1,16 @@
 """Sahara headless device model: display, keyboard/mouse input, NIC.
 
-Phase 2a (the headless tranche, CURRENT_TASK.md): register windows, the
-pixel/TX/RX buffer windows, and correct *empty* queue behaviour. Event
-injection (`Device.event`) and interrupt delivery for these devices are
-phase 2b — the queues here are built empty and stay empty; nothing feeds
-them yet.
+Register windows, the pixel/TX/RX buffer windows, and event injection
+(`Device.event`) for all four devices — the queue/mailbox behaviour
+(input.md 4, display.md 6.2/6.4, nic.md 4) plus the register model of
+phase 2a.
 
 Addresses and register maps are the reference-platform defaults of
 PLATFORM-SPEC.md section 1 and devspec/display.md, devspec/input.md,
 devspec/nic.md.
 """
+
+import struct
 
 import mem
 
@@ -68,8 +69,7 @@ class Display(mem.Device):
     IRQ_ACK plus the reserved extension window (display.md 2, 4, 8).
 
     Geometry starts at the pinned reference default (SPEC-ISSUES #12)
-    and never changes in this phase: no resize event exists yet
-    (phase 2b)."""
+    and changes only via a resize event (display.md 6.2)."""
 
     OFF_PRESENT = 0x00
     OFF_WIDTH = 0x08
@@ -131,16 +131,34 @@ class Display(mem.Device):
     def pending(self):
         return self.irq_status != 0
 
+    def event(self, payload):
+        """display.md 6.2 / trace.md 4.4: 32-byte resize payload (four
+        u64: width, height, stride, format). Applied atomically: WIDTH/
+        HEIGHT/STRIDE together, then IRQ_STATUS bit 0 set (idempotent).
+        FORMAT, the pixel buffer, and the window size are untouched."""
+        if len(payload) != 32:
+            raise ValueError(
+                f"display resize EVENT payload length {len(payload)}, "
+                f"want 32")
+        width, height, stride, fmt = struct.unpack("<QQQQ", payload)
+        if fmt != 1:
+            raise ValueError(f"display resize EVENT format {fmt}, want 1")
+        self.width, self.height, self.stride = width, height, stride
+        self.irq_status |= 1
+        return payload
+
 
 class Input(mem.Device):
     """Keyboard/mouse register window: DATA (pop) / STATUS (depth),
     both read-only, 64-bit only, no other offset defined (input.md 1).
 
-    The queue starts empty and stays empty in this phase: event
-    injection is phase 2b."""
+    Same class, same rule, for both keyboard and mouse (nothing here is
+    device-specific): a 256-entry FIFO queue (input.md 4.1), drop-newest
+    on overflow (input.md 4.2)."""
 
     OFF_DATA = 0x00
     OFF_STATUS = 0x08
+    QUEUE_DEPTH = 256
 
     def __init__(self, base, size):
         super().__init__(base, size)
@@ -163,19 +181,38 @@ class Input(mem.Device):
     def pending(self):
         return bool(self.queue)
 
+    def event(self, payload):
+        """input.md 4.1/4.2, trace.md 4.1/4.2: 9-byte payload (u64
+        event word + u8 flags). The incoming flags byte is the feed's
+        own claim and is never trusted (DECISIONS.md D11): the drop
+        decision is this queue's own, recomputed from its own depth,
+        and that is what gets returned for the caller to record."""
+        if len(payload) != 9:
+            raise ValueError(
+                f"input EVENT payload length {len(payload)}, want 9")
+        word = payload[0:8]
+        dropped = len(self.queue) >= self.QUEUE_DEPTH
+        if not dropped:
+            self.queue.append(int.from_bytes(word, "little"))
+        return word + bytes([1 if dropped else 0])
+
 
 class Nic(mem.Device):
     """NIC register region only (nic.md 2.1): TX_DOORBELL/TX_STATUS/
     RX_LEN/RX_POP/MAC. The TX and RX buffers are separate `Buffer`
     device windows at +0x1_0000 / +0x2_0000 (see NIC_TX_OFFSET/
-    NIC_RX_OFFSET), instantiated alongside this one.
+    NIC_RX_OFFSET); the RX one is also passed in here so the mailbox
+    (nic.md 4.1) can write frame bytes into it directly.
 
     Scope boundary (DECISIONS.md D8): the translator (nic.md 6.3-6.9 —
     ARP/DHCP/UDP/DNS/TCP/ICMP) is not implemented. Every TX_DOORBELL
     frame therefore reaches nic.md 6.2's "matches nothing" leaf and is
     dropped silently: no reply, no event, no trap beyond the length
     check below. Do not read this as a stub for the translator; it is
-    the deliberately out-of-scope gap, tracked in D8/SPEC-ISSUES.md."""
+    the deliberately out-of-scope gap, tracked in D8/SPEC-ISSUES.md.
+
+    The RX *arrival* path (event admission, exposure, the 64-frame
+    cap) is in scope (DECISIONS.md D12) and implemented in full."""
 
     OFF_TX_DOORBELL = 0x00
     OFF_TX_STATUS = 0x08
@@ -183,10 +220,18 @@ class Nic(mem.Device):
     OFF_RX_POP = 0x18
     OFF_MAC = 0x20
 
-    def __init__(self, base, size, mac):
+    RX_CAPACITY = 64            # nic.md 4.1: 1 exposed + up to 63 queued
+
+    def __init__(self, base, size, mac, rx_buffer):
         super().__init__(base, size)
         self.mac = mac & ((1 << 48) - 1)
-        self.rx_len = 0             # no admitted frames in this phase
+        self.rx_buffer = rx_buffer
+        self.rx_len = 0
+        self.rx_queue = []      # admitted frames not yet exposed, FIFO
+
+    def _expose(self, frame):
+        self.rx_buffer.data[0:len(frame)] = frame
+        self.rx_len = len(frame)
 
     def load(self, off, size):
         if size != 8:
@@ -221,9 +266,32 @@ class Nic(mem.Device):
         if off == self.OFF_RX_POP:
             if self.rx_len == 0:
                 raise mem.AccessError(self.base + off)      # E6
-            self.rx_len = 0     # no queued frames to expose in 2a
+            if self.rx_queue:
+                self._expose(self.rx_queue.pop(0))          # nic.md 2.4/4.2
+            else:
+                self.rx_len = 0
             return
         raise mem.AccessError(self.base + off)               # E2
 
     def pending(self):
         return self.rx_len != 0
+
+    def event(self, payload):
+        """nic.md 4.1-4.4, trace.md 4.3: payload is the frame bytes
+        verbatim, exposed immediately if the mailbox is EMPTY, else
+        queued (FIFO, admission order). Overflow past the 64-frame cap
+        cannot occur in replay (nic.md 4.3) — an arrival past the cap
+        here is a malformed feed, not a drop."""
+        if len(payload) < 60 or len(payload) > 1514:
+            raise ValueError(
+                f"NIC EVENT frame length {len(payload)}, want [60, 1514]")
+        held = (1 if self.rx_len else 0) + len(self.rx_queue)
+        if held >= self.RX_CAPACITY:
+            raise ValueError(
+                "NIC EVENT arrival past the 64-frame cap: cannot occur "
+                "in a well-formed replay feed (nic.md 4.3)")
+        if self.rx_len == 0:
+            self._expose(payload)
+        else:
+            self.rx_queue.append(payload)
+        return payload
