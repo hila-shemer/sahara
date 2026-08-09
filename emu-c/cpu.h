@@ -40,6 +40,18 @@ typedef struct SeOrdEnt {
     uint8_t size;
 } SeOrdEnt;
 
+/* One replay-feed event: an EVENT record of the --replay trace, parsed
+ * and validated by main.c (devspec/trace.md 4, 5.1). Only input and
+ * resize payloads reach the CPU (main.c rejects NIC frames until an RX
+ * model exists), so the inner payload fits inline: 9 bytes for
+ * keyboard/mouse, 32 for resize. */
+typedef struct SeEvRec {
+    uint64_t cycle;
+    uint8_t device; /* 0-based device-table index (SE_DEVIDX_*) */
+    uint8_t len;
+    uint8_t payload[32];
+} SeEvRec;
+
 typedef struct SeCpu {
     se_u128 r[32];    /* r31 kept zero */
     uint8_t p[8];     /* 0/1; p[0] kept 1 */
@@ -59,6 +71,11 @@ typedef struct SeCpu {
     uint64_t devorder_depth; /* 0 = mode off */
     SeOrdEnt *ordq;          /* ring of devorder_depth entries */
     uint64_t ordq_head, ordq_count;
+    /* Replay event feed (--replay): events apply in record order at
+     * the first boundary where cycle reaches theirs (trace.md 5.2). */
+    const SeEvRec *ev; /* NULL when not replaying */
+    uint64_t ev_count;
+    uint64_t ev_next; /* first not-yet-applied index */
     SeRun state;
     char checkfail[160];
     const char *halt_note; /* stderr diagnostic for non-HALT halts */

@@ -585,8 +585,20 @@ static void wfi_wait(SeCpu *c)
         next = tc;
         have = true;
     }
-    /* Device seam: the event queue contributes candidate cycles here
-     * once devices exist. */
+    /* Replay events wake WFI at exactly their cycle (nic.md NIC-C-36's
+     * rule; input and resize events bind the same way). The woken
+     * boundary applies the event, and it always leaves EXTINT pending:
+     * a drop-newest can only happen with a full queue, which was
+     * pending already -- so the wake never resumes execution early. */
+    if (c->ev_next < c->ev_count) {
+        se_u128 ec = (se_u128)c->ev[c->ev_next].cycle;
+        if (ec <= c->cycle)
+            return; /* applies at the imminent boundary */
+        if (!have || ec < next) {
+            next = ec;
+            have = true;
+        }
+    }
     if (!have) {
         c->state = SE_RUN_HALT;
         c->halt_note = "WFI deadlock: no future event can raise an interrupt";
@@ -986,9 +998,56 @@ static void exec_insn(SeCpu *c, uint64_t insn)
         wfi_wait(c);
 }
 
+static uint64_t ev_u64(const uint8_t *b)
+{
+    uint64_t v = 0;
+    for (unsigned i = 0; i < 8u; i++)
+        v |= (uint64_t)b[i] << (8u * i);
+    return v;
+}
+
+/* The replay device phase (trace.md 3.3 rule 1, 5.2): at this boundary,
+ * apply every feed event whose cycle has been reached, in record order,
+ * to its device model, and record each as an EVENT stamped with the
+ * boundary's cycle -- before interrupt recognition, so a delivery the
+ * events cause shares their cycle and follows them in the trace. The
+ * input drop flag is recomputed by the model, never copied from the
+ * feed (trace.md 5.4). */
+static void apply_events(SeCpu *c)
+{
+    while (c->ev_next < c->ev_count &&
+           (se_u128)c->ev[c->ev_next].cycle <= c->cycle) {
+        const SeEvRec *e = &c->ev[c->ev_next];
+        c->ev_next += 1u;
+        RWC_ASSERT(c->dev != NULL); /* main.c wires both or neither */
+        uint8_t out[32];
+        memcpy(out, e->payload, e->len);
+        switch (e->device) {
+        case SE_DEVIDX_DISPLAY:
+            SeDev_inject_resize(c->dev, ev_u64(e->payload),
+                                ev_u64(e->payload + 8u),
+                                ev_u64(e->payload + 16u));
+            break;
+        case SE_DEVIDX_KBD:
+        case SE_DEVIDX_MOUSE: {
+            bool dropped = SeDev_inject_input(
+                c->dev, e->device == SE_DEVIDX_KBD, ev_u64(e->payload));
+            out[8] = dropped ? 1u : 0u;
+            break;
+        }
+        default:
+            RWC_ASSERT(0); /* main.c admits only the three above */
+        }
+        SeTrace_event(c->tr, se_lo64(c->cycle), e->device, out, e->len);
+    }
+}
+
 void SeCpu_step(SeCpu *c)
 {
     RWC_ASSERT(c->state == SE_RUN_RUNNING);
+    /* Boundary order (trace.md 3.3): events first, then interrupt
+     * recognition, then the next instruction. */
+    apply_events(c);
     /* Interrupts: between instructions only, IE = 1, timer first (7.5). */
     if (status_bits(c) & STATUS_IE) {
         if (timer_pending(c)) {
