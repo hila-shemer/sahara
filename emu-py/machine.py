@@ -157,11 +157,15 @@ class Machine:
     # ------------------------------------------------------ trap machinery
     def deliver(self, cause, epc, baddr):
         """ISA-SPEC 7.2. Consumes one cycle. TL>=2 -> triple fault: the
-        machine halts, no state is written (and no TRAP record: nothing
-        was delivered — see SPEC-ISSUES.md)."""
+        machine halts with no architectural state written, but trace.md
+        2.3.4 (SPEC-ISSUES 17) requires a final diagnostic TRAP record
+        carrying the cause/epc/baddr the third trap would have delivered,
+        tl_after=3, and the trace ends."""
         if self.tl >= 2:
             self.halted = True
             self.triple_fault = True
+            if self.trace:
+                self.trace.trap(self.cycle, E.CAUSES[cause], epc, baddr, 3)
             return
         new_tl = self.tl + 1
         bank = new_tl - 1
