@@ -279,6 +279,7 @@ def run_words(words, maxcycles=100_000, **kw):
     return m, outcome
 
 
-def run_cli(img_path, *extra):
+def run_cli(img_path, *extra, cwd=None):
     return subprocess.run([sys.executable, EMU, str(img_path), *extra],
-                          capture_output=True, text=False, timeout=120)
+                          capture_output=True, text=False, timeout=120,
+                          cwd=cwd)
