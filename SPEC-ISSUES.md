@@ -418,6 +418,17 @@ Both emulator implementations must match the readings marked
     phrasing then reads vacuously across a stall, and T-18 becomes
     satisfiable. **(emulators must match; trace.md may need a
     clarifying sentence in 3.3)**
+    *RESOLVED 2026-08-10 — the same corner was forced concurrently by
+    the live front end and fixed before this entry merged: entry 32's
+    resolution (nic.md NIC-C-36 generalized) lands the WFI event-wake
+    boundary at exactly the event's cycle on BOTH emulators (emu-c
+    wfi_wait via the frontend branch, emu-py wfi_stall in 9060f3b), so
+    the stamp equals the feed cycle and T-18 strict byte-identity
+    holds. Verified on the merged tree: the Oasis suite reports 10/10
+    with ZERO known-drift notes — replaycmp.py's strict path is live.
+    The wake rule is deliberately asymmetric with entry 20's timer
+    T+1; both are now pinned by tests (emu-py test_events.py stall
+    boundary assertion; Oasis replay-identity gate).*
 
 36. **TOOLING-SPEC 4.2 / asm.md 2.4: no `gp` register alias**
     (observation, not a demand - OS agent). SABI v0 assigns r27 the
