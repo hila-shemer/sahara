@@ -79,9 +79,14 @@ def test_event_applied_before_interrupt_recognition():
 
 def test_event_applied_during_wfi_stall():
     """WFI whose only wake source is a future replay event: virtual time
-    jumps, the event is applied (record stamped with the event's own
-    cycle), and with IE=0 execution falls through at T+1 (root
-    SPEC-ISSUES 20 accounting)."""
+    jumps and the woken boundary is EXACTLY the event's cycle (nic.md
+    NIC-C-36, all devices bind alike; root SPEC-ISSUES 32 resolution) —
+    the event applies there, its record is stamped with that same
+    cycle, and with IE=0 execution falls through at the event's cycle.
+    A wake at ec+1 would re-stamp the event one cycle later on every
+    replay generation; ec is the only fixed point. Timer wakes keep
+    their T+1 landing (root SPEC-ISSUES 20) — only event wakes bind to
+    the event's own cycle."""
     t = OrderedTracer()
     dev = QueueDevice(DEVBASE)
     prog = [asm("WFI"),
@@ -93,7 +98,7 @@ def test_event_applied_during_wfi_stall():
     assert m.regs[4] == 1
     idx = t.kinds().index("event")
     assert t.recs[idx] == ("event", 100, 0, b"w")
-    assert t.recs[idx + 1][:2] == ("exec", 101)        # T=100 -> resume T+1
+    assert t.recs[idx + 1][:2] == ("exec", 100)        # boundary == ec
 
 
 def test_event_record_binary_format_and_level0():

@@ -333,6 +333,16 @@ Both emulator implementations must match the readings marked
     future test WFIs across a feed cycle (the 7.6 jump can skip
     values), that equality no longer holds; revisit then. **(emulators
     must match)**
+    *RESOLVED 2026-08-10, forced by the live front end (emu-c
+    SPEC-ISSUES 36): a WFI woken by a feed event lands its boundary at
+    EXACTLY the event's cycle — nic.md NIC-C-36 already pinned this
+    for the NIC and all devices bind alike — so the recorded EVENT
+    equals the feed record and record->replay is a fixed point (a
+    wake at ec+1 would re-stamp the event one cycle later on every
+    replay generation). Timer wakes keep their T+1 landing (entry
+    20); the two rules are deliberately asymmetric. Both emulators
+    aligned: emu-c cpu.c wfi_wait (frontend branch), emu-py
+    machine.py wfi_stall + test_events.py boundary assertion.*
 
 33. **asm.md 8.2's file_len trim parenthetical contradicts both T4
     and trace.md TV-1: instruction bytes are never trimmed.** 8.2

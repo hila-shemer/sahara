@@ -725,28 +725,31 @@ class Machine:
         raise AssertionError(name)
 
     def wfi_stall(self):
-        """ISA-SPEC 7.6 with the freeze from root SPEC-ISSUES 20: from
-        WFI's own cycle c, virtual time jumps to T — the first cycle
-        >= c at which an interrupt can become pending — and WFI's
-        retire increment lands after the jump, so execution resumes at
-        cycle T+1. step() already added the retire increment before
-        calling here (cycle == c+1), so we compute T from c and land on
-        T+1 directly. If no future cycle can make an interrupt pending,
-        halt (deadlock is loud)."""
+        """ISA-SPEC 7.6. Two wake rules, deliberately asymmetric:
+        timer wakes land at T+1 (root SPEC-ISSUES 20 freeze: jump to
+        T = max(timecmp, c), WFI's retire increment lands after the
+        jump); event wakes land at exactly the event's cycle (nic.md
+        NIC-C-36, all devices bind alike — the woken boundary IS the
+        event's cycle, so the EVENT record a replay produces equals
+        the feed record and record->replay is a fixed point; root
+        SPEC-ISSUES 32 resolution). step() already added the retire
+        increment before calling here (cycle == c+1). If no future
+        cycle can make an interrupt pending, halt (deadlock is
+        loud)."""
         c = self.cycle - 1               # WFI's own cycle
-        candidates = []
+        wakes = []
         timecmp = self.sregs[E.SREGS["timecmp"]]
         if timecmp != 0:
-            candidates.append(max(timecmp, c))
+            wakes.append(max(timecmp, c) + 1)
         if self.phys.any_device_pending():
-            candidates.append(c)
+            wakes.append(c + 1)
         for ecycle, _d, _p in self.events:
-            candidates.append(max(ecycle, c))
+            wakes.append(max(ecycle, c + 1))
             break                        # events sorted; first is enough
-        if not candidates:
+        if not wakes:
             self.halted = True           # WFI deadlock: machine halts
             return
-        self.cycle = min(candidates) + 1
+        self.cycle = min(wakes)
         self.process_events()
 
     # -------------------------------------------------------------- run
