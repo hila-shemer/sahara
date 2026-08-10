@@ -1,0 +1,30 @@
+# bss.s - zero-initialized tail: .space/.align only, so the
+# assembler's trailing-zero trim keeps all of it out of the image file
+# (SABI 6.2). Reset guarantees RAM outside the image reads zero, and
+# these bytes ARE in the image extent - loader zero-fill covers them.
+
+        .align 16
+kglobals:                              # gp block; offsets = defs.s G_*
+        .space 160
+        .align 16
+con_nibtab:                            # 16 entries x 16B: nibble -> 4px
+        .space 256
+        .align 16
+trap_save:                             # SABI 5 canonical block area
+        .space 160
+kbd_ring:                              # 256-byte ASCII ring
+        .space 256
+sh_line:                               # shell line buffer (LINE_MAX+pad)
+        .space 128
+sh_chbuf:                              # 1-byte read target
+        .space 16
+sh_ubuf:                               # uptime compose buffer
+        .space 128
+dbg_status:                            # boot-stage word (tests assert
+        .space 8                       # the ordered MEMW sequence)
+dbg_df:                                # double-fault post-mortem: epc0,
+        .space 64                      # cause0, baddr0, epc1, cause1,
+                                       # baddr1, status
+        .align 16
+_end:                                  # heap grows UP from here (SABI
+                                       # 4.6); no allocator in M1
