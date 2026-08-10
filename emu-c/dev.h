@@ -47,6 +47,11 @@ typedef struct SeDev {
     uint64_t display_irq_status; /* bit 0: mode changed (resize) */
     SeInputQ kbd, mouse;
     uint64_t nic_rx_len; /* exposed RX frame length; 0 = none */
+    /* Set by a PRESENT store, cleared by the GUI's render pump (its
+     * coalescing hook: repaint iff a frame was presented since the
+     * last tick). Pure front-end state -- never read headless, no
+     * guest-visible effect, not in any trace record. */
+    bool present_pending;
 } SeDev;
 
 void SeDev_reset(SeDev *d);

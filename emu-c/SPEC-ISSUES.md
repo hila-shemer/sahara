@@ -376,3 +376,62 @@ they need a spec ruling more urgently than the rest.
     documented here rather than half-faked. Not a divergence risk for
     the suite: no shared test can reach live-mode RX (the harness
     injects no EVENTs and the tree's reply paths need real frames).
+
+36. **PLATFORM-SPEC 8 / trace.md 5.4 / ISA 7.6 — what a live WFI does
+    when the event feed is still open, and what cycle a WFI-woken
+    event records.** Headless `wfi_wait` jumps to the next known
+    event/timer cycle and halts on deadlock; live, "no future event"
+    is only true once the session ends, so halting is wrong. Chose,
+    per the GUI work order: with a front-end-set `live_yield` flag, a
+    WFI with no wake source returns an idle outcome — pc still at the
+    WFI, nothing retired, no records — and re-executes identically
+    once input is fed; the flag is never set headless, so `--replay`
+    and the deadlock halt are untouched. Second half, the stamp: the
+    front end stamps a WFI-woken event E = max(wfi_cycle + 1,
+    pacing target) and `wfi_wait` now wakes at a boundary of exactly
+    E (the timer keeps its frozen T+1 landing, root SPEC-ISSUES 20).
+    Root SPEC-ISSUES 32 anticipated this corner: a wake at E+1 would
+    re-stamp the event one cycle later on *every* replay generation,
+    so replay-of-a-recording could never be byte-identical across a
+    WFI stall. Stamp-at-E is the only fixed point; the trace shape is
+    EXEC(WFI)@C, EVENT@E, TRAP@E. **[divergence risk]** emu-py's
+    wfi wake may land events at E+1; no shared test WFIs across a
+    feed cycle today (root 32), so the cross-diff stays green until
+    one does — revisit root 32's "revisit then" with this reading.
+
+37. **trace.md 2.3.7 — the META `mode` value for interactive GUI
+    sessions.** The v1 catalog is closed (`live` or `replay`, no new
+    keys, no new values), and nothing says which one an interactive
+    session writes. Chose: `mode=live` — the GUI session is exactly
+    the "recording run" the live/replay pair anticipates, and the key
+    is run-variant (excluded from comparison, 5.3), so replaying a GUI
+    session with `mode=replay` in the copy compares clean. No new
+    catalog value invented.
+
+38. **Nothing anywhere pins the GUI's pacing rate.** Pacing is
+    deliberately outside the specs (the wall<->cycle map never appears
+    in semantics or the trace), but the binary still needs a default.
+    Chose: 2,000,000 cycles/s (`--hz N`, `0` = free-run) — fast enough
+    that the demo image feels instant, slow enough that a level-0
+    trace stays ~100 bytes/instruction manageable. Changing the
+    default re-times *future* recordings only; every existing trace
+    replays unchanged.
+
+39. **The GUI's default recording level.** Recording is mandatory
+    (PLATFORM-SPEC 8: a session records as it runs), but no spec picks
+    the level for a session nobody asked to trace. Chose: level 0 —
+    the cheapest *legal* level (META+EXEC+TRAP+EVENT, trace.md 3.1
+    rule 4). Deliberately did NOT invent an EVENT-only level; that is
+    entry 40's proposal, and until it lands the format is what it is.
+
+40. **Proposal: an events-only recording level.** Level 0 still costs
+    one EXEC record per retired instruction — ~58 bytes * 2 MHz =
+    over 100 MB/min of interactive session, all of it reconstructible
+    from the image plus the EVENT records alone (replay consumes only
+    EVENTs, trace.md 5.1). Proposed: a `level=e` (or similar) catalog
+    value recording META+EVENT only, defined in trace.md 2.3.7/3.1 so
+    both implementations and trace-q agree; the level-nesting rule
+    (5.3) extends naturally (filtering any trace to EVENT records
+    yields the events-only trace). Until then the GUI buffers writes
+    (1 MB stdio buffer) and pays the disk. Not implemented — the
+    format changes only by trace.md changing.

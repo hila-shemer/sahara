@@ -587,34 +587,53 @@ static void wfi_wait(SeCpu *c)
     }
     se_u128 tc = c->sreg[SREG_TIMECMP];
     bool have = false;
-    se_u128 next = 0;
+    se_u128 wake = 0; /* the boundary cycle execution resumes at */
     if (tc != 0u && tc > c0) {
-        next = tc;
+        wake = tc + 1u; /* T = tc, retire lands after the jump (root 20) */
         have = true;
     }
-    /* Replay events wake WFI at exactly their cycle (nic.md NIC-C-36's
-     * rule; input and resize events bind the same way). The woken
-     * boundary applies the event, and it always leaves EXTINT pending:
-     * a drop-newest can only happen with a full queue, which was
-     * pending already -- so the wake never resumes execution early. */
+    /* A feed event wakes WFI at a boundary stamped exactly its cycle:
+     * the recorded EVENT then equals the feed record byte-for-byte,
+     * which is what makes replaying a recording idempotent across a
+     * WFI stall -- a wake at ec+1 would re-stamp the event one cycle
+     * later on every replay generation (SPEC-ISSUES 36; root
+     * SPEC-ISSUES 32 anticipated the drift). The woken boundary
+     * applies the event, and it always leaves EXTINT pending: a
+     * drop-newest can only happen with a full queue, which was pending
+     * already -- so the wake never resumes execution early. */
     if (c->ev_next < c->ev_count) {
         se_u128 ec = (se_u128)c->ev[c->ev_next].cycle;
         if (ec <= c0) {
             c->cycle = c0 + 1u; /* applies at the imminent boundary */
             return;
         }
-        if (!have || ec < next) {
-            next = ec;
+        if (!have || ec < wake) {
+            wake = ec;
             have = true;
         }
     }
     if (!have) {
+        RWC_ASSERT(!c->live_yield); /* exec yields before a dead WFI retires */
         c->cycle = c0 + 1u;
         c->state = SE_RUN_HALT;
         c->halt_note = "WFI deadlock: no future event can raise an interrupt";
         return;
     }
-    c->cycle = next + 1u; /* T = next */
+    c->cycle = wake;
+}
+
+/* Would wfi_wait find a wake source if the WFI retired now? Evaluated
+ * at the WFI's own cycle, which is the same value wfi_wait's c0 sees
+ * after the retire increment -- the two must agree or a live WFI could
+ * yield with a wake pending (or retire into the deadlock assert). */
+static bool wfi_wake_exists(const SeCpu *c)
+{
+    if (timer_pending(c) || ext_pending(c))
+        return true;
+    se_u128 tc = c->sreg[SREG_TIMECMP];
+    if (tc != 0u && tc > c->cycle)
+        return true;
+    return c->ev_next < c->ev_count;
 }
 
 static void exec_insn(SeCpu *c, uint64_t insn)
@@ -895,6 +914,15 @@ static void exec_insn(SeCpu *c, uint64_t insn)
                 deliver(c, CAUSE_PRIV, pc, 0u);
                 return;
             }
+            if (c->live_yield && !wfi_wake_exists(c)) {
+                /* Live idle: nothing can wake this WFI yet, and the
+                 * headless deadlock halt is wrong when the event feed
+                 * is still open. Yield with nothing retired and no
+                 * records emitted; the WFI re-executes -- same cycle,
+                 * same records -- once input is fed (SPEC-ISSUES 36). */
+                c->wfi_idle = true;
+                return;
+            }
             do_wfi = true;
             break;
         default: /* OPC_HALT */
@@ -1016,13 +1044,13 @@ static uint64_t ev_u64(const uint8_t *b)
     return v;
 }
 
-/* The replay device phase (trace.md 3.3 rule 1, 5.2): at this boundary,
- * apply every feed event whose cycle has been reached, in record order,
- * to its device model, and record each as an EVENT stamped with the
- * boundary's cycle -- before interrupt recognition, so a delivery the
- * events cause shares their cycle and follows them in the trace. The
- * input drop flag is recomputed by the model, never copied from the
- * feed (trace.md 5.4). */
+/* The device phase (trace.md 3.3 rule 1, 5.2), shared by --replay and
+ * the live feed: at this boundary, apply every feed event whose cycle
+ * has been reached, in record order, to its device model, and record
+ * each as an EVENT stamped with the boundary's cycle -- before
+ * interrupt recognition, so a delivery the events cause shares their
+ * cycle and follows them in the trace. The input drop flag is
+ * recomputed by the model, never copied from the feed (trace.md 5.4). */
 static void apply_events(SeCpu *c)
 {
     while (c->ev_next < c->ev_count &&
@@ -1046,10 +1074,46 @@ static void apply_events(SeCpu *c)
             break;
         }
         default:
-            RWC_ASSERT(0); /* main.c admits only the three above */
+            RWC_ASSERT(0); /* both feeders admit only the three above */
         }
         SeTrace_event(c->tr, se_lo64(c->cycle), e->device, out, e->len);
     }
+}
+
+void SeCpu_feed(SeCpu *c, uint8_t device, const uint8_t *payload,
+                uint8_t len, uint64_t earliest_cycle)
+{
+    RWC_ASSERT(len <= sizeof c->feed[0].payload);
+    RWC_ASSERT(c->ev == NULL || c->ev == c->feed); /* never mix with --replay */
+    if (c->ev_next == c->ev_count) {
+        /* Everything queued so far was applied: reuse the array from
+         * the start instead of growing without bound over a session. */
+        c->ev_next = 0;
+        c->ev_count = 0;
+    }
+    if (c->ev_count == c->feed_cap) {
+        uint64_t ncap = c->feed_cap ? c->feed_cap * 2u : 64u;
+        SeEvRec *nf = se_host_alloc(ncap * sizeof *nf);
+        if (c->feed_cap) {
+            memcpy(nf, c->feed, c->ev_count * sizeof *nf);
+            se_host_free(c->feed, c->feed_cap * sizeof *c->feed);
+        }
+        c->feed = nf;
+        c->feed_cap = ncap;
+    }
+    uint64_t cyc = earliest_cycle;
+    if (cyc < se_lo64(c->cycle))
+        cyc = se_lo64(c->cycle); /* record what happens, never the past */
+    if (c->ev_count != 0u && c->feed[c->ev_count - 1u].cycle > cyc)
+        cyc = c->feed[c->ev_count - 1u].cycle; /* keep the feed sorted */
+    SeEvRec *e = &c->feed[c->ev_count];
+    c->ev_count += 1u;
+    e->cycle = cyc;
+    e->device = device;
+    e->len = len;
+    memcpy(e->payload, payload, len);
+    c->ev = c->feed;
+    c->wfi_idle = false; /* feeding is the wake */
 }
 
 void SeCpu_step(SeCpu *c)

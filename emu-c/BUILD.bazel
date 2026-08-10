@@ -35,6 +35,48 @@ rwc_binary(
     deps = [":core"],
 )
 
+# The interactive front end. sdl_main.c is the sanctioned SDL shim
+# carve-out (emu-c-gui-frontend-prompt.md): allow_banned drops the
+# poison header, SDL2 comes from system headers + linkopts (no BCR
+# dep), and the TU stays out of the source audits below. Everything
+# with logic in it lives in :gui_core instead.
+rwc_binary(
+    name = "sahara-gui",
+    srcs = ["gui/sdl_main.c"],
+    allow_banned = True,
+    linkopts = ["-lSDL2"],
+    deps = [
+        ":core",
+        ":gui_core",
+    ],
+)
+
+# The record->replay keystone (run-gui-tests.sh): plays the front
+# end's role through SeCpu_feed against scripted guests, no SDL.
+rwc_binary(
+    name = "gui-seam-driver",
+    srcs = ["gui/seam_driver.c"],
+    deps = [":core"],
+)
+
+# The SDL-free half of the GUI front end (translation, HID filter,
+# frame blit): full doctrine, unit-tested by test_gui. Only the SDL
+# shim below gets the carve-out.
+rwc_library(
+    name = "gui_core",
+    srcs = [
+        "gui/blit.c",
+        "gui/hid_map.c",
+        "gui/translate.c",
+    ],
+    hdrs = [
+        "gui/blit.h",
+        "gui/hid_map.h",
+        "gui/translate.h",
+    ],
+    deps = [":core"],
+)
+
 rwc_test(
     name = "test_core",
     srcs = ["test_core.c"],
@@ -56,13 +98,30 @@ rwc_test(
     deps = [":core"],
 )
 
+rwc_test(
+    name = "test_gui",
+    srcs = ["test_gui.c"],
+    tier = "short",
+    deps = [
+        ":core",
+        ":gui_core",
+    ],
+)
+
 # Post-build audits (doctrine 2.2), hand-wired: rw_audit would also wire
 # the worst-case-stack audit, which needs hand-checked bounds for this
 # binary's libc callees (fopen/fread/strtoull/...) added to rightwayc's
 # audit/libc_stack.tsv -- a rightwayc change this repo must not make
 # unilaterally. Until those rows land upstream, wire the four audits
 # that stand on their own.
-AUDIT_SRCS = glob(["*.c", "*.h", "gen/*.h"])
+#
+# gui/ splits: the SDL-free sources join the source audits; the SDL
+# shim (sdl_main.c) is the sanctioned carve-out and stays out, as does
+# the sahara-gui binary from banned_syms (SDL drags in most of libc).
+AUDIT_SRCS = glob(
+    ["*.c", "*.h", "gen/*.h", "gui/*.c", "gui/*.h"],
+    exclude = ["gui/sdl_main.c"],
+)
 
 sh_test(
     name = "audit_banned_syms",

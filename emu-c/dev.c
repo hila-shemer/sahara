@@ -115,11 +115,12 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
     case SE_SPACE_DISPLAY:
         switch (off) {
         case DISP_PRESENT:
-            /* Present a frame; the stored value is ignored (D-14). The
-             * headless front end has no output surface, so the frame's
-             * only footprint is the DEVW record the caller traces --
-             * which is what checks/c7_dev.py's D-13 snapshot diff
-             * quantifies over. */
+            /* Present a frame; the stored value is ignored (D-14).
+             * Headless the frame's only footprint is the DEVW record
+             * the caller traces -- which is what checks/c7_dev.py's
+             * D-13 snapshot diff quantifies over. The pending flag is
+             * the GUI's repaint hook and nothing else reads it. */
+            d->present_pending = true;
             return acc_val(0);
         case DISP_IRQ_ACK:
             if ((val & ~1ull) != 0u)
