@@ -373,3 +373,38 @@ Both emulator implementations must match the readings marked
     bits; enforced as written. (f) *Default output name* — "the first
     input's basename with the extension replaced" keeps the
     directory (splitext), not a path-stripping basename.
+
+35. **trace.md 5.2/T-18 vs SPEC-ISSUES 20's WFI T+1 rule: EVENT
+    records applied during a WFI stall cannot replay byte-identically**
+    (found by the OS agent - Oasis is the first guest that idles in
+    WFI with keyboard events in flight; the toolchain's own EVENT-fed
+    c7 tests poll, so the interaction was never exercised). Observed
+    on emu-c: a feed event at cycle C arriving during a WFI stall is
+    applied and stamped at the post-wake boundary T+1 = C+1 (entry
+    20's frozen "resume at T+1" reading), so record->replay re-stamps
+    it C+2, and each replay generation drifts one more cycle - the
+    execution suffix shifts with it, and where the guest reads `cycle`
+    (Oasis `uptime`) the replay is a genuinely different run. This
+    directly violates trace.md 5.2/T-18 ("replay reproduces every
+    post-META record byte-identically, EVENT records included").
+    Reading chosen for the Oasis suite, implemented in
+    os/oasis/tests/replaycmp.py: the replay-identity gate accepts
+    exactly the drift signature (EVENT pair, same device+payload,
+    cycle+1) as a loud SKIP and fails anything else; it reverts to
+    strict byte-identity the moment the emulators change.
+    *Cross-emulator addendum, same session: the two emulators in fact
+    DISAGREE on this stamp today - the Oasis smoke feed run on both
+    produced traces whose only differences (25 of 14732 records) are
+    EVENT stamps: emu-py writes the visibility cycle T (= the feed
+    cycle), emu-c writes T+1. Every EXEC/TRAP/MEMW/DEVW record is
+    byte-identical, i.e. both wake and execute identically per entry
+    20; only the stamp differs. The conformance difftest never caught
+    it because no toolchain EVENT-fed test idles in WFI. emu-py's
+    reading is also the one under which T-18 replay identity is
+    satisfiable and stable.* Suggested resolution (owner + emulator
+    agents): freeze emu-py's reading - an event applied during a WFI
+    stall is stamped with its visibility cycle T, not the post-retire
+    boundary T+1; the T-09 "same cycle as the following TRAP/EXEC"
+    phrasing then reads vacuously across a stall, and T-18 becomes
+    satisfiable. **(emulators must match; trace.md may need a
+    clarifying sentence in 3.3)**
