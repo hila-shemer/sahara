@@ -408,3 +408,11 @@ Both emulator implementations must match the readings marked
     phrasing then reads vacuously across a stall, and T-18 becomes
     satisfiable. **(emulators must match; trace.md may need a
     clarifying sentence in 3.3)**
+
+36. **TOOLING-SPEC 4.2 / asm.md 2.4: no `gp` register alias**
+    (observation, not a demand - OS agent). SABI v0 assigns r27 the
+    kernel-internal role `gp`, but the assembler's alias set is closed
+    at sp/ra/k0/zero, so Oasis writes `r27` literally and only the
+    comments say gp. Routed around per the no-toolchain-changes rule;
+    if the assembler ever revs its alias table, a `gp` alias would let
+    kernel sources read the way SABI talks about them.
