@@ -64,7 +64,7 @@ class _WalkFault(Exception):
 
 class Machine:
     def __init__(self, phys, tracer=None, check_invtp=False, events=(),
-                 event_devices=()):
+                 event_devices=(), dma=None):
         self.phys = phys
         self.trace = tracer
         self.regs = [0] * 32
@@ -87,6 +87,14 @@ class Machine:
         # (which also carries pixel/TX/RX buffer routing windows) —
         # PROBLEMS.md P12.
         self.event_devices = list(event_devices)
+        # DMA engine (devspec/dma.md): not EVENT-fed and never in
+        # event_devices — its completion is a boundary-phase step
+        # driven by cycle arithmetic alone. The doorbell needs the
+        # executing store's cycle (the DEVW stamp), so the device gets
+        # a clock callable here.
+        self.dma = dma
+        if dma is not None:
+            dma.clock = lambda: self.cycle
 
     # ------------------------------------------------------------- state
     def rreg(self, i):
@@ -296,7 +304,12 @@ class Machine:
         interrupt delivery or one instruction."""
         if self.halted:
             return
+        # Boundary order (trace.md 3.3 as refined by dma.md 7.4):
+        # events first, then DMA completion, then interrupt
+        # recognition, then the next instruction.
         self.process_events()
+        if self.dma is not None:
+            self.dma.advance(self.cycle)
         if self.stbit("IE"):
             cause = self.pending_interrupt()
             if cause is not None:
@@ -746,6 +759,15 @@ class Machine:
         for ecycle, _d, _p in self.events:
             wakes.append(max(ecycle, c + 1))
             break                        # events sorted; first is enough
+        if self.dma is not None:
+            # A bit-8 in-flight job wakes at exactly its C_done — the
+            # event rule, not timecmp's T+1 (dma.md 7.5). wake_cycle()
+            # is None for bit-8-clear jobs: they cannot deliver, so
+            # they cannot wake (root SPEC-ISSUES 42). Always > c: the
+            # boundary before this WFI already ran advance().
+            w = self.dma.wake_cycle()
+            if w is not None:
+                wakes.append(max(w, c + 1))
         if not wakes:
             self.halted = True           # WFI deadlock: machine halts
             return

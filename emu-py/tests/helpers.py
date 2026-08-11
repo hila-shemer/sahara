@@ -262,7 +262,7 @@ def dfbase_setup(pa=DF_PA):
 # ------------------------------------------------------------ running
 def make_machine(words, ram=1 << 24, data=None, check_invtp=False,
                  tracer=None, events=(), devorder=None, devices=(),
-                 dev_base=None, event_devices=None):
+                 dev_base=None, event_devices=None, with_dma=False):
     phys = mem_.PhysMap(ram, devorder=devorder, dev_base=dev_base)
     for dev in devices:
         phys.add_device(dev)
@@ -272,8 +272,17 @@ def make_machine(words, ram=1 << 24, data=None, check_invtp=False,
         phys.write_raw(pa, blob)
     if event_devices is None:
         event_devices = devices
+    dma = None
+    if with_dma:
+        # Dma needs the phys it transfers through, so the helper owns
+        # construction; the test reaches it as m.dma.
+        import devices as devices_mod
+        dma = devices_mod.Dma(devices_mod.DMA_BASE, devices_mod.DMA_SIZE,
+                              phys)
+        phys.add_device(dma)
     return machine.Machine(phys, tracer=tracer, check_invtp=check_invtp,
-                           events=events, event_devices=event_devices)
+                           events=events, event_devices=event_devices,
+                           dma=dma)
 
 
 def run_words(words, maxcycles=100_000, **kw):

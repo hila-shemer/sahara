@@ -32,6 +32,9 @@ NIC_TX_OFFSET = 0x10000
 NIC_RX_OFFSET = 0x20000
 NIC_WINDOW_SIZE = 0x30000       # registers + TX buf + RX buf = 192 KB
 
+DMA_BASE = 0x0F070000
+DMA_SIZE = 0x10000
+
 PIXBUF_BASE = 0x10000000
 PIXBUF_SIZE = 0x1000000         # 16 MB (devspec/display.md 1, reference default)
 
@@ -195,6 +198,158 @@ class Input(mem.Device):
         if not dropped:
             self.queue.append(int.from_bytes(word, "little"))
         return word + bytes([1 if dropped else 0])
+
+
+class Dma(mem.Device):
+    """DMA engine register window (devspec/dma.md): CAPS/STATUS/
+    DOORBELL/IRQ_ACK/COMP_CYCLE. Memory-to-memory COPY and FILL from a
+    64-byte descriptor latched at the doorbell; completion is cycle
+    arithmetic on the doorbell cycle (C_done = C_db + K + LEN/8),
+    applied atomically in the boundary device phase (machine.step calls
+    advance() after process_events, before interrupt recognition).
+
+    No event() — deliberately. A job is a pure function of (latched
+    descriptor, RAM at the completion boundary, doorbell cycle): no
+    EVENT feed, no host input, no trace records for the transfer
+    itself (dma.md 7). The descriptor read and the transfer go through
+    phys.read_raw/write_raw — the device-internal path that emits
+    nothing, mirroring the NIC RX-buffer fill.
+
+    `clock` is wired by Machine: a callable returning the current
+    cycle, i.e. the value stamped on the doorbell store's own DEVW
+    record. Only the doorbell consumes it."""
+
+    OFF_CAPS = 0x00
+    OFF_STATUS = 0x08
+    OFF_DOORBELL = 0x10
+    OFF_IRQ_ACK = 0x18
+    OFF_COMP_CYCLE = 0x20
+
+    # STATUS codes (dma.md 3.2)
+    IDLE, BUSY, DONE = 0, 1, 2
+    BAD_OP, BAD_FORMAT, BAD_ALIGN, BAD_RANGE = 3, 4, 5, 6
+
+    # spec-pinned constants, mirrored in CAPS (dma.md 1, 3.1, 6)
+    K = 8
+    W = 8
+    LEN_MAX = 1 << 24
+    CAPS = 1 | (3 << 8) | (K << 16) | (24 << 24)    # 0x18080301
+
+    def __init__(self, base, size, phys):
+        super().__init__(base, size)
+        self.phys = phys
+        self.clock = None               # wired by Machine
+        self.status = self.IDLE
+        self.comp_cycle = 0
+        self.irq_pending = False
+        self.op = self.src = self.dst = self.len = 0   # latched at doorbell
+
+    def load(self, off, size):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E1
+        if off == self.OFF_CAPS:
+            return self.CAPS
+        if off == self.OFF_STATUS:
+            return self.status
+        if off == self.OFF_COMP_CYCLE:
+            return self.comp_cycle
+        # DOORBELL/IRQ_ACK are write-only (E3); unlisted offsets fault
+        # in BOTH directions (E2 — no inert reserved window, root
+        # SPEC-ISSUES 40).
+        raise mem.AccessError(self.base + off)
+
+    def store(self, off, size, val):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E1
+        if off == self.OFF_DOORBELL:
+            # Access-class checks, fixed order E5 -> E6 -> E7
+            # (dma.md 2.1): DEVERR with zero device effect.
+            if self.status == self.BUSY:
+                raise mem.AccessError(self.base + off)      # E5
+            if val & 63:
+                raise mem.AccessError(self.base + off)      # E6
+            if not self.phys.in_ram(val, 64):
+                raise mem.AccessError(self.base + off)      # E7
+            self._doorbell(val, self.clock())
+            return
+        if off == self.OFF_IRQ_ACK:
+            if val != 1:
+                raise mem.AccessError(self.base + off)      # E8: 0 too
+            self.irq_pending = False    # no-op if clear: race-free
+            return
+        raise mem.AccessError(self.base + off)   # E4 read-only, or E2
+
+    def _doorbell(self, pa, cycle):
+        """dma.md 5.2 steps 2-5: latch the 64 descriptor bytes (a
+        device-internal read, no MEMR records), validate content in
+        the fixed order BAD_OP -> BAD_FORMAT -> BAD_ALIGN -> BAD_RANGE
+        (first failure wins), then arm or terminate. Content badness
+        never traps: the store retires either way."""
+        desc = self.phys.read_raw(pa, 64)
+        op, src, dst, length = struct.unpack_from("<QQQQ", desc, 0)
+        next_, r40, r48, r56 = struct.unpack_from("<QQQQ", desc, 32)
+        opcode = op & 0xFF
+        copy = opcode == 1
+
+        if opcode not in (1, 2):
+            status = self.BAD_OP        # 0 included: zeroed-RAM guard
+        elif (op >> 9) or next_ or r40 or r48 or r56:
+            status = self.BAD_FORMAT
+        elif (copy and src & 7) or dst & 7 or length & 7:
+            status = self.BAD_ALIGN     # FILL: src is a pattern
+        elif (length == 0 or length > self.LEN_MAX
+              or (copy and not self.phys.in_ram(src, length))
+              or not self.phys.in_ram(dst, length)):
+            status = self.BAD_RANGE
+        else:
+            status = self.BUSY
+
+        self.status = status
+        if status != self.BUSY:
+            # Terminal at the doorbell itself: no BUSY window, nothing
+            # written; pending rises iff the descriptor asked for it.
+            self.comp_cycle = cycle
+            if (op >> 8) & 1:
+                self.irq_pending = True
+            return
+        self.op, self.src, self.dst, self.len = op, src, dst, length
+        self.comp_cycle = cycle + self.K + length // self.W
+
+    def advance(self, cycle):
+        """The boundary device phase's completion step (dma.md 5.5):
+        the whole transfer at the first boundary with cycle >= C_done,
+        as if through an intermediate buffer — read_raw of the full
+        source range then write_raw, which is exactly memmove under
+        overlap. Sources are live RAM (sampled at completion, never a
+        doorbell-time stash). The weak-store queue must already be
+        drained here; assert, don't re-flush (D10 drains at the
+        doorbell and any later device access)."""
+        if self.status != self.BUSY or cycle < self.comp_cycle:
+            return
+        assert not self.phys.queue, \
+            "ordinary stores still queued at a DMA completion boundary"
+        if (self.op & 0xFF) == 1:
+            self.phys.write_raw(self.dst, self.phys.read_raw(self.src,
+                                                             self.len))
+        else:
+            self.phys.write_raw(self.dst,
+                                self.src.to_bytes(8, "little")
+                                * (self.len // 8))
+        self.status = self.DONE
+        if (self.op >> 8) & 1:
+            self.irq_pending = True     # the ONLY completion-path flip
+
+    def wake_cycle(self):
+        """WFI wake source (dma.md 7.5): the in-flight job's C_done,
+        but only when latched OP bit 8 is set — a bit-8-clear job
+        cannot make an interrupt pending, so it cannot end a stall
+        (root SPEC-ISSUES 42)."""
+        if self.status == self.BUSY and (self.op >> 8) & 1:
+            return self.comp_cycle
+        return None
+
+    def pending(self):
+        return self.irq_pending
 
 
 class Nic(mem.Device):

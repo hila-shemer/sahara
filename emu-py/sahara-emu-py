@@ -93,12 +93,15 @@ def main(argv):
     nic_rx = devices.Buffer(devices.NIC_BASE + devices.NIC_RX_OFFSET,
                             0x10000)
     nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac, nic_rx)
-    for dev in (display, kbd, mouse, nic, pixbuf, nic_tx, nic_rx):
+    dma = devices.Dma(devices.DMA_BASE, devices.DMA_SIZE, phys)
+    for dev in (display, kbd, mouse, nic, dma, pixbuf, nic_tx, nic_rx):
         phys.add_device(dev)
 
     # trace.md 4/boot.md V1: EVENT device indices are 0-based positions
     # among the device-table *entries*, not phys.devices (which also
     # carries the pixel/TX/RX buffer routing windows) — PROBLEMS.md P12.
+    # The DMA engine is NOT here: it is never EVENT-fed (dma.md 7), and
+    # the frozen EVENT indices 0-3 stay exactly as they were.
     event_devices = [display, kbd, mouse, nic]
 
     # PLATFORM-SPEC 2 device table: table entries advertise the
@@ -110,6 +113,9 @@ def main(argv):
         (2, devices.KBD_BASE, devices.KBD_SIZE, (0, 0, 0, 0)),
         (3, devices.MOUSE_BASE, devices.MOUSE_SIZE, (0, 0, 0, 0)),
         (4, devices.NIC_BASE, devices.NIC_WINDOW_SIZE, (mac, 0, 0, 0)),
+        # Type 6, all params zero: DMA limits are spec-pinned and
+        # surfaced in CAPS, not the table (dma.md 1; boot.md V10).
+        (6, devices.DMA_BASE, devices.DMA_SIZE, (0, 0, 0, 0)),
     ]
     # P8: the table's RAM region must match what PhysMap actually
     # routes as RAM — the dev_base-clamped length, not the raw --ram
@@ -138,7 +144,8 @@ def main(argv):
         ])
 
     m = machine.Machine(phys, tracer=tracer, check_invtp=args.check_invtp,
-                        events=events, event_devices=event_devices)
+                        events=events, event_devices=event_devices,
+                        dma=dma)
     try:
         outcome = m.run(maxcycles=args.maxcycles)
     except machine.CheckFail as cf:
