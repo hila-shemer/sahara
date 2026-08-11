@@ -3,6 +3,7 @@
 **Version 0. FLAGGED FOR OWNER SIGN-OFF — no second consumer may build
 against this document until the owner has signed off.** First (and so far
 only) conforming client: the Oasis kernel (`os/oasis/`).
+Reviewing. Once we fix this spec, we can continue with multiple clients of it.
 
 This document defines the machine-wide software conventions of the Sahara
 platform: register roles, calling convention, stack discipline, the
@@ -43,6 +44,11 @@ Informative restatement of the ISA-SPEC 12 table (the ISA text governs):
 | r28     | `sp`. 16-byte aligned at all times. Grows down. |
 | r29     | `ra`. Written by JAL/JALR. Caller-saved. |
 | r30     | `k0`. Reserved to the kernel at all times. |
+This worries me - what if an application mangles it by mistake? The kernel should never depend on userspace behavior for its correctness.
+Technically, once we go to userspace the app can do whatever it wants - internally it doesn't have to follow the calling convention
+if it doesn't want to.
+It just makes debugging that app kinda difficult. Kernel-based debugging features can depend on this SABI but must fail cleanly when its violated
+
 | r31     | `zero` (hardware). |
 
 Predicate registers are caller-saved and not preserved across calls.
@@ -57,6 +63,10 @@ Memory below `sp` is volatile. A trap or interrupt handler may use the
 current stack (pushing its own frames below the interrupted `sp`), so no
 code may keep live data at addresses below `sp`. There is no red zone of
 any size.
+This is fine, right? Most OSs do this - the kernel uses the extra stack the userspace isn't using. It doesn't assume any previous data there so it can't be mangled, and the memory is available so it won't double trap.
+Also this is for program traps, right? An interrupt from HW would send us to a kernel context? In this case a double trap inside the program's handler can just kill the program
+(i.e. - you caused a signal but didn't leave enough stack? OK you get kill-9ed instead, handler doesn't mind :))
+
 
 ### 1.2 SABI addition: `gp` = r27, kernel-internal only
 
@@ -79,6 +89,9 @@ register, so the kernel's `gp` survives every excursion.
 without notice, by any trap or interrupt — including SYSCALL. No code,
 kernel or user, may keep a value in any of them across any instruction
 that can be interrupted (that is: ever, outside the trap path itself).
+Oh, so user can't mangle it - the user can't depend on it because a trap may modify it.
+This changes my earlier objections - I'm okay with telling user 'never use r30 or your program breaks' as that's not the same as 'dont touch r30 or the kernel will crash'
+
 
 ## 2. Stack discipline and frames
 
@@ -289,3 +302,4 @@ definition:
 removed by the owner, exactly one consumer (Oasis) may track this
 document, and every change here must be reflected there in the same
 change.
+I'm replacing this flag by whatever you think the flag should be replaced weith :D
