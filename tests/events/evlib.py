@@ -31,10 +31,11 @@ import tracefile as T  # noqa: E402
 import encoding as E  # noqa: E402
 
 DEV_DISPLAY, DEV_KBD, DEV_MOUSE, DEV_NIC = 0, 1, 2, 3
-# WAVE-RENUMBER: becomes 6 when timer/dma records land ahead of this
-# one (table records are positional; this branch's table is boot.md V1
-# + the type-7 rng record fifth, rng.md V-T). Feeds regenerate from
-# these generators at test time, so the renumber is this constant.
+# The wave settled with the rng record fifth and the timer sixth
+# (table records are positional; boot.md V1 + rng + timer, rng.md V-T
+# == timer.md V1-T); dma lands behind both, so 4 is final. Feeds
+# regenerate from these generators at test time, so a renumber, if one
+# ever comes, is this constant.
 RNG_DEV_INDEX = 4
 
 

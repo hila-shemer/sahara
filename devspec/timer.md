@@ -62,7 +62,7 @@ Reference platform defaults (the device table is authoritative):
 | control window base | PA 0x0F06_0000 — reference default fixed by this document |
 | control window size | 64 KB (0x1_0000 bytes) |
 | device-table type | 5 |
-| device-table position | index 4, after the NIC (reference table order, boot.md §5) — frozen once assigned |
+| device-table position | index 5, after the type-7 rng record (the wave's settled table order, §8 / rng.md §11.5) — frozen once assigned |
 | params | `[0, 0, 0, 0]` |
 
 The window is carved from what boot.md §3.4 declared a hole on the
@@ -472,23 +472,25 @@ The 64-byte type-5 record, boot.md §3.5 layout, at its position in the
 reference table (`<PA:8 hex>: <bytes>` format, boot.md conventions):
 
 ```
-00000948: 05 00 00 00 00 00 00 00 00 00 06 0f 00 00 00 00
-00000958: 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00
-00000968: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-00000978: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000988: 05 00 00 00 00 00 00 00 00 00 06 0f 00 00 00 00
+00000998: 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00
+000009a8: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009b8: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 ```
 
-**V1-T** — the 5-device reference platform table, byte-exact: header
-40 + one RAM region 32 + 5·64 = **392 encoded bytes** at
-`[0x0800, 0x0988)`, zeros in `[0x0988, 0x1000)`. Identical to boot.md
-vector V1 except `device_count` = 5 (byte at 0x0820) and the appended
-type-5 record. boot.md's V1 remains the normative vector for the
-4-device table; V1-T is normative for a platform carrying the timer.
+**V1-T** — the 6-device reference platform table, byte-exact: header
+40 + one RAM region 32 + 6·64 = **456 encoded bytes** at
+`[0x0800, 0x09C8)`, zeros in `[0x09C8, 0x1000)`. Identical to boot.md
+vector V1 except `device_count` = 6 (byte at 0x0820) and the two
+appended wave records: the type-7 rng record fifth (devspec/rng.md §11.5
+— its vector V-T is this same table) and the type-5 timer record sixth.
+boot.md's V1 remains the normative vector for the 4-device table; V1-T
+is normative for a platform carrying the wave devices.
 
 ```
 00000800: 53 41 48 41 52 41 50 54 01 00 00 00 00 00 00 00
 00000810: 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
-00000820: 05 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000820: 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 00000830: 00 00 00 00 00 00 00 00 00 00 00 0f 00 00 00 00
 00000840: 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
 00000850: 00 00 00 0f 00 00 00 00 00 00 00 00 00 00 00 00
@@ -506,25 +508,29 @@ type-5 record. boot.md's V1 remains the normative vector for the
 00000910: 00 00 03 0f 00 00 00 00 00 00 00 00 00 00 00 00
 00000920: 00 00 03 00 00 00 00 00 52 54 00 12 34 56 00 00
 00000930: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-00000940: 00 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00
-00000950: 00 00 06 0f 00 00 00 00 00 00 00 00 00 00 00 00
+00000940: 00 00 00 00 00 00 00 00 07 00 00 00 00 00 00 00
+00000950: 00 00 08 0f 00 00 00 00 00 00 00 00 00 00 00 00
 00000960: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
 00000970: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-00000980: 00 00 00 00 00 00 00 00
+00000980: 00 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00
+00000990: 00 00 06 0f 00 00 00 00 00 00 00 00 00 00 00 00
+000009a0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009c0: 00 00 00 00 00 00 00 00
 ```
 
 Machine-consumable expectations (boot.md §7 format):
 
 ```
-expect device_count     = 5
-expect dev[4].type      = 5
-expect dev[4].base      = 0x0F060000
-expect dev[4].size      = 0x10000
-expect dev[4].params[0] = 0
-expect dev[4].params[1] = 0
-expect dev[4].params[2] = 0
-expect dev[4].params[3] = 0
-expect table_end_pa     = 0x0988
+expect device_count     = 6
+expect dev[5].type      = 5
+expect dev[5].base      = 0x0F060000
+expect dev[5].size      = 0x10000
+expect dev[5].params[0] = 0
+expect dev[5].params[1] = 0
+expect dev[5].params[2] = 0
+expect dev[5].params[3] = 0
+expect table_end_pa     = 0x09C8
 ```
 
 ### TV-T4 — WFI wake-cycle script (§4.5; TMR-18)
