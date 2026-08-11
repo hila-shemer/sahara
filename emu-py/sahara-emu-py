@@ -95,18 +95,21 @@ def main(argv):
     nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac, nic_rx)
     timer = devices.Timer()
     rng = devices.Rng()
-    for dev in (display, kbd, mouse, nic, timer, rng, pixbuf, nic_tx,
+    dma = devices.Dma(devices.DMA_BASE, devices.DMA_SIZE, phys)
+    for dev in (display, kbd, mouse, nic, timer, dma, rng, pixbuf, nic_tx,
                 nic_rx):
         phys.add_device(dev)
 
     # trace.md 4/boot.md V1: EVENT device indices are 0-based positions
     # among the device-table *entries*, not phys.devices (which also
     # carries the pixel/TX/RX buffer routing windows) — PROBLEMS.md P12.
-    # rng is position 4 (the wave's settled order; dma takes 6 when its
-    # branch lands). The timer (table index 5) is deliberately absent:
-    # type 5 defines no EVENT payload, so an index-5 EVENT must hit the
-    # nonexistent-device fatal in Machine.process_events (timer.md 5,
-    # trace.md 4.5) — matching emu-c's malformed-trace rejection.
+    # rng is position 4 (the wave's settled order). The timer (table
+    # index 5) and the DMA engine (table index 6) are deliberately
+    # absent: type 5 defines no EVENT payload and the DMA engine is
+    # cycle-driven with none either, so an index-5 or index-6 EVENT
+    # must hit the nonexistent-device fatal in Machine.process_events
+    # (timer.md 5, dma.md 7, trace.md 4.5) — matching emu-c's
+    # malformed-trace rejection.
     event_devices = [display, kbd, mouse, nic, rng]
 
     # PLATFORM-SPEC 2 device table: table entries advertise the
@@ -119,11 +122,14 @@ def main(argv):
         (3, devices.MOUSE_BASE, devices.MOUSE_SIZE, (0, 0, 0, 0)),
         (4, devices.NIC_BASE, devices.NIC_WINDOW_SIZE, (mac, 0, 0, 0)),
         # type 7 rng, params all zero ("0 = v1 behavior", rng.md 1),
-        # then the type-5 timer: byte-for-byte the timer.md V1-T ==
-        # rng.md V-T table together with the rows above
-        # (device_count = 6).
+        # then the type-5 timer, then the type-6 DMA engine (its limits
+        # are spec-pinned and surfaced in CAPS, not the table, dma.md
+        # 1): byte-for-byte the wave-final timer.md V1-T == rng.md V-T
+        # == dma.md V-D table together with the rows above
+        # (device_count = 7).
         (7, devices.RNG_BASE, devices.RNG_SIZE, (0, 0, 0, 0)),
         (5, devices.TIMER_BASE, devices.TIMER_SIZE, (0, 0, 0, 0)),
+        (6, devices.DMA_BASE, devices.DMA_SIZE, (0, 0, 0, 0)),
     ]
     # P8: the table's RAM region must match what PhysMap actually
     # routes as RAM — the dev_base-clamped length, not the raw --ram
@@ -153,7 +159,7 @@ def main(argv):
 
     m = machine.Machine(phys, tracer=tracer, check_invtp=args.check_invtp,
                         events=events, event_devices=event_devices,
-                        timer=timer)
+                        timer=timer, dma=dma)
     try:
         outcome = m.run(maxcycles=args.maxcycles)
     except machine.CheckFail as cf:

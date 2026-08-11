@@ -322,6 +322,11 @@ Type 5 (timer, per devspec/timer.md): no EVENT payload is defined; an
 EVENT record whose device index resolves to a type-5 device-table
 record makes the trace malformed (§2.4 class 2).
 
+Type 6 (DMA engine, per devspec/dma.md §7): same rule — the engine is
+cycle-driven, no EVENT payload is defined, and an EVENT record whose
+device index resolves to a type-6 record makes the trace malformed
+(§2.4 class 2).
+
 Future device types define their payloads here (in this document) when
 they are added. A v1 reader encountering an EVENT whose `device` index
 does not exist in the image's device table, or whose device type it does

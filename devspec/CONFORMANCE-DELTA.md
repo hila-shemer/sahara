@@ -21,6 +21,7 @@ unsupported access size traps DEVERR") is instantiated per device:
 | nic.md §8 | NIC-C-01 … NIC-C-30 | register/DEVERR catalog E1–E7 with precedence, FCS/padding rules, mailbox FIFO + 64-frame overflow, TX-during-RX, and the full translator decision tree (ARP, DHCP, DNS, UDP/TCP NAT, ICMP, exclusions) against byte-exact vectors |
 | rng.md §10 | RNG-01 … RNG-21 | register/DEVERR catalog E1–E6 with the nic.md precedence chain (empty pop E6 — no sentinel), 256-word FIFO with truncate-to-fit acceptance and boundary visibility, normative SplitMix64 PRNG mode (guest-selected, mode/seed/queue independence), IE-qualified EXTINT level, WFI wake at exactly the event cycle |
 | timer.md §7 | TMR-01 … TMR-19 | type-5 periodic timer: COUNT boundary-cycle/MFSR equivalence, arm/disarm/rewrite with W = the DEVW stamp, derived pending and the ACK phase-lock, the E1–E5 catalog with precedence, level-triggered EXTINT re-trap, WFI wake at exactly next_fire, sreg-timecmp independence with §7.5 priority |
+| dma.md §10 | DMA-C-01 … DMA-C-21 | DMA register window and DEVERR catalog E1–E9 with precedence (dma_regs); descriptor content-error codes, check order, doorbell-terminal semantics (dma_err); latch-at-doorbell vs sample-at-completion, memmove overlap, exact completion-boundary visibility, doorbell-while-BUSY (dma_boundary); COPY/FILL data + the C_done = C_doorbell + 8 + LEN/8 cost model (dma_copy, dma_fill); table discovery by type-code scan (dma_boot); IRQ/ack/WFI-wake-at-exactly-C_done (dma_irq_wfi) |
 
 Existing C7 tests are unaffected; the store-queue check mode and
 doorbell-after-stores tests gain concrete fixtures (nic.md NIC-C-15,
@@ -39,6 +40,7 @@ Trace/replay obligations bind the reference emulator, not the ISA:
 | timer.md | TMR-20, TMR-21 | no EVENT payload exists for type 5 — an EVENT naming a type-5 device is a malformed trace both emulators refuse; record→replay byte identity with no timer-specific replay input (the timer is a pure function of DEVW cycles and the counter) |
 | boot.md | BOOT-16 | table bytes a pure function of emulator configuration |
 | trace.md | T-17 … T-20 | byte-identical invocations, replay byte-identity at level, no host consultation, META validation refusal |
+| dma.md | DMA-C-22 … DMA-C-24 | transfers emit ZERO trace records (checks/dma_copy.py enforces: one doorbell DEVW, no MEMW/DEVW in the destination range); replay reproduces every transfer from the doorbell DEVW alone with no EVENT records naming the engine; byte-identical double-runs |
 
 ## New group C9-B — boot protocol and device table (proposed by boot.md)
 
@@ -80,17 +82,25 @@ for its own device; the suite should implement them as one parameterized
 test each where practical:
 
 - **Atomics to device space trap DEVERR** (C3/C7 already): D-06,
-  INPUT-07, NIC-C-09, RNG-08, TMR-14.
+  INPUT-07, NIC-C-09, RNG-08, TMR-14, DMA-C-05 (instantiated inside
+  dma_regs).
 - **Predicated-false accesses cannot fault** (C1 already): D-15,
   INPUT-08, NIC-C-10 (second clause), BOOT-15 (predicated case),
   RNG-10 (which additionally pins "no PRNG-state advance"),
-  TMR-15 (second clause).
+  TMR-15 (second clause), DMA-C-06 second clause (instantiated
+  inside dma_regs).
 - **Non-64-bit register access traps DEVERR** (C7 already): D-02,
-  INPUT-04, NIC-C-03, RNG-05, TMR-13.
+  INPUT-04, NIC-C-03, RNG-05, TMR-13, DMA-C-02 (instantiated
+  inside dma_regs).
 - **Event visibility at the first boundary with cycle ≥ C**: INPUT-21 and
   NIC-C-33 (same rule, two devices), RNG-18; trace-side T-04/T-09 check
-  the record ordering it implies. N/A for the timer: type 5 has no
-  EVENTs at all (TMR-20 is the *absence* obligation).
+  the record ordering it implies; DMA-C-18's completion-visibility
+  clause is the same boundary rule driven by cycle arithmetic instead
+  of a feed (instantiated as dma_boundary leg 0's cycle-counted
+  BUSY/DONE pair). N/A for the timer: type 5 has no EVENTs at all
+  (TMR-20 is the *absence* obligation).
 - **EXTINT level-triggering per device** (PLATFORM §3): D-19, INPUT-20,
   NIC-C-19, RNG-20 (the one IE-qualified instance: reset-off, so a
-  type-7-unaware kernel never sees it), TMR-16.
+  type-7-unaware kernel never sees it), TMR-16, DMA-C-20
+  (instantiated inside dma_irq_wfi: masking defers, ack drops the
+  level, single delivery each).

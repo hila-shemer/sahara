@@ -478,19 +478,21 @@ reference table (`<PA:8 hex>: <bytes>` format, boot.md conventions):
 000009b8: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 ```
 
-**V1-T** — the 6-device reference platform table, byte-exact: header
-40 + one RAM region 32 + 6·64 = **456 encoded bytes** at
-`[0x0800, 0x09C8)`, zeros in `[0x09C8, 0x1000)`. Identical to boot.md
-vector V1 except `device_count` = 6 (byte at 0x0820) and the two
-appended wave records: the type-7 rng record fifth (devspec/rng.md §11.5
-— its vector V-T is this same table) and the type-5 timer record sixth.
-boot.md's V1 remains the normative vector for the 4-device table; V1-T
-is normative for a platform carrying the wave devices.
+**V1-T** — the wave-final 7-device reference platform table,
+byte-exact: header 40 + one RAM region 32 + 7·64 = **520 encoded
+bytes** at `[0x0800, 0x0A08)`, zeros in `[0x0A08, 0x1000)`. Identical
+to boot.md vector V1 except `device_count` = 7 (byte at 0x0820) and the
+three appended wave records: the type-7 rng record fifth (devspec/
+rng.md §11.5 — its vector V-T is this same table), the type-5 timer
+record sixth, and the type-6 DMA engine seventh (devspec/dma.md §11 —
+vector V-D, same table). boot.md's V1 remains the normative vector for
+the 4-device table; V1-T is normative for a platform carrying the wave
+devices.
 
 ```
 00000800: 53 41 48 41 52 41 50 54 01 00 00 00 00 00 00 00
 00000810: 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
-00000820: 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000820: 07 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 00000830: 00 00 00 00 00 00 00 00 00 00 00 0f 00 00 00 00
 00000840: 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
 00000850: 00 00 00 0f 00 00 00 00 00 00 00 00 00 00 00 00
@@ -516,13 +518,17 @@ is normative for a platform carrying the wave devices.
 00000990: 00 00 06 0f 00 00 00 00 00 00 00 00 00 00 00 00
 000009a0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
 000009b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-000009c0: 00 00 00 00 00 00 00 00
+000009c0: 00 00 00 00 00 00 00 00 06 00 00 00 00 00 00 00
+000009d0: 00 00 07 0f 00 00 00 00 00 00 00 00 00 00 00 00
+000009e0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000a00: 00 00 00 00 00 00 00 00
 ```
 
 Machine-consumable expectations (boot.md §7 format):
 
 ```
-expect device_count     = 6
+expect device_count     = 7
 expect dev[5].type      = 5
 expect dev[5].base      = 0x0F060000
 expect dev[5].size      = 0x10000
@@ -530,7 +536,7 @@ expect dev[5].params[0] = 0
 expect dev[5].params[1] = 0
 expect dev[5].params[2] = 0
 expect dev[5].params[3] = 0
-expect table_end_pa     = 0x09C8
+expect table_end_pa     = 0x0A08
 ```
 
 ### TV-T4 — WFI wake-cycle script (§4.5; TMR-18)

@@ -149,8 +149,9 @@ static SeEvRec *ev_grow(SeEvRec *evs, uint64_t *cap, uint64_t count)
 
 /* An EVENT record's device index and inner payload, validated per
  * devspec/trace.md 4 against the reference device table (index 0
- * display, 1 kbd, 2 mouse, 3 nic, 4 rng, 5 timer -- the wave's settled
- * table order, timer.md V1-T == rng.md V-T): unknown
+ * display, 1 kbd, 2 mouse, 3 nic, 4 rng, 5 timer, 6 dma -- the wave's
+ * settled table order, timer.md V1-T == rng.md V-T == dma.md V-D):
+ * unknown
  * index or a payload violating its device's encoding is a malformed
  * trace (4.5 / 2.4 class 2). The drop flag VALUE is not checked --
  * replay recomputes it (5.4) -- but its reserved bits are. inner is
@@ -219,6 +220,15 @@ static void validate_event(uint64_t off, uint64_t device, uint32_t inner,
          * (timer.md 5, trace.md 4.5). */
         malformed(off, "EVENT names the timer: type 5 defines no EVENT "
                        "payload (trace.md 4.5)");
+        return;
+    case SE_DEVIDX_DMA:
+        /* Same rule one seat later: the DMA engine is cycle-driven --
+         * a job is a pure function of the latched descriptor, RAM, and
+         * the doorbell cycle -- so type 6 defines no EVENT payload
+         * either, and any EVENT naming it is malformed regardless of
+         * content (dma.md 7, trace.md 4.5). */
+        malformed(off, "EVENT names the DMA engine: type 6 defines no "
+                       "EVENT payload (trace.md 4.5)");
         return;
     default:
         malformed(off, "EVENT device index outside the reference device "

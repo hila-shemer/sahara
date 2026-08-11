@@ -36,12 +36,21 @@ committed generator scripts — never by running an emulator under test).
   - `0x790`-`0x7b8` devorder store-queue slots (c7_dev, ORDQ_SLOTS)
   - `0x7c0` TMR_TICK_SLOT — c7_timer_* handler COUNT store / first
     delivered cause (c7_timer_indep); the rng group aliases it as its
-    drain-count slot (RNG_SCRATCH; c7_rng_overflow) — safe because the
-    two groups never share a run
+    drain-count slot (RNG_SCRATCH; c7_rng_overflow) and the dma group
+    as its handler-entry cycle slot (DMA_CYCLE_SLOT; dma_irq_wfi) —
+    safe because the groups never share a run
   - `0x7c8`-`0x7e8` event-fed tests' handler slots (EVT_FLAG /
     EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize, c7_rng_irq)
   - `0x7f0` TMR_W_SLOT, `0x7f8` TMR_AUX_SLOT — c7_timer_* aux
-    (in-handler STATUS snapshot, second delivered cause)
+    (in-handler STATUS snapshot, second delivered cause); the dma
+    group aliases `0x7f0` as its EXTINT delivery count
+    (DMA_COUNT_SLOT; dma_err, dma_irq_wfi) — same never-share-a-run
+    rule as the `0x7c0` aliases above
+
+  The dma_* tests additionally use plain RAM well above the images for
+  descriptors and transfer buffers (0x10_0000 for descriptors,
+  0x20_0000+ sources, 0x30_0000+ destinations — fresh RAM reads zero,
+  so no image segments are needed there).
 
   Device window base addresses (PLATFORM-SPEC 1) are also in defs.s
   as `DEV_*_BASE`; everything at 0x0F00_0000 and up is device space.

@@ -47,3 +47,13 @@ c7_timer_tick c7_timer_tick.s level=2
 c7_timer_deverr c7_timer_deverr.s level=2
 c7_timer_wfi c7_timer_wfi.s level=2
 c7_timer_indep c7_timer_indep.s level=2
+# Wave-4 DMA engine (devspec/dma.md). All cycle-driven — no events=
+# line — so every dma_* test runs under difftest today (no REPLAY
+# gate): completion is pure arithmetic on the doorbell DEVW's cycle.
+dma_regs dma_regs.s level=2
+dma_copy dma_copy.s
+dma_fill dma_fill.s
+dma_err dma_err.s
+dma_boundary dma_boundary.s
+dma_irq_wfi dma_irq_wfi.s
+dma_boot dma_boot.s

@@ -31,9 +31,10 @@ import tracefile as T  # noqa: E402
 import encoding as E  # noqa: E402
 
 DEV_DISPLAY, DEV_KBD, DEV_MOUSE, DEV_NIC = 0, 1, 2, 3
-# The wave settled with the rng record fifth and the timer sixth
-# (table records are positional; boot.md V1 + rng + timer, rng.md V-T
-# == timer.md V1-T); dma lands behind both, so 4 is final. Feeds
+# The wave settled with the rng record fifth, the timer sixth, and
+# the dma engine seventh (table records are positional; boot.md V1 +
+# rng + timer + dma, rng.md V-T == timer.md V1-T == dma.md V-D), so 4
+# is final. Feeds
 # regenerate from these generators at test time, so a renumber, if one
 # ever comes, is this constant.
 RNG_DEV_INDEX = 4

@@ -413,7 +413,8 @@ static AccR data_access(SeCpu *c, se_u128 va, unsigned size, int acc,
         return a;
     uint64_t off = se_lo64(x.pa & 0xFFFFu);
     if (acc == SE_ACC_STORE) {
-        SeDevAcc r = SeDev_reg_write(c->dev, sp, off, se_lo64(wval));
+        SeDevAcc r = SeDev_reg_write(c->dev, sp, off, se_lo64(wval),
+                                     se_lo64(c->cycle));
         if (r.fault)
             return a;
         SeTrace_devw(c->tr, se_lo64(c->cycle), va, 8u, wval);
@@ -625,6 +626,18 @@ static void wfi_wait(SeCpu *c)
             have = true;
         }
     }
+    /* The wave's fourth wake source (dma.md 7.5): an in-flight bit-8
+     * job wakes at exactly its C_done -- the event rule, same as the
+     * feed head above, NOT timecmp's T+1. Always strictly ahead of c0:
+     * the boundary before this WFI already ran the completion step. */
+    uint64_t dma_wake = 0;
+    if (c->dev != NULL && SeDev_dma_wake(c->dev, &dma_wake)) {
+        RWC_ASSERT((se_u128)dma_wake > c0);
+        if (!have || (se_u128)dma_wake < wake) {
+            wake = (se_u128)dma_wake;
+            have = true;
+        }
+    }
     if (!have) {
         RWC_ASSERT(!c->live_yield); /* exec yields before a dead WFI retires */
         c->cycle = c0 + 1u;
@@ -648,6 +661,9 @@ static bool wfi_wake_exists(const SeCpu *c)
         return true;
     if (c->dev != NULL && c->dev->tmr_period != 0u)
         return true; /* an armed timer always fires (timer.md 4.5) */
+    uint64_t dma_wake;
+    if (c->dev != NULL && SeDev_dma_wake(c->dev, &dma_wake))
+        return true;
     return c->ev_next < c->ev_count;
 }
 
@@ -1173,8 +1189,9 @@ void SeCpu_feed(SeCpu *c, uint8_t device, const uint8_t *payload,
 void SeCpu_step(SeCpu *c)
 {
     RWC_ASSERT(c->state == SE_RUN_RUNNING);
-    /* Boundary order (trace.md 3.3): events first, then the device
-     * phase, then interrupt recognition, then the next instruction.
+    /* Boundary order (trace.md 3.3 as refined by dma.md 7.4): events
+     * first, then the device phase (timer tick, then DMA completion),
+     * then interrupt recognition, then the next instruction.
      * The timer tick caches this boundary's cycle and recomputes the
      * derived pending bit (timer.md 4.3); register accesses by the
      * instruction below read the cache as their C/W/A, which equals
@@ -1183,6 +1200,17 @@ void SeCpu_step(SeCpu *c)
     apply_events(c);
     if (c->dev != NULL)
         SeDev_timer_tick(c->dev, c->cycle);
+    if (c->dev != NULL && c->dev->dma_status == SE_DMA_ST_BUSY &&
+        c->cycle >= (se_u128)c->dev->dma_comp_cycle) {
+        /* Completion samples live RAM, so the weak-store queue must
+         * already be drained here -- the doorbell store drained it and
+         * nothing re-arms mid-test in the suite. Asserted, never
+         * re-flushed: a queued ordinary store still pending at a DMA
+         * completion boundary would make the sample order-dependent,
+         * and that must die loudly, not pick silently. */
+        RWC_ASSERT(c->ordq_count == 0u);
+        SeDev_dma_advance(c->dev, c->mem, se_lo64(c->cycle));
+    }
     /* Interrupts: between instructions only, IE = 1, timer first (7.5). */
     if (status_bits(c) & STATUS_IE) {
         if (timer_pending(c)) {

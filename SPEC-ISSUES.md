@@ -513,3 +513,42 @@ Both emulator implementations must match the readings marked
     first divergent apply. Consequence for emu-py: process_events
     gained a one-line "record nothing on empty acceptance" guard (the
     work order's "machine.py untouched" assumed the abort reading).
+
+41. **dma work order — unlisted-offset READS: "reads-0" vs the E2
+    DEVERR catalog** (dma agent). The work order's binding section 5
+    copies the NIC precedence chain "verbatim" and lists "unlisted
+    offset" in the offset/direction DEVERR class with no direction
+    qualifier (NIC E2 covers both directions), and the dma_regs brief
+    puts "unlisted offsets" in the DEVERR access matrix; but the
+    deliverable skeleton's item 9 says "reads-0/writes-DEVERR outside
+    the map". Both cannot hold for a load of an unlisted offset.
+    Reading chosen, per the loud-failure policy and the
+    copied-verbatim E-catalog language: **DEVERR in both directions**
+    (dma.md 2 rule 3 / E2 / DMA-C-03) - discovery is CAPS-only, no
+    probeable inert window. If a display-style read-0 extension
+    window was meant instead, dma.md 2/9, both emulators'
+    unlisted-load path, and dma_regs rows 18/20 change together.
+
+42. **dma work order — COMP_CYCLE value while BUSY unstated** (dma
+    agent). The register table defines COMP_CYCLE by terminal state
+    ("C_done for accepted jobs, the doorbell cycle for content-error
+    jobs") but not what a read returns while STATUS=BUSY. Reading
+    chosen (dma.md 3.5, DMA-C-18): written once, at the doorbell, so
+    a BUSY-time read returns the scheduled C_done - pure arithmetic
+    on the doorbell cycle, and polling software gets an exact
+    deadline for free. The alternative (hold the previous job's value
+    until completion) is equally deterministic but strictly less
+    useful; if preferred, dma.md 3.5/V3 and both emulators' doorbell
+    path move the write to the completion boundary together.
+
+43. **dma work order — WFI wake for a bit-8-clear in-flight job**
+    (dma agent). "DMA completion is a wake source" is unqualified,
+    but a job with IRQ_ON_COMPLETE=0 cannot make an interrupt
+    pending, and ISA-SPEC 7.6 wakes WFI only on conditions that can
+    deliver - an unconditional wake would resume execution with
+    nothing pending, which no other wake source does. Reading chosen
+    (dma.md 7.5, DMA-C-21): comp_cycle is a wake source iff latched
+    OP bit 8 = 1; a WFI whose only future condition is a bit-8-clear
+    job deadlocks loudly per 7.6, exactly as if the job did not
+    exist. Both emulators implement the same gate, so difftest cannot
+    catch a shared misreading - flagged here for the owner instead.

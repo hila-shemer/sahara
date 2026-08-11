@@ -190,16 +190,19 @@ start:
         cmpeq p1, r19, 0
         (!p1) b fail
 
-        # ---- the holes either side of the window (rng.md 1, W2) ----
-        # test 20: 0x0F07_0000 is declared in no region: DEVERR
+        # ---- the hole past the device run (rng.md 1, W2) ----
+        # test 20: deep in [0x0F09_0000, pixbuf) — declared in no
+        # region: DEVERR (0x0F07 is the DMA window since the wave
+        # integrated, devspec/dma.md 1, so the below-window hole is
+        # gone)
         li r27, 20
-        li r21, 0x0F070000
+        li r21, 0x0F0F0000
         ldz.64 r19, [r21]
         lds.64 r19, [r24 + TRAP_CAUSE_SLOT - FAIL_ADDR]
         cmpeq p1, r19, CAUSE_DEVERR
         (!p1) b fail
 
-        # test 21: 0x0F09_0000 (just past the window): DEVERR
+        # test 21: 0x0F09_0000 (the hole's first byte): DEVERR
         li r27, 21
         li r21, 0x0F090000
         ldz.64 r19, [r21]

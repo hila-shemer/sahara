@@ -88,8 +88,11 @@
         # NIC window sub-regions (PLATFORM-SPEC section 7)
         .equ DEV_NIC_TXBUF, 0x0F040000   # nic base + 0x1_0000
         .equ DEV_NIC_RXBUF, 0x0F050000   # nic base + 0x2_0000
-        # RNG window (devspec/rng.md 1: type 7 at 0x0F08_0000;
-        # 0x0F07 stays a DEVERR hole for the wave's dma)
+        # DMA engine window (devspec/dma.md section 1; the base
+        # is spec-pinned -- only the device-table INDEX is
+        # merge-variant, which is why dma_* tests scan by type)
+        .equ DEV_DMA_BASE, 0x0F070000
+        # RNG window (devspec/rng.md 1: type 7 at 0x0F08_0000)
         .equ DEV_RNG_BASE, 0x0F080000
         # devorder RAM slots (c7_dev; tests/README.md)
         .equ ORDQ_SLOTS, 0x790
@@ -106,6 +109,11 @@
         .equ TMR_TICK_SLOT, 0x7C0  # handler COUNT store / 1st cause
         .equ TMR_W_SLOT, 0x7F0     # in-handler STATUS / aux
         .equ TMR_AUX_SLOT, 0x7F8   # 2nd cause / aux
+        # dma tests' handler slots (dma_err / dma_irq_wfi;
+        # tests/README.md; alias TMR_TICK_SLOT / TMR_W_SLOT —
+        # the groups never share a run)
+        .equ DMA_CYCLE_SLOT, 0x7C0  # handler-entry cycle sreg
+        .equ DMA_COUNT_SLOT, 0x7F0  # EXTINT delivery count
 
         # raw instruction words (built from encoding.py field
         # positions; the assembler refuses to emit these, which

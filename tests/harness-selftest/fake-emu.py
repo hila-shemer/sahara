@@ -245,6 +245,50 @@ def emit_furniture(rec, name, entry, events):
         rec(136, T.T_MEMW, T.mem_payload(
             136, 0x7F8, 8, E.CAUSES["EXTINT"]))
         rec(137, T.T_DEVW, T.mem_payload(137, TIMER + 8, 8, 0))
+    elif name.startswith("dma_"):
+        # what checks/dma_*.py demand (added with the dma_* tests,
+        # keyed like every block above; dma_boot has no checker and
+        # the harmless dma_copy shape it falls into is never
+        # examined). Constants mirror the .s/.py pairs.
+        DMA = 0x0F070000
+        DESC = 0x100000
+        if name == "dma_regs":
+            memr(DMA + 0x00, 0x18080301)
+            memr(DMA + 0x08, 0)
+            memr(DMA + 0x20, 0)
+            for _ in range(2):
+                emit(T.T_TRAP, T.trap_payload, E.CAUSES["UNALIGNED"],
+                     entry, DMA + 4, 1)
+            for _ in range(18):
+                emit(T.T_TRAP, T.trap_payload, E.CAUSES["DEVERR"],
+                     entry, DMA, 1)
+            emit(T.T_DEVW, T.mem_payload, DMA + 0x18, 8, 1)
+        elif name == "dma_err":
+            emit(T.T_MEMW, T.mem_payload, 0x300000, 8, 0x600DCAFE)
+            for _ in range(16):
+                emit(T.T_DEVW, T.mem_payload, DMA + 0x10, 8, DESC)
+            emit(T.T_TRAP, T.trap_payload, E.CAUSES["EXTINT"],
+                 entry, 0, 1)
+            emit(T.T_DEVW, T.mem_payload, DMA + 0x18, 8, 1)
+        elif name == "dma_boundary":
+            for _ in range(7):
+                emit(T.T_DEVW, T.mem_payload, DMA + 0x10, 8, DESC)
+            emit(T.T_TRAP, T.trap_payload, E.CAUSES["DEVERR"],
+                 entry, DMA + 0x10, 1)
+        elif name == "dma_irq_wfi":
+            # the checker pins trap1.cycle == doorbell1.cycle + 520
+            rec(100, T.T_DEVW, T.mem_payload(100, DMA + 0x10, 8, DESC))
+            rec(620, T.T_TRAP, T.trap_payload(
+                620, E.CAUSES["EXTINT"], entry, 0, 1))
+            rec(621, T.T_DEVW, T.mem_payload(621, DMA + 0x18, 8, 1))
+            rec(700, T.T_DEVW, T.mem_payload(700, DMA + 0x10, 8, DESC))
+            rec(710, T.T_TRAP, T.trap_payload(
+                710, E.CAUSES["EXTINT"], entry, 0, 1))
+            rec(711, T.T_DEVW, T.mem_payload(711, DMA + 0x18, 8, 1))
+        else:
+            # dma_copy / dma_fill (dma_boot has no checker): one
+            # doorbell, no traps, nothing in any destination range
+            emit(T.T_DEVW, T.mem_payload, DMA + 0x10, 8, DESC)
     else:
         # default: the UNALIGNED->ILLEGAL->diagnostic shape that
         # checks/c1_triplefault.sh greps for (the tl=3 record is

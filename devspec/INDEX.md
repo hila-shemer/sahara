@@ -73,7 +73,17 @@ no emulator fallback path), IE-qualified level pending into the EXTINT
 OR (reset off — invisible to type-7-unaware kernels), DEVERR catalog
 E1–E6 with the nic.md precedence chain. Window 0x0F08_0000/64 KB,
 params all zero. RNG-01..21 + RNG-R1..R4, vectors incl. the SplitMix64
-output table, the truncation byte vector, and the 5-record table dump.
+output table, the truncation byte vector, and the wave-final 7-record table dump.
+
+**dma.md** — The DMA engine (wave-4 accelerator, device type 6): 64-byte
+descriptor format and the opcode registry future descriptor-consuming
+accelerators append to (owner), COPY/FILL with memmove overlap
+semantics, descriptor latch-at-doorbell vs source-sample-at-completion,
+the spec-pinned cycle-cost model C_done = C_doorbell + 8 + LEN/8
+mirrored in CAPS, two-class errors (access DEVERR E1–E9 vs descriptor
+STATUS codes BAD_OP/BAD_FORMAT/BAD_ALIGN/BAD_RANGE), zero trace records
+for transfers (replay reproduces them from the doorbell DEVW alone),
+WFI wake at exactly C_done. DMA-C-01..24, vectors V1–V6.
 
 **asm.md** — The assembler: CLI and determinism contract, lexical rules
 and reserved names, full EBNF, 128-bit expression semantics with
@@ -97,6 +107,7 @@ through T5.
 | device table layout | boot.md | reference |
 | timer device (type 5): registers, derived pending, ACK phase-lock, no-EVENT rule | timer.md | reference, never define |
 | virtual-time/cycle assignment rules | frozen in ISA-SPEC 4 + PLATFORM 8 | nic.md and trace.md elaborate within it |
+| accelerator descriptor format + opcode registry | dma.md | reference, never define; future accelerator specs append registry rows |
 
 ## Cross-document dependencies (all resolved at integration)
 
