@@ -284,6 +284,10 @@ would be, and why it is absent).
 - Local declarations: `type name [N]? [= expr]? ;`. Initializers are
   a plain assignment (arrays and structs cannot be initialized in m1;
   initializer lists are m2).
+- Reading an uninitialized local yields the prior contents of its
+  frame slot: deterministic for any whole-program run (the machine
+  is), but no particular value is promised and programs must not rely
+  on one. Uninitialized globals are zero (section 7).
 
 ## 7. Declarations and program structure
 

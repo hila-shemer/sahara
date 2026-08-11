@@ -437,3 +437,36 @@ Both emulator implementations must match the readings marked
     comments say gp. Routed around per the no-toolchain-changes rule;
     if the assembler ever revs its alias table, a `gp` alias would let
     kernel sources read the way SABI talks about them.
+
+37. **asm.md 2.3 reserved names surfacing in a compiler front end**
+    (cc agent). A C function named `add`, `not`, or `ret` is a legal C
+    program and an E032 assembler error, because CC-M1 passes C
+    identifiers through verbatim as labels (readable `.sym`, plain
+    interop). Reading chosen, per the work order: cc.py rejects such
+    identifiers case-insensitively at compile time with an error
+    naming the rule. Two observations for any future toolchain rev:
+    (a) only the DOT-FREE reserved names can ever collide - C
+    identifiers cannot contain `.`, so the suffixed forms (`add.32`,
+    `la.abs`) are unreachable and cc.py's check is the ~90-name
+    dot-free subset; (b) the reserved set is duplicated from asm.md
+    2.3 into cc.py because asm.py's internal RESERVED set is not an
+    importable contract - if the catalog ever grows, both copies must
+    move (a one-line note in asm.md 2.3 naming cc.py as a consumer
+    would make that greppable).
+
+38. **SABI 6 boundary-label ownership when several files emit
+    sections** (cc agent). Concatenation-is-linkage fixes the section
+    order text|rodata|data|bss across the whole command line, and the
+    seam labels are defined once - so exactly ONE file (the last, the
+    compiled unit) can own rodata/data/bss. Consequence: the runtime
+    (`lang/cc/rt/sys.s`, an EARLIER file) cannot place its syscall
+    capture buffer in the real bss; it embeds it as `.space` inside
+    its text region instead. Byte-equivalent with the MMU off (no W^X
+    exists), and the trailing-zero trim still keeps the buffer out of
+    the image file only when it ends a segment - here it does not, so
+    the image carries ~4 KB of zeros. Recorded as the honest cost of
+    the single-owner rule; the alternative (every .s contributing
+    per-section fragments) is a linker by another name and out of
+    scope by decision. A future multi-unit cc.py (roadmap) absorbs the
+    runtime the same way it absorbs a second .c: by being the one
+    emitter.
