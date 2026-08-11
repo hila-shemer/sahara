@@ -537,16 +537,17 @@ Accepted = min(4, 256 − 254) = 2. Expected:
 
 ### 11.5 V-T — reference device table with the RNG record (byte-exact)
 
-This branch's emulator writes exactly these 392 bytes at
-`[0x0800, 0x0988)` (and zeros in `[0x0988, 0x1000)`): boot.md V1's
-header and first four device records with `device_count` = 5 and the
-type-7 record appended. (boot.md itself is untouched; the combined wave
-table supersedes this vector when the other wave devices land.)
+The reference emulator writes exactly these 456 bytes at
+`[0x0800, 0x09C8)` (and zeros in `[0x09C8, 0x1000)`): boot.md V1's
+header and first four device records with `device_count` = 6, the
+type-7 rng record fifth, and the type-5 timer record sixth
+(devspec/timer.md §8 — its vector V1-T is this same table; boot.md
+itself is untouched).
 
 ```
 00000800: 53 41 48 41 52 41 50 54 01 00 00 00 00 00 00 00
 00000810: 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
-00000820: 05 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000820: 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 00000830: 00 00 00 00 00 00 00 00 00 00 00 0f 00 00 00 00
 00000840: 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
 00000850: 00 00 00 0f 00 00 00 00 00 00 00 00 00 00 00 00
@@ -568,7 +569,11 @@ table supersedes this vector when the other wave devices land.)
 00000950: 00 00 08 0f 00 00 00 00 00 00 00 00 00 00 00 00
 00000960: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
 00000970: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-00000980: 00 00 00 00 00 00 00 00
+00000980: 00 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00
+00000990: 00 00 06 0f 00 00 00 00 00 00 00 00 00 00 00 00
+000009a0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009c0: 00 00 00 00 00 00 00 00
 ```
 
 Decode of the appended record (table offset 0x148, PA 0x0948):
@@ -581,7 +586,7 @@ expect dev[4].params[0] = 0
 expect dev[4].params[1] = 0
 expect dev[4].params[2] = 0
 expect dev[4].params[3] = 0
-expect table_end_pa     = 0x0988
+expect table_end_pa     = 0x09C8
 ```
 
 ### 11.6 S-3 — interrupt script (RNG-20/21)

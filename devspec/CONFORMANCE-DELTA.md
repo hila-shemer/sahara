@@ -20,6 +20,7 @@ unsupported access size traps DEVERR") is instantiated per device:
 | input.md §7 | INPUT-01 … INPUT-21, INPUT-23 | DATA/STATUS pop semantics, empty-read sentinel, size/write/offset DEVERR, HID subset closure, alternation, no-repeat, mouse clamping/emission, 256-deep drop-newest overflow, EXTINT by draining, device-read ordering |
 | nic.md §8 | NIC-C-01 … NIC-C-30 | register/DEVERR catalog E1–E7 with precedence, FCS/padding rules, mailbox FIFO + 64-frame overflow, TX-during-RX, and the full translator decision tree (ARP, DHCP, DNS, UDP/TCP NAT, ICMP, exclusions) against byte-exact vectors |
 | rng.md §10 | RNG-01 … RNG-21 | register/DEVERR catalog E1–E6 with the nic.md precedence chain (empty pop E6 — no sentinel), 256-word FIFO with truncate-to-fit acceptance and boundary visibility, normative SplitMix64 PRNG mode (guest-selected, mode/seed/queue independence), IE-qualified EXTINT level, WFI wake at exactly the event cycle |
+| timer.md §7 | TMR-01 … TMR-19 | type-5 periodic timer: COUNT boundary-cycle/MFSR equivalence, arm/disarm/rewrite with W = the DEVW stamp, derived pending and the ACK phase-lock, the E1–E5 catalog with precedence, level-triggered EXTINT re-trap, WFI wake at exactly next_fire, sreg-timecmp independence with §7.5 priority |
 
 Existing C7 tests are unaffected; the store-queue check mode and
 doorbell-after-stores tests gain concrete fixtures (nic.md NIC-C-15,
@@ -35,6 +36,7 @@ Trace/replay obligations bind the reference emulator, not the ISA:
 | input.md | INPUT-22 | replay reproduces DATA/STATUS values with host input untouched |
 | nic.md | NIC-C-31 … NIC-C-36 | one EVENT per exposed frame, causal cycle ordering, boundary-effect atomicity (ties into C3's interrupt-atomicity test), byte-identical headless runs, replay isolation from the host network, WFI wake at event cycle |
 | rng.md | RNG-R1 … RNG-R4 | recorded EVENT payloads are exactly the accepted-word prefixes (zero-accepted records nothing); replay reproduces every DATA/STATUS/CTRL read and every EVENT record byte-identically with the host entropy source untouched, in either mode |
+| timer.md | TMR-20, TMR-21 | no EVENT payload exists for type 5 — an EVENT naming a type-5 device is a malformed trace both emulators refuse; record→replay byte identity with no timer-specific replay input (the timer is a pure function of DEVW cycles and the counter) |
 | boot.md | BOOT-16 | table bytes a pure function of emulator configuration |
 | trace.md | T-17 … T-20 | byte-identical invocations, replay byte-identity at level, no host consultation, META validation refusal |
 
@@ -78,15 +80,17 @@ for its own device; the suite should implement them as one parameterized
 test each where practical:
 
 - **Atomics to device space trap DEVERR** (C3/C7 already): D-06,
-  INPUT-07, NIC-C-09, RNG-08.
+  INPUT-07, NIC-C-09, RNG-08, TMR-14.
 - **Predicated-false accesses cannot fault** (C1 already): D-15,
   INPUT-08, NIC-C-10 (second clause), BOOT-15 (predicated case),
-  RNG-10 (which additionally pins "no PRNG-state advance").
+  RNG-10 (which additionally pins "no PRNG-state advance"),
+  TMR-15 (second clause).
 - **Non-64-bit register access traps DEVERR** (C7 already): D-02,
-  INPUT-04, NIC-C-03, RNG-05.
+  INPUT-04, NIC-C-03, RNG-05, TMR-13.
 - **Event visibility at the first boundary with cycle ≥ C**: INPUT-21 and
   NIC-C-33 (same rule, two devices), RNG-18; trace-side T-04/T-09 check
-  the record ordering it implies.
+  the record ordering it implies. N/A for the timer: type 5 has no
+  EVENTs at all (TMR-20 is the *absence* obligation).
 - **EXTINT level-triggering per device** (PLATFORM §3): D-19, INPUT-20,
   NIC-C-19, RNG-20 (the one IE-qualified instance: reset-off, so a
-  type-7-unaware kernel never sees it).
+  type-7-unaware kernel never sees it), TMR-16.

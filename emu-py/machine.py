@@ -64,7 +64,7 @@ class _WalkFault(Exception):
 
 class Machine:
     def __init__(self, phys, tracer=None, check_invtp=False, events=(),
-                 event_devices=()):
+                 event_devices=(), timer=None):
         self.phys = phys
         self.trace = tracer
         self.regs = [0] * 32
@@ -87,6 +87,9 @@ class Machine:
         # (which also carries pixel/TX/RX buffer routing windows) —
         # PROBLEMS.md P12.
         self.event_devices = list(event_devices)
+        # The timer (devspec/timer.md) is not event-fed; it needs the
+        # boundary tick instead - see step(). None in unit tests.
+        self.timer = timer
 
     # ------------------------------------------------------------- state
     def rreg(self, i):
@@ -298,6 +301,14 @@ class Machine:
         if self.halted:
             return
         self.process_events()
+        # Boundary device phase (trace.md 3.3): the timer tick caches
+        # this boundary's cycle and recomputes derived pending
+        # (timer.md 4.3) after events apply and before recognition.
+        # Register accesses by the instruction below read the cache as
+        # their C/W/A - the byte-match contract with emu-c rides on
+        # this one call site.
+        if self.timer is not None:
+            self.timer.tick(self.cycle)
         if self.stbit("IE"):
             cause = self.pending_interrupt()
             if cause is not None:
@@ -744,6 +755,13 @@ class Machine:
             wakes.append(max(timecmp, c) + 1)
         if self.phys.any_device_pending():
             wakes.append(c + 1)
+        # The armed device timer is an event-style wake: it lands at
+        # exactly next_fire (timer.md 4.5), not timecmp's T+1. Armed
+        # and not already pending (any_device_pending saw the cached
+        # bit from this boundary's tick) implies next_fire > c; the
+        # max() only guards the pending-now case already covered.
+        if self.timer is not None and self.timer.period > 0:
+            wakes.append(max(self.timer.next_fire, c + 1))
         for ecycle, _d, _p in self.events:
             wakes.append(max(ecycle, c + 1))
             break                        # events sorted; first is enough

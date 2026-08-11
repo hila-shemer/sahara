@@ -592,6 +592,19 @@ static void wfi_wait(SeCpu *c)
         wake = tc + 1u; /* T = tc, retire lands after the jump (root 20) */
         have = true;
     }
+    /* The device timer follows the event-style rule, not timecmp's
+     * T+1: pending derives at boundaries, so the wake lands at exactly
+     * next_fire (timer.md 4.5, ISA 7.6 "advances directly to the next
+     * cycle at which one becomes pending"). Armed and not already
+     * pending at c0 (the early return above used the cached bit from
+     * this boundary's tick) implies next_fire > c0. */
+    if (c->dev != NULL && c->dev->tmr_period != 0u) {
+        se_u128 tn = c->dev->tmr_next;
+        if (!have || tn < wake) {
+            wake = tn;
+            have = true;
+        }
+    }
     /* A feed event wakes WFI at a boundary stamped exactly its cycle:
      * the recorded EVENT then equals the feed record byte-for-byte,
      * which is what makes replaying a recording idempotent across a
@@ -633,6 +646,8 @@ static bool wfi_wake_exists(const SeCpu *c)
     se_u128 tc = c->sreg[SREG_TIMECMP];
     if (tc != 0u && tc > c->cycle)
         return true;
+    if (c->dev != NULL && c->dev->tmr_period != 0u)
+        return true; /* an armed timer always fires (timer.md 4.5) */
     return c->ev_next < c->ev_count;
 }
 
@@ -1158,9 +1173,16 @@ void SeCpu_feed(SeCpu *c, uint8_t device, const uint8_t *payload,
 void SeCpu_step(SeCpu *c)
 {
     RWC_ASSERT(c->state == SE_RUN_RUNNING);
-    /* Boundary order (trace.md 3.3): events first, then interrupt
-     * recognition, then the next instruction. */
+    /* Boundary order (trace.md 3.3): events first, then the device
+     * phase, then interrupt recognition, then the next instruction.
+     * The timer tick caches this boundary's cycle and recomputes the
+     * derived pending bit (timer.md 4.3); register accesses by the
+     * instruction below read the cache as their C/W/A, which equals
+     * the cycle their own records carry -- the whole byte-match
+     * contract with emu-py rides on this one call site. */
     apply_events(c);
+    if (c->dev != NULL)
+        SeDev_timer_tick(c->dev, c->cycle);
     /* Interrupts: between instructions only, IE = 1, timer first (7.5). */
     if (status_bits(c) & STATUS_IE) {
         if (timer_pending(c)) {

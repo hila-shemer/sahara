@@ -40,6 +40,15 @@ enum {
     NIC_MAC = 32,
 };
 
+/* Timer register offsets (devspec/timer.md 2; fault catalog E1-E5).
+ * Everything not listed is E1 -- no read-0 extension window here. */
+enum {
+    TMR_COUNT = 0,
+    TMR_PERIOD = 8,
+    TMR_STATUS = 16,
+    TMR_ACK = 24,
+};
+
 /* RNG register offsets (rng.md 2; fault catalog rng.md 8). */
 enum {
     RNG_DATA = 0,
@@ -167,6 +176,21 @@ SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp, uint64_t off)
              * register region is unlisted (E2). */
             return acc_fault();
         }
+    case SE_SPACE_TIMER:
+        switch (off) {
+        case TMR_COUNT:
+            /* Low 64 bits of the counter at the boundary preceding
+             * the load (timer.md 4.1) -- the tick's cached cycle,
+             * which equals this MEMR's own record cycle. */
+            return acc_val(se_lo64(d->tmr_now));
+        case TMR_PERIOD:
+            return acc_val(d->tmr_period); /* last written, 0 at reset */
+        case TMR_STATUS:
+            return acc_val(d->tmr_pending ? 1u : 0u);
+        default:
+            /* ACK is write-only (E2); the rest is unlisted (E1). */
+            return acc_fault();
+        }
     case SE_SPACE_RNG:
         switch (off) {
         case RNG_DATA:
@@ -262,6 +286,36 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
         default:
             return acc_fault(); /* read-only (E4) or unlisted (E2) */
         }
+    case SE_SPACE_TIMER:
+        switch (off) {
+        case TMR_PERIOD:
+            /* Arm: next_fire = W + N, W = this store's DEVW cycle
+             * (the cached boundary cycle). Write 0 disarms -- pending
+             * is derived from period > 0, so next_fire goes stale
+             * harmlessly. Rewrite while armed re-arms fresh: no
+             * reprogram race exists on a deterministic single CPU
+             * (timer.md 4.2). */
+            d->tmr_period = val;
+            if (val != 0u)
+                d->tmr_next = d->tmr_now + val;
+            return acc_val(0);
+        case TMR_ACK: {
+            if (val != 1u)
+                return acc_fault(); /* E5: strict value, no state change */
+            if (!d->tmr_pending)
+                return acc_val(0); /* not pending: idempotent no-op */
+            /* Phase-locked advance (timer.md 4.4): the smallest k >= 1
+             * with next_fire + k*period > A keeps every fire target on
+             * the W + m*N grid. pending implies A >= next_fire, so the
+             * division is safe. */
+            se_u128 a = d->tmr_now;
+            se_u128 k = (a - d->tmr_next) / d->tmr_period + 1u;
+            d->tmr_next += k * d->tmr_period;
+            return acc_val(0);
+        }
+        default:
+            return acc_fault(); /* read-only (E2) or unlisted (E1) */
+        }
     case SE_SPACE_RNG:
         switch (off) {
         case RNG_CTRL:
@@ -284,6 +338,12 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
         RWC_ASSERT(0);
         return acc_fault();
     }
+}
+
+void SeDev_timer_tick(SeDev *d, se_u128 cycle)
+{
+    d->tmr_now = cycle;
+    d->tmr_pending = d->tmr_period != 0u && cycle >= d->tmr_next;
 }
 
 bool SeDev_inject_input(SeDev *d, bool kbd, uint64_t word)
@@ -326,10 +386,13 @@ bool SeDev_ext_pending(const SeDev *d)
      * (PLATFORM-SPEC 3): input queue non-empty, display IRQ_STATUS
      * nonzero, NIC frame exposed, RNG depth behind its IE gate --
      * IE-qualified so the device stays invisible to type-7-unaware
-     * kernels (rng.md 6). Pure state: no cycle plumbing anywhere. */
+     * kernels (rng.md 6; pure state, no cycle plumbing) -- and timer
+     * derived-pending (the cached bit -- SeDev_timer_tick recomputed
+     * it this boundary). */
     return d->kbd.count != 0u || d->mouse.count != 0u ||
            d->display_irq_status != 0u || d->nic_rx_len != 0u ||
-           ((d->rng_ctrl & RNG_CTRL_IE) != 0u && d->rng_count != 0u);
+           ((d->rng_ctrl & RNG_CTRL_IE) != 0u && d->rng_count != 0u) ||
+           d->tmr_pending;
 }
 
 /* ---------------------------------------------------- device table */
@@ -363,7 +426,7 @@ void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len)
     SeMem_write(m, off + 8u, 8u, 1u);  /* version */
     SeMem_write(m, off + 16u, 8u, 1u); /* cpu_count */
     SeMem_write(m, off + 24u, 8u, 1u); /* ram_region_count */
-    SeMem_write(m, off + 32u, 8u, 5u); /* device_count */
+    SeMem_write(m, off + 32u, 8u, 6u); /* device_count */
     off += 40u;
     SeMem_write(m, off + 0u, 16u, 0u); /* region 0 base */
     SeMem_write(m, off + 16u, 16u, (se_u128)ram_region_len);
@@ -380,9 +443,10 @@ void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len)
     devtab_record(m, &off, 3u, SE_PLAT_MOUSE_BASE, 0x10000u, no_params);
     devtab_record(m, &off, 4u, SE_PLAT_NIC_BASE, 0x30000u, nic_params);
     /* Type 7 rng, all params 0 ("0 = v1 behavior", rng.md 1; depth
-     * 256 is spec-fixed, not a param). Fifth record on this branch --
-     * SE_DEVIDX_RNG carries the wave-renumber note. */
+     * 256 is spec-fixed, not a param). Fifth record, then the type-5
+     * timer sixth -- the wave's settled order (SE_DEVIDX_*). */
     devtab_record(m, &off, 7u, SE_PLAT_RNG_BASE, 0x10000u, no_params);
+    devtab_record(m, &off, 5u, SE_PLAT_TIMER_BASE, 0x10000u, no_params);
     /* Window bytes past the encoded table stay 0: sparse memory reads
      * zero untouched, and the loader rejects segments overlapping
      * [0x800, 0x1000) (boot.md BOOT-4, image.c). */

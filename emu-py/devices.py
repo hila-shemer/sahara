@@ -1,13 +1,16 @@
-"""Sahara headless device model: display, keyboard/mouse input, NIC.
+"""Sahara headless device model: display, keyboard/mouse input, NIC,
+timer.
 
 Register windows, the pixel/TX/RX buffer windows, and event injection
-(`Device.event`) for all four devices — the queue/mailbox behaviour
-(input.md 4, display.md 6.2/6.4, nic.md 4) plus the register model of
-phase 2a.
+(`Device.event`) for the four event-fed devices — the queue/mailbox
+behaviour (input.md 4, display.md 6.2/6.4, nic.md 4) plus the register
+model of phase 2a. The timer (devspec/timer.md) is deliberately NOT
+event-fed: it is a pure function of guest DEVW writes and the cycle
+counter, and has no `event` method at all.
 
 Addresses and register maps are the reference-platform defaults of
 PLATFORM-SPEC.md section 1 and devspec/display.md, devspec/input.md,
-devspec/nic.md.
+devspec/nic.md, devspec/timer.md.
 """
 
 import struct
@@ -32,8 +35,11 @@ NIC_TX_OFFSET = 0x10000
 NIC_RX_OFFSET = 0x20000
 NIC_WINDOW_SIZE = 0x30000       # registers + TX buf + RX buf = 192 KB
 
-RNG_BASE = 0x0F080000           # devspec/rng.md 1; 0x0F06/0x0F07 stay
-RNG_SIZE = 0x10000              # holes for the wave's timer/dma
+TIMER_BASE = 0x0F060000         # devspec/timer.md 1, reference default
+TIMER_SIZE = 0x10000
+
+RNG_BASE = 0x0F080000           # devspec/rng.md 1; 0x0F07 stays a
+RNG_SIZE = 0x10000              # hole for the wave's dma
 
 PIXBUF_BASE = 0x10000000
 PIXBUF_SIZE = 0x1000000         # 16 MB (devspec/display.md 1, reference default)
@@ -388,3 +394,80 @@ class Nic(mem.Device):
         else:
             self.rx_queue.append(payload)
         return payload
+
+
+class Timer(mem.Device):
+    """Periodic-tick accelerator (devspec/timer.md): COUNT/PERIOD/
+    STATUS/ACK, guest state exactly {period, next_fire}, pending
+    derived - never stored - as period > 0 and cycle >= next_fire.
+
+    `tick(cycle)` runs in the boundary device phase (trace.md 3.3:
+    after EVENT apply, before interrupt recognition): it caches the
+    boundary cycle and recomputes pending. Register accesses read the
+    cache as their C/W/A, which equals the accessing instruction's own
+    record cycle - the byte-match contract with emu-c.
+
+    No `event` method on purpose: the timer is a pure function of
+    guest DEVW writes and the counter, and an EVENT naming it is a
+    malformed trace (timer.md 5, trace.md 4.5) - an index that
+    resolves here must never reach a device handler."""
+
+    OFF_COUNT = 0x00
+    OFF_PERIOD = 0x08
+    OFF_STATUS = 0x10
+    OFF_ACK = 0x18
+
+    def __init__(self, base=TIMER_BASE, size=TIMER_SIZE):
+        super().__init__(base, size)
+        self.period = 0
+        self.next_fire = 0
+        self.now = 0                # boundary-cycle cache
+        self.pend = False           # cached derived pending
+
+    def tick(self, cycle):
+        self.now = cycle
+        self.pend = self.period > 0 and cycle >= self.next_fire
+
+    def load(self, off, size):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_COUNT:
+            # low 64 bits of the counter at the boundary preceding the
+            # load (timer.md 4.1) == this MEMR's own record cycle
+            return self.now & MASK64
+        if off == self.OFF_PERIOD:
+            return self.period                              # last written
+        if off == self.OFF_STATUS:
+            return 1 if self.pend else 0
+        if off == self.OFF_ACK:
+            raise mem.AccessError(self.base + off)          # E2
+        raise mem.AccessError(self.base + off)               # E1
+
+    def store(self, off, size, val):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_PERIOD:
+            # Arm: next_fire = W + N, W = this store's DEVW cycle (the
+            # cached boundary cycle). 0 disarms - pending derives from
+            # period > 0, so next_fire goes stale harmlessly. Rewrite
+            # while armed re-arms fresh (timer.md 4.2).
+            self.period = val
+            if val:
+                self.next_fire = self.now + val
+            return
+        if off == self.OFF_ACK:
+            if val != 1:
+                raise mem.AccessError(self.base + off)      # E5
+            if self.pend:
+                # Phase-locked advance (timer.md 4.4): smallest k >= 1
+                # with next_fire + k*period > A keeps fires on the
+                # W + m*N grid; pending implies A >= next_fire.
+                k = (self.now - self.next_fire) // self.period + 1
+                self.next_fire += k * self.period
+            return                                          # else no-op
+        if off in (self.OFF_COUNT, self.OFF_STATUS):
+            raise mem.AccessError(self.base + off)          # E2
+        raise mem.AccessError(self.base + off)               # E1
+
+    def pending(self):
+        return self.pend

@@ -1,0 +1,36 @@
+OK
+OK: 69 opcodes, 9 fields cross-checked
+........................................................................ [ 32%]
+........................................................................ [ 65%]
+........................................................................ [ 98%]
+...                                                                      [100%]
+219 passed in 5.19s
+PASS c0_smoke
+PASS c1_traps
+PASS c1_triplefault
+PASS c1_wfihang
+PASS c2_mmu
+PASS c2_noinvtp_remap
+PASS c2_noinvtp_ptbase
+PASS c3_atomics
+PASS c3_irq_dev
+PASS c4_fp
+PASS c5_base
+PASS c6_control
+PASS c7_mem
+PASS c7_dev
+PASS c7_dev_ordq
+PASS c7_kbd
+PASS c7_kbd_ovf
+PASS c7_resize
+PASS c7_rng_err
+PASS c7_rng_prng
+PASS c7_rng_queue
+PASS c7_rng_overflow
+PASS c7_rng_irq
+PASS c7_timer_tick
+PASS c7_timer_deverr
+PASS c7_timer_wfi
+PASS c7_timer_indep
+
+run-tests: 27 passed, 0 failed, 0 skipped (of 27)
