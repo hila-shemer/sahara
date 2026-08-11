@@ -376,6 +376,15 @@ they need a spec ruling more urgently than the rest.
     documented here rather than half-faked. Not a divergence risk for
     the suite: no shared test can reach live-mode RX (the harness
     injects no EVENTs and the tree's reply paths need real frames).
+    **Resolved (NIC translator phase):** the nic.md 4 RX model landed
+    in dev.c (64-frame store, exposure, RX_POP chaining), main.c now
+    accepts NIC EVENT records with inner length in [60, 1514] — the
+    one sanctioned headless behavior change — and the translator
+    lives in gui/nic.c behind the SeDev TX hook, GUI-only. Translator
+    scope is the NIC work order's decision 1 (the local plane plus
+    UDP/DNS forwarding; TCP is entry 41, outbound ICMP entry 42).
+    Headless the hook is NULL and TX frames drop byte-for-byte as
+    before.
 
 36. **PLATFORM-SPEC 8 / trace.md 5.4 / ISA 7.6 — what a live WFI does
     when the event feed is still open, and what cycle a WFI-woken
@@ -435,3 +444,70 @@ they need a spec ruling more urgently than the rest.
     yields the events-only trace). Until then the GUI buffers writes
     (1 MB stdio buffer) and pays the disk. Not implemented — the
     format changes only by trace.md changing.
+
+41. **nic.md 6.7 — TCP translation deferred to milestone 2; every TCP
+    segment takes a 6.7.6 leaf.** The NIC work order defers the
+    connection table, so a guest SYN is answered with the refused-SYN
+    RST|ACK (seq 0, ack = SYN seq + 1, window 0) — guest-visibly the
+    6.7.1 "host connect fails" observable, connection-refused rather
+    than a dead wire — and any other segment gets the
+    no-matching-connection form. One reading inside that: a guest RST
+    matching no connection is dropped, not answered — 6.7.6's
+    "non-SYN segment" text taken literally would RST an RST, which
+    6.7.5 (guest RST: no reply) and the RFC 793 rules it cites both
+    forbid. Successor to entry 35's pattern: partial closure, loudly
+    documented; run-gui-tests and test_nic pin the observables.
+
+42. **nic.md 6.8 — outbound ICMP echo is never forwarded.** The spec
+    makes forwarding conditional on the host providing unprivileged
+    ICMP and explicitly permits silent drop; "never" is the only
+    deterministic reading of host-dependent, so milestone 1 fixes it:
+    echo to the virtual hosts is answered (TV-8/9), echo anywhere
+    else drops. No divergence risk — the permitted behaviors include
+    this one on every host.
+
+43. **CLI — `--nic host|off|fake` on sahara-gui only, mode-dependent
+    default.** The frozen headless CLI is untouched: sahara-emu gains
+    no flags, and the translator/backends never link into :core or
+    the headless binary, so nic.md 7.3's replay isolation is
+    structural (audit_banned_syms doubles as the NIC-C-35
+    no-socket-symbols instrumentation). Live default is `host` per
+    the owner ruling — images trusted by default, posture in
+    gui/nic-notes.md; under `--script` the default is `off` and
+    `host` is rejected outright, so the scripted gate stays
+    socket-free by construction (`unshare -rn ./run-gui-tests.sh`
+    passes identically).
+
+44. **Testing reading — the fake backend, and the emu-py cross-check
+    status.** `--nic fake` echoes every forwarded datagram back
+    verbatim from its flow's remote at the next pump tick; that is an
+    invented test contract, not spec behavior, and it is confined to
+    nic_fake.c — guest-visible frame synthesis is the shared sans-IO
+    core, so fake and host runs differ only in payload bytes.
+    Cross-check status: emu-py's D12 arrival path replays both new
+    NIC traces byte-identically post-META (the nicseam seam trace —
+    67 frames including a 1514-byte payload and the overflow's
+    no-record shape — and the full t_nic scripted session), checked
+    at integration. No drift to record; emu-py untouched.
+
+45. **nic.md NIC-C-27 vs 6.7.6/TV-11 — the RST window.** NIC-C-27
+    says "translator TCP ISS is 0 and window is 0xFFFF, asserted over
+    ... TV-11", but 6.7.6 fixes window 0 for every generated RST and
+    TV-11's bytes agree (frame offset 48: 0x0000). The vector wins:
+    test_nic asserts window 0 on RSTs and leaves the 0xFFFF clause to
+    the milestone-2 data segments it can actually apply to (6.1's "in
+    every segment" evidently means the data path). Flagged for a
+    one-word conformance-text fix.
+
+46. **nic.md 6.4 — DHCP reply fields the construction list leaves
+    open.** Three inventions, all fixed for determinism: (a) ciaddr
+    in every reply is 0 — the "fixed for determinism" list names
+    giaddr but not ciaddr, and the TVs only cover ciaddr-0 requests;
+    (b) the INFORM ACK, having yiaddr 0, goes to broadcast by the
+    letter of the yiaddr-0 delivery rule (RFC 2131 would unicast to
+    ciaddr); (c) the INFORM ACK's siaddr is 10.0.2.2 like every other
+    ACK — only the NAK zeroes it. Byte-deterministic either way; a
+    spec ruling can flip any of them cheaply. **[divergence risk]**
+    emu-py implements the same 6.4 text independently — no shared
+    test reaches DHCP INFORM today, so the cross-diff stays green
+    until one does.
