@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # emu-c-owned GUI test gate (work-order deliverable 4; new checks live
 # here, never under tests/):
-#   1. translator/blit/HID unit tests (the bazel short tier)
+#   1. translator/blit/HID/NIC-vector unit tests (the bazel short tier)
 #   2. core-seam record->replay identity: gui-seam-driver feeds
 #      scripted sequences through SeCpu_feed, then the frozen
 #      `sahara-emu --replay` must reproduce every post-META record
 #      byte-for-byte (WFI idle stamping, >256 burst drop recompute,
-#      same-cycle multi-event ordering)
-#   3. the end-to-end scripted session through the real sahara-gui
+#      same-cycle multi-event ordering, NIC frames + the 64-cap
+#      overflow's no-record rule)
+#   3. the end-to-end scripted sessions through the real sahara-gui
 #      binary under SDL_VIDEODRIVER=dummy, replayed via the exact
-#      invocation the GUI printed (T-18)
+#      invocation the GUI printed (T-18) -- input (demo.s) and the
+#      --nic fake NIC session (t_nic.s), both socket-free: this
+#      script must pass identically under `unshare -rn` where the
+#      host allows user namespaces
 # Byte-identity is post-META because mode= differs between live and
 # replay by design (trace.md 5.3).
 set -euo pipefail
