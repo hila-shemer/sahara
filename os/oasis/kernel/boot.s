@@ -123,8 +123,23 @@ boot_dev_done:
         li      r9, DBG_VECTORS_ON
         st.64   [r8], r9
 
-        # ---- stack at RAM region 0 top (SABI 4.5), then console up
+        # ---- stack at RAM region 0 top (SABI 4.5), then the MMU:
+        # build the identity map from the table, then boot.md 6 step 5
+        # in its exact order - ptbase, INVTP, MMU_EN. The single INVTP
+        # is the only one the kernel needs: the map never changes after
+        # this point. Identity axiom (SABI 4.4): the fetch after the
+        # status write translates to the same PA, nothing moves.
         ldz.64  sp, [r27 + G_RAMTOP]
+        jal     mmu_init               # r0 = root node PA (halts loud
+        mtsr    ptbase, r0             # on pool/reach/window failures)
+        invtp
+        mfsr    r8, status
+        or      r8, r8, STATUS_MMU_EN
+        mtsr    status, r8
+        la      r8, dbg_status         # stage 3: translation on
+        li      r9, DBG_MMU_ON
+        st.64   [r8], r9
+
         jal     con_init               # halts loud on FORMAT != 1
         la      r0, msg_banner
         jal     con_puts
@@ -134,13 +149,13 @@ boot_dev_done:
         mfsr    r8, cycle
         add     r8, r8, TICK
         mtsr    timecmp, r8
-        li      r8, STATUS_S + STATUS_IE
+        li      r8, STATUS_S + STATUS_IE + STATUS_MMU_EN
         mtsr    status, r8
-        la      r8, dbg_status         # stage 3: interrupts live
+        la      r8, dbg_status         # stage 4: interrupts live
         li      r9, DBG_IRQ_ON
         st.64   [r8], r9
 
-        la      r8, dbg_status         # stage 4: entering the shell
+        la      r8, dbg_status         # stage 5: entering the shell
         li      r9, DBG_SHELL_READY
         st.64   [r8], r9
         b       sh_main

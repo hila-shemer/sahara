@@ -357,3 +357,138 @@ adding a consumer is a one-line change to this list.
   owner review (cfff4aa). No consumer code change required: Oasis M1 has
   no user mode, and its handlers use static save areas with
   write-before-read `k0`.
+
+---
+
+## Amendment v0.1 — user-mode conventions (DRAFT — awaiting owner sign-off)
+
+Fills the "user-mode conventions" deferral of section 7 — partially.
+Defined here: the address-space model, the user window and its layout,
+the process-entry contract, kernel trap stacks, the user-mode syscall
+pointer rule, and user-fault classification. Still deferred (A.8 lists
+them): processes/scheduling, per-program address spaces, entry
+arguments, signal upcalls, user heap, W^X. Sections 1–6 of this
+document are unchanged by this amendment; where this amendment says
+"user mode", it means `status.S = 0` (ISA-SPEC 2.4). First consumer:
+Oasis milestone 2.
+
+### A.1 Address-space model: one address space, split by the U bit
+
+User code runs in the same identity-mapped address space as the
+kernel. The user window (A.2) is user VA = PA, exactly like the kernel
+ranges of section 4.4; privilege separation is entirely the page-table
+U bit (ISA-SPEC 8.4). Kernel pages carry U = 0: a user-mode load,
+store, or fetch of kernel memory faults `PERM_*`.
+
+Rationale: one program at a time needs no `asid`, no `ptbase`
+switching, and no second set of mappings. Per-program address spaces
+arrive with processes in a later amendment, and nothing here obstructs
+them — the window is a page-table property, not a linkage one. `asid`
+stays 0 throughout.
+
+### A.2 The user window: [0x0200_0000, 0x0300_0000) — UBASE, 16 MB
+
+Exactly one 8-bit VPN chunk (VPN 512–767): one shift-0 node, one root
+entry. Layout inside the window:
+
+- **Program image pages** from UBASE upward, mapped U+R+W+X. (No W^X
+  in v0.1 — deferred, A.8.) The image extent is rounded up to the
+  64 KB page.
+- **User stack**: the top 64 KB page [0x02FF_0000, 0x0300_0000),
+  mapped U+R+W.
+- **Everything between image end and stack page is UNMAPPED** — a
+  wild user pointer faults `PF_*`, loudly, rather than silently
+  reading zeros.
+
+Boot-time checks, each a loud distinct halt code: UBASE ≥ `_end`
+rounded up to a page, and UBASE + 16 MB ≤ RAM top from the device
+table. The kernel heap of section 4.6 is hereby capped at UBASE —
+growth direction unchanged, ceiling noted; the allocator amendment
+revisits this.
+
+### A.3 Entry contract
+
+- `pc` = UBASE. A user program's first byte is its entry point — no
+  header, no metadata.
+- `sp` (r28) = 0x0300_0000 — the top of the user stack, 16-aligned
+  (the stack grows down into the mapped page).
+- Every other GPR (r0–r27, r29, r30) = 0; p1–p7 = 0; `fcsr` = 0.
+  Deterministic entry; no kernel state leaks into user mode.
+- **No entry arguments in v0.1** — r0–r7 are zero by the rule above.
+  Argument passing is defined together with processes, later (A.8).
+- Entered via IRET with `status.PS` = 0 and `PIE` = 1 (ISA-SPEC 7.4 —
+  entering user mode IS an IRET with PS = 0; there is no other door).
+  User code therefore runs at TL = 0 with interrupts enabled: the
+  timer keeps ticking and the keyboard keeps draining while user code
+  runs.
+
+### A.4 Kernel trap stacks are per-process
+
+**OWNER-DECIDED 2026-08-11** — recorded here as a ruling, not an open
+question. Every user program/process has its own kernel-owned trap
+stack. The per-process structure holds its kernel trap-stack pointer;
+a trap arriving with `status.PS` = 0 loads `sp` from the *current
+process's* structure before its first push — this mechanizes section
+1.4 rule 2 — and the interrupted user `sp` is saved into that
+structure as data, never used as a stack. Reference kernel-trap-stack
+size: 16 KB.
+
+M2 instantiates exactly one such structure; M3 changes a count, not a
+design. Trap paths reach the stack only through "the current process's
+structure", never through a global bare stack symbol. The shared
+boot/shell kernel stack of section 4.5 is NOT a trap stack for
+user-mode traps.
+
+### A.5 Syscalls from user mode
+
+Mechanism unchanged from section 3. One new rule: a pointer+length
+argument passed **from user mode** must lie entirely within the user
+window of A.2, else the syscall returns −`EFAULT` — the errno's first
+real use. Kernel-mode callers are exempt (trusted; section 1.4 is a
+boundary, not a straitjacket).
+
+Handlers that consume `sp` (the syscall path) perform the A.4 stack
+switch when `status.PS` = 0 at entry. Handlers that are `sp`-free (the
+static-save-area interrupt path of section 5) need no switch — and
+must stay `sp`-free: that property is what exempts them.
+
+### A.6 User faults
+
+Any trap with `status.PS` = 0 and cause ∈ {2..9, 11, 12} terminates
+the user program. What termination means — diagnostic, return to
+shell, exit status — is per-OS policy; signal-like upcalls remain
+deferred (A.8).
+
+Consequences worth spelling out: `HALT` and `WFI` from user mode are
+`PRIV` traps (ISA-SPEC 2.4) — a user program cannot stop, halt, or
+sleep the machine. `exit()` from user mode terminates the program, not
+the machine; only a kernel-mode caller can take the machine down.
+
+### A.7 Image embedding
+
+A user program enters the flat image as an additional `.org UBASE`
+segment of the same assembly unit: the user source file(s) go last on
+the assembler command line and open the segment themselves. The loader
+of TOOLING-SPEC 1 places the segment before reset; there is still no
+runtime loader (that deferral stands). One user program per image in
+v0.1.
+
+The image is loaded once, at reset: re-entering the program does not
+re-initialize its data. Re-runnable programs initialize their own
+state from code; reload semantics are deferred with the loader.
+
+### A.8 Still deferred
+
+Explicitly not defined by this amendment; code needing any of these
+remains out of scope per amendment rule 2:
+
+- Processes and scheduling.
+- Per-program address spaces and `asid` discipline.
+- Entry arguments (argc/argv or any equivalent).
+- Signal-like upcalls.
+- User heap / allocator.
+- W^X (the v0.1 image mapping is U+R+W+X).
+
+**Amendment status: DRAFT — awaiting owner sign-off.** Consumers may
+develop against this draft only on the branch that carries it; nothing
+merges to main until the owner flips this flag and logs the change.

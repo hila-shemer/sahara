@@ -66,6 +66,11 @@ sh_eol:
         cmpeq   p1, r0, zero
         (!p1) b sh_do_uptime
         la      r0, sh_line
+        la      r1, cmd_run
+        jal     lib_streq
+        cmpeq   p1, r0, zero
+        (!p1) b sh_do_run
+        la      r0, sh_line
         la      r1, cmd_echo           # bare "echo": empty output line
         jal     lib_streq
         cmpeq   p1, r0, zero
@@ -103,6 +108,46 @@ sh_do_echo:
         la      r1, sh_line
         add     r1, r1, 5              # past "echo "
         sub     r2, r16, 4             # (len-5) text + 1 newline
+        li      r0, 0
+        li      r6, 0
+        li      r7, SYS_WRITE
+        syscall
+        b       sh_loop
+
+sh_do_run:
+        # enter the embedded user program; one report line on return:
+        # "user: exit <code>" or "user: killed cause=<c> epc=0x<hex>"
+        # (frozen verbatim in the tests). Numbers come from uproc0 -
+        # reloaded after every helper call, r9 is caller-saved.
+        jal     run_user               # r0 = PSTATE_EXITED / _KILLED
+        cmpeq   p1, r0, PSTATE_KILLED
+        (p1) b  sh_run_killed
+        la      r0, sh_ubuf
+        la      r1, str_uexit
+        jal     lib_append
+        la      r9, uproc0
+        ldz.64  r1, [r9 + P_EXIT]
+        jal     lib_u64dec
+        b       sh_run_line
+sh_run_killed:
+        la      r0, sh_ubuf
+        la      r1, str_ukill
+        jal     lib_append
+        la      r9, uproc0
+        ldz.64  r1, [r9 + P_CAUSE]
+        jal     lib_u64dec
+        la      r1, str_uepc
+        jal     lib_append
+        la      r9, uproc0
+        ldz.64  r1, [r9 + P_EPC]
+        jal     lib_u64hex
+sh_run_line:
+        li      r9, 0x0A
+        st.8    [r0], r9
+        add     r0, r0, 1
+        mov     r2, r0
+        la      r1, sh_ubuf
+        sub     r2, r2, r1
         li      r0, 0
         li      r6, 0
         li      r7, SYS_WRITE

@@ -38,7 +38,9 @@ import genkeymap as K          # noqa: E402
 # 0-based device-table indices, reference order (boot.md 5)
 DEV_DISPLAY, DEV_KBD, DEV_MOUSE, DEV_NIC = 0, 1, 2, 3
 
-BOOT_MARGIN = 300000   # boot + banner is ~20k cycles; wide margin
+BOOT_MARGIN = 800000   # boot + page-table build + banner is ~200k
+                       # cycles under M2's MMU bring-up; wide margin,
+                       # bumped once (work-order risk 3), never shaved
 GAP = 10000            # default inter-key spacing (echo is ~3k cycles)
 RELGAP = 2000          # press -> release spacing
 
@@ -55,15 +57,25 @@ def resize(w, h, stride, fmt=1):
 
 
 class Feed:
+    # user-program syscall models (mirror os/oasis/user/*.s; change
+    # together): fixed syscalls at entry/exit plus per-delivered-char
+    # (reads, writes) while the program runs. "fixed" includes failed
+    # syscalls - a rejected write is still a TRAP cause 10.
+    UM_ECHO = {"fixed": 2, "per_char": (1, 1)}   # banner + exit(0)
+    UM_CRASH = {"fixed": 0, "per_char": (0, 0)}  # dies before syscall 1
+    UM_3FIXED = {"fixed": 3, "per_char": (0, 0)} # hostile_sp / efault:
+                                                 # 2 writes + exit
+
     def __init__(self):
         self.events = []   # (cycle, dev, payload)
-        self.chars = []    # translated chars, in delivery order
+        self.chars = []    # (char, goes_to_user) in delivery order
         self.shift = False
+        self.user_model = self.UM_ECHO
 
     def at(self, t, dev, payload):
         self.events.append((t, dev, payload))
 
-    def key(self, t, ch, gap=GAP, relgap=RELGAP):
+    def key(self, t, ch, gap=GAP, relgap=RELGAP, user=False):
         """Press+release (with shift transitions) for one char.
         Returns the next free cycle."""
         hid, need = K.char_to_key(ch)
@@ -76,35 +88,54 @@ class Feed:
             t += relgap
             self.shift = False
         self.at(t, DEV_KBD, kbd(hid, True))
-        self.chars.append(ch)
+        self.chars.append((ch, user))
         self.at(t + relgap, DEV_KBD, kbd(hid, False))
         return t + gap
 
-    def text(self, t, s, gap=GAP, relgap=RELGAP):
+    def text(self, t, s, gap=GAP, relgap=RELGAP, user=False):
         for ch in s:
-            t = self.key(t, ch, gap, relgap)
+            t = self.key(t, ch, gap, relgap, user=user)
         if self.shift:
             self.at(t, DEV_KBD, kbd(K.HID_LSHIFT, False))
             self.shift = False
             t += gap
         return t
 
+    def utext(self, t, s, gap=GAP, relgap=RELGAP):
+        """Chars consumed by the running user program, not the shell."""
+        return self.text(t, s, gap, relgap, user=True)
+
     # -- the shell I/O model (mirrors shell.s; change together) --
     def expected_syscalls(self):
-        reads = len(self.chars)         # shell reads 1 byte per syscall
+        reads = 0
         writes = 1                      # the first prompt
+        exits = 0
         linelen = 0
         line = []
         halted = False
-        for ch in self.chars:
+        for ch, to_user in self.chars:
             assert not halted, "chars after halt are never read"
+            if to_user:
+                r, w = self.user_model["per_char"]
+                reads += r
+                writes += w
+                continue
+            reads += 1                  # shell reads 1 byte per syscall
             if ch == '\n':
                 writes += 1             # echo the newline
                 cmd = "".join(line)
                 if cmd == "halt":
                     halted = True
+                    line, linelen = [], 0
                     continue            # exit(): no output, no prompt
-                if cmd:                 # every other command: 1 write
+                if cmd == "run":
+                    # user program: its fixed syscalls, then the
+                    # shell's report line; per-char I/O is counted by
+                    # the to_user branch above
+                    writes += self.user_model["fixed"]  # incl. exit -
+                    writes += 1         # report line   # close enough:
+                    exits += 0          # every fixed call IS a TRAP 10
+                elif cmd:               # every other command: 1 write
                     writes += 1         # (help/echo/uptime/unknown)
                 writes += 1             # next prompt
                 line, linelen = [], 0
@@ -119,7 +150,29 @@ class Feed:
                     line.append(ch)
                     writes += 1         # echo the char
         assert halted, "feed must end with halt\\n (WFI backstop rule)"
-        return reads + writes + 1       # + exit
+        return reads + writes + exits + 1   # + the shell's exit
+
+    def user_syscalls(self):
+        # TRAP-10s whose epc sits in the user window: the user model's
+        # fixed calls per run plus its per-char I/O (ucheck asserts
+        # the count; the shell's own syscalls have kernel epcs)
+        runs = 0
+        line = []
+        per = 0
+        for ch, to_user in self.chars:
+            if to_user:
+                per += sum(self.user_model["per_char"])
+                continue
+            if ch == '\n':
+                if "".join(line) == "run":
+                    runs += 1
+                line = []
+            elif ch == '\x08':
+                if line:
+                    line.pop()
+            else:
+                line.append(ch)
+        return runs * self.user_model["fixed"] + per
 
     def min_extint(self):
         # an event arriving >= GAP/2 after its predecessor lands with
@@ -178,7 +231,7 @@ def feed_ovf_shift(f):
         dropped = 2 * i >= 256
         f.at(t, DEV_KBD, kbd(0x04, True, dropped=dropped))
         if 2 * i < 256:
-            f.chars.append('A')        # 128 visible presses
+            f.chars.append(('A', False))   # 128 visible presses
         f.at(t, DEV_KBD, kbd(0x04, False, dropped=(2 * i + 1 >= 256)))
     t += 2 * GAP
     f.at(t, DEV_KBD, kbd(K.HID_LSHIFT, False))
@@ -197,6 +250,65 @@ def feed_scroll(f):
         t = f.key(t, '\n')
     t = f.text(t + GAP, "echo bottom\n")
     f.text(t + 2 * GAP, "halt\n")
+
+
+def feed_u_enter(f):
+    # S->U->S round trip: run, user banner, one echoed line, q quits,
+    # report + prompt return, halt. Also the emu-py smoke leg's feed.
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.utext(t + GAP, "hi\n")
+    t = f.utext(t + GAP, "q\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_u_echo(f):
+    # keystrokes fed while the user program runs, several lines, then
+    # quit; echo.s's burn loop guarantees TIMER traps with user epcs
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.utext(t + GAP, "hello world\n")
+    t = f.utext(t + GAP, "abc\n")
+    t = f.utext(t + GAP, "q\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_u_kill(f):
+    # a crash image: run dies instantly; the keystone is the shell
+    # coming back and WORKING - echo ok, then a clean halt
+    f.user_model = Feed.UM_CRASH
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.text(t + 2 * GAP, "echo ok\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_u_3fixed(f):
+    # hostile_sp / efault images: three fixed user syscalls, no user
+    # input, then the same kernel-survives epilogue
+    f.user_model = Feed.UM_3FIXED
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.text(t + 2 * GAP, "echo ok\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_u_rerun(f):
+    # run, quit, run again: the image is loaded once (v0.1 A.7), so
+    # the second entry proves echo.s re-initializes from code
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.utext(t + GAP, "q\n")
+    t = f.text(t + GAP, "run\n")
+    t = f.utext(t + GAP, "q\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_m1_regression(f):
+    # the M1 suite semantics in one session, now under MMU_EN=1: the
+    # identity axiom (SABI 4.4) says conforming kernel code needs zero
+    # changes when translation goes on - this feed proves it instead
+    # of assuming it (work-order risk 1).
+    t = f.text(BOOT_MARGIN, "help\n")
+    t = f.text(t + GAP, "ecXX\x08\x08ho ok\n")
+    t = f.text(t + GAP, "uptime\n")
+    t = f.text(t + GAP, "frob\n")
+    f.text(t + GAP, "halt\n")
 
 
 def feed_resize(f):
@@ -231,6 +343,7 @@ def main():
     print(f"SYSCALLS={f.expected_syscalls()}")
     print(f"MIN_EXTINT={f.min_extint()}")
     print(f"LAST_CYCLE={f.events[-1][0]}")
+    print(f"USER_SYSCALLS={f.user_syscalls()}")
 
 
 if __name__ == "__main__":

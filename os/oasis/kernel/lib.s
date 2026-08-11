@@ -60,6 +60,27 @@ la_loop:
 la_done:
         ret
 
+lib_u64hex:                            # (r0 buf, r1 value) -> r0 = end;
+        cmpeq   p1, r1, zero           # lowercase, no leading zeros
+        (!p1) b lh_digits
+        li      r8, 0x30
+        st.8    [r0], r8
+        add     r0, r0, 1
+        ret
+lh_digits:
+        mov     r8, r0                 # nibbles reversed, then reuse
+lh_loop:                               # u64dec's in-place reverse
+        cmpeq   p1, r1, zero
+        (p1) b  lu_rev
+        and     r9, r1, 15
+        cmpltu  p1, r9, 10
+        add     r9, r9, 0x30
+        (!p1) add r9, r9, 0x27         # 'a' - '0' - 10
+        st.8    [r8], r9
+        add     r8, r8, 1
+        shr     r1, r1, 4
+        b       lh_loop
+
 lib_u64dec:                            # (r0 buf, r1 value) -> r0 = end;
         cmpeq   p1, r1, zero           # unsigned decimal, no leading 0s
         (!p1) b lu_digits
