@@ -1,0 +1,1590 @@
+#!/usr/bin/env python3
+# cc.py - the CC-M1 compiler. One .c translation unit in, one SABI-v0
+# conformant .s out; lang/cc/cc-m1.md is the contract this file
+# implements, asm/asm.py assembles the output (the unit goes LAST on
+# the assembler command line - it owns the section seams).
+#
+# Deliberately no optimizer: locals are memory-resident, expressions
+# evaluate on a temp stack over r8-r15 with automatic spill, and the
+# only folding is literal-on-literal (cc-m1.md 5.5). Determinism is a
+# contract: no unordered iteration reaches the emitter, label counters
+# are per-function and source-order derived, the header comment
+# carries the input basename only.
+
+import sys
+import os
+import argparse
+
+MASK128 = (1 << 128) - 1
+
+
+def to_signed(pattern):
+    """128-bit canonical image -> the signed value li emits (minimal chain)."""
+    return pattern - (1 << 128) if pattern >> 127 else pattern
+
+
+def sext(value, bits):
+    """Canonical image of a bits-wide result (ISA 3.4): sign-extend from
+    bit bits-1, signed and unsigned alike."""
+    value &= (1 << bits) - 1
+    if value >> (bits - 1):
+        value -= 1 << bits
+    return value & MASK128
+
+
+# --------------------------------------------------------------- errors
+
+class Cc(Exception):
+    def __init__(self, line, msg):
+        super().__init__(msg)
+        self.line = line
+        self.msg = msg
+
+
+# ---------------------------------------------------- reserved names
+# asm.md 2.3, dot-free subset: C identifiers cannot contain '.', so the
+# suffixed forms (add.32, la.abs, ...) can never collide.
+
+def build_reserved():
+    s = set()
+    s.update(f"r{i}" for i in range(32))
+    s.update(("sp", "ra", "k0", "zero"))
+    s.update(f"p{i}" for i in range(8))
+    s.update(("status", "epc0", "cause0", "baddr0", "vbase", "dfbase",
+              "ptbase", "asid", "cycle", "timecmp", "scratch0",
+              "scratch1", "epc1", "cause1", "baddr1", "fcsr"))
+    s.update(("add", "sub", "and", "or", "xor", "shl", "shr", "sar",
+              "mul", "mulh", "mulhu", "madd", "udiv", "sdiv", "urem",
+              "srem", "cmpeq", "cmplt", "cmpltu", "cmple", "cmpleu",
+              "lds", "ldz", "ld128", "st", "st128", "cas", "amoadd",
+              "amoand", "amoor", "amoxor", "amoswap", "amomin",
+              "amomax", "amominu", "amomaxu", "b", "jal", "jalr",
+              "ldi", "shori", "lap", "prd", "pwr", "mfsr", "mtsr",
+              "syscall", "iret", "invtp", "ifence", "wfi", "halt",
+              "fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmadd", "fmin",
+              "fmax", "fcmpeq", "fcmplt", "fcmple", "fcvtfi",
+              "fcvtfiu", "fcvtif", "fcvtuif", "fcvtff"))
+    s.update(("li", "la", "mov", "nop", "not", "neg", "ret"))
+    s.update(("sxt", "zxt", "f32", "f64", "i32", "i64", "i128"))
+    return s
+
+
+RESERVED = build_reserved()
+
+
+# ----------------------------------------------------------------- lexer
+
+KEYWORDS = {"u8", "i64", "u64", "i128", "u128", "void", "struct",
+            "extern", "if", "else", "while", "break", "continue",
+            "return", "sizeof"}
+PUNCT2 = ("==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||")
+PUNCT1 = "()[]{};,.=<>+-*/%&|^!"
+
+ESCAPES = {"n": 0x0A, "t": 0x09, "r": 0x0D, "b": 0x08, "f": 0x0C,
+           "0": 0x00, "\\": 0x5C, '"': 0x22, "'": 0x27}
+
+
+def lex(src):
+    toks = []
+    i, line = 0, 1
+    n = len(src)
+
+    def esc(j):
+        # j points at the char after '\'; returns (byte, next_index)
+        if j >= n:
+            raise Cc(line, "unterminated escape")
+        c = src[j]
+        if c in ESCAPES:
+            return ESCAPES[c], j + 1
+        if c == "x":
+            h = src[j + 1:j + 3]
+            if len(h) == 2 and all(x in "0123456789abcdefABCDEF" for x in h):
+                return int(h, 16), j + 3
+            raise Cc(line, "\\x needs exactly two hex digits")
+        raise Cc(line, f"unknown escape '\\{c}'")
+
+    while i < n:
+        c = src[i]
+        if c == "\n":
+            line += 1
+            i += 1
+            continue
+        if c in " \t\r":
+            i += 1
+            continue
+        if src.startswith("//", i):
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            if j < 0:
+                raise Cc(line, "unterminated /* comment")
+            line += src.count("\n", i, j)
+            i = j + 2
+            continue
+        if c.isalpha() or c == "_":
+            j = i
+            while j < n and (src[j].isalnum() or src[j] == "_"):
+                j += 1
+            w = src[i:j]
+            toks.append(("kw" if w in KEYWORDS else "id", w, line))
+            i = j
+            continue
+        if c.isdigit():
+            j = i
+            while j < n and src[j].isalnum():
+                j += 1
+            text = src[i:j]
+            try:
+                v = int(text, 16) if text[:2].lower() == "0x" else int(text, 10)
+            except ValueError:
+                raise Cc(line, f"bad integer literal '{text}'")
+            if v >= 1 << 128:
+                raise Cc(line, f"integer literal does not fit 128 bits")
+            toks.append(("num", v, line))
+            i = j
+            continue
+        if c == "'":
+            j = i + 1
+            if j < n and src[j] == "\\":
+                v, j = esc(j + 1)
+            elif j < n and src[j] not in "'\n":
+                v, j = ord(src[j]), j + 1
+            else:
+                raise Cc(line, "bad character literal")
+            if j >= n or src[j] != "'":
+                raise Cc(line, "bad character literal")
+            toks.append(("num", v, line))
+            i = j + 1
+            continue
+        if c == '"':
+            data = bytearray()
+            j = i + 1
+            while True:
+                if j >= n or src[j] == "\n":
+                    raise Cc(line, "unterminated string literal")
+                if src[j] == '"':
+                    break
+                if src[j] == "\\":
+                    v, j = esc(j + 1)
+                    data.append(v)
+                else:
+                    data.append(ord(src[j]) & 0xFF)
+                    j += 1
+            toks.append(("str", bytes(data), line))
+            i = j + 1
+            continue
+        two = src[i:i + 2]
+        if two in PUNCT2:
+            toks.append(("p", two, line))
+            i += 2
+            continue
+        if c in PUNCT1:
+            toks.append(("p", c, line))
+            i += 1
+            continue
+        raise Cc(line, f"stray character {c!r}")
+    toks.append(("eof", "", line))
+    return toks
+
+
+# ----------------------------------------------------------------- types
+# Scalars are ('int', bits, signed); also ('void',), ('ptr', T),
+# ('arr', T, n), ('struct', name). The (size, signedness) pair is the
+# whole scalar model - m2's i8..u32 are new rows, not new machinery.
+
+TYPE_KW = {"u8": ("int", 8, False), "i64": ("int", 64, True),
+           "u64": ("int", 64, False), "i128": ("int", 128, True),
+           "u128": ("int", 128, False), "void": ("void",)}
+
+T_I64 = ("int", 64, True)
+T_U64 = ("int", 64, False)
+T_I128 = ("int", 128, True)
+T_U128 = ("int", 128, False)
+
+
+def is_int(t):
+    return t[0] == "int"
+
+
+def is_ptr(t):
+    return t[0] == "ptr"
+
+
+def is_scalar(t):
+    return t[0] in ("int", "ptr")
+
+
+def type_str(t):
+    if t[0] == "int":
+        return ("i" if t[2] else "u") + str(t[1])
+    if t[0] == "void":
+        return "void"
+    if t[0] == "ptr":
+        return type_str(t[1]) + "*"
+    if t[0] == "arr":
+        return f"{type_str(t[1])}[{t[2]}]"
+    return "struct " + t[1]
+
+
+class Unit:
+    """One translation unit: struct/function/global tables + the AST."""
+
+    def __init__(self):
+        self.structs = {}    # name -> (fields:[(name, type, off)], size, align)
+        self.funcs = {}      # name -> (ret, params, body|None, line)
+        self.globals = {}    # name -> dict(type, init, extern, line)
+        self.gorder = []     # global names, declaration order
+        self.forder = []     # function-definition names, source order
+        self.strings = {}    # bytes -> label, first-use order
+
+    def t_align(self, t):
+        if t[0] == "int":
+            return t[1] // 8
+        if t[0] == "ptr":
+            return 16
+        if t[0] == "arr":
+            return self.t_align(t[1])
+        if t[0] == "struct":
+            return self.structs[t[1]][2]
+        raise AssertionError(t)
+
+    def t_size(self, t):
+        if t[0] == "int":
+            return t[1] // 8
+        if t[0] == "ptr":
+            return 16
+        if t[0] == "arr":
+            return self.t_size(t[1]) * t[2]
+        if t[0] == "struct":
+            return self.structs[t[1]][1]
+        raise AssertionError(t)
+
+    def field(self, sname, fname, line):
+        for fn, ft, off in self.structs[sname][0]:
+            if fn == fname:
+                return ft, off
+        raise Cc(line, f"struct {sname} has no member '{fname}'")
+
+    def intern_string(self, data):
+        if data not in self.strings:
+            self.strings[data] = f"cc.str.{len(self.strings)}"
+        return self.strings[data]
+
+
+# ---------------------------------------------------------------- parser
+
+class Parser:
+    def __init__(self, toks, unit):
+        self.t = toks
+        self.i = 0
+        self.u = unit
+
+    def peek(self, ahead=0):
+        return self.t[min(self.i + ahead, len(self.t) - 1)]
+
+    def next(self):
+        tk = self.t[self.i]
+        self.i += 1
+        return tk
+
+    def line(self):
+        return self.peek()[2]
+
+    def accept(self, kind, val=None):
+        k, v, _ = self.peek()
+        if k == kind and (val is None or v == val):
+            self.i += 1
+            return v if val is None else True
+        return None
+
+    def expect(self, kind, val=None, what=None):
+        k, v, line = self.peek()
+        r = self.accept(kind, val)
+        if r is None:
+            want = what or (f"'{val}'" if val else kind)
+            got = repr(v) if v != "" else "end of file"
+            raise Cc(line, f"expected {want}, got {got}")
+        return r
+
+    def at_type(self):
+        k, v, _ = self.peek()
+        return k == "kw" and (v in TYPE_KW or v == "struct")
+
+    def parse_type(self, need=True):
+        line = self.line()
+        if self.accept("kw", "struct"):
+            name = self.expect("id", what="struct name")
+            if name not in self.u.structs:
+                raise Cc(line, f"struct {name} not declared")
+            t = ("struct", name)
+        else:
+            k, v, _ = self.peek()
+            if not (k == "kw" and v in TYPE_KW):
+                if need:
+                    raise Cc(line, "expected a type")
+                return None
+            self.next()
+            t = TYPE_KW[v]
+        while self.accept("p", "*"):
+            if t == ("void",):
+                raise Cc(line, "void* is not in m1 (see the roadmap)")
+            t = ("ptr", t)
+        return t
+
+    # ---- file scope
+
+    def parse_unit(self):
+        while self.peek()[0] != "eof":
+            if (self.peek() == ("kw", "struct", self.peek()[2])
+                    and self.peek(1)[0] == "id"
+                    and self.peek(2)[:2] == ("p", "{")):
+                self.parse_struct()
+                continue
+            line = self.line()
+            is_extern = bool(self.accept("kw", "extern"))
+            t = self.parse_type()
+            name = self.expect("id", what="a declarator name")
+            if self.accept("p", "("):
+                self.parse_func(t, name, is_extern, line)
+            else:
+                self.parse_global(t, name, is_extern, line)
+
+    def parse_struct(self):
+        line = self.line()
+        self.next()                      # struct
+        name = self.expect("id")
+        if name in self.u.structs:
+            raise Cc(line, f"struct {name} redefined")
+        self.expect("p", "{")
+        fields, off, maxal = [], 0, 1
+        while not self.accept("p", "}"):
+            fl = self.line()
+            ft = self.parse_type()
+            if ft == ("void",):
+                raise Cc(fl, "void member")
+            fn = self.expect("id", what="member name")
+            if self.accept("p", "["):
+                cnt = self.const_expr("array size")
+                if cnt <= 0:
+                    raise Cc(fl, "array size must be > 0")
+                self.expect("p", "]")
+                ft = ("arr", ft, cnt)
+            self.expect("p", ";")
+            if any(fn == f[0] for f in fields):
+                raise Cc(fl, f"duplicate member '{fn}'")
+            al = self.u.t_align(ft)
+            off = (off + al - 1) & ~(al - 1)
+            fields.append((fn, ft, off))
+            off += self.u.t_size(ft)
+            maxal = max(maxal, al)
+        self.expect("p", ";")
+        size = (off + maxal - 1) & ~(maxal - 1)
+        if not fields:
+            raise Cc(line, f"struct {name} is empty")
+        self.u.structs[name] = (fields, size, maxal)
+
+    def check_label_name(self, name, line):
+        if name.lower() in RESERVED:
+            raise Cc(line, f"'{name}' collides with an assembler reserved "
+                           f"name (asm.md 2.3) - rename it (cc-m1.md "
+                           f"section 2)")
+
+    def parse_func(self, ret, name, is_extern, line):
+        self.check_label_name(name, line)
+        if name in self.u.globals:
+            raise Cc(line, f"'{name}' already declared as a variable")
+        params = []
+        if not self.accept("p", ")"):
+            if self.peek()[:2] == ("kw", "void") and self.peek(1)[:2] == ("p", ")"):
+                self.next()
+                self.next()
+            else:
+                while True:
+                    pl = self.line()
+                    pt = self.parse_type()
+                    if pt == ("void",):
+                        raise Cc(pl, "void parameter")
+                    if not is_scalar(pt):
+                        raise Cc(pl, "parameters must be scalars or "
+                                     "pointers in m1 (structs/arrays: "
+                                     "pass a pointer)")
+                    pn = self.expect("id", what="parameter name")
+                    if any(pn == q[0] for q in params):
+                        raise Cc(pl, f"duplicate parameter '{pn}'")
+                    params.append((pn, pt))
+                    if self.accept("p", ")"):
+                        break
+                    self.expect("p", ",")
+        sig = (ret, tuple(p[1] for p in params))
+        old = self.u.funcs.get(name)
+        if old is not None:
+            if (old[0], tuple(p[1] for p in old[1])) != sig:
+                raise Cc(line, f"conflicting declaration of {name}()")
+        if self.accept("p", ";"):
+            if old is None:
+                self.u.funcs[name] = (ret, params, None, line)
+            return
+        if old is not None and old[2] is not None:
+            raise Cc(line, f"{name}() redefined")
+        body = self.parse_block()
+        self.u.funcs[name] = (ret, params, body, line)
+        self.u.forder.append(name)
+
+    def parse_global(self, t, name, is_extern, line):
+        self.check_label_name(name, line)
+        if t == ("void",):
+            raise Cc(line, "void variable")
+        if self.accept("p", "["):
+            cnt = self.const_expr("array size")
+            if cnt <= 0:
+                raise Cc(line, "array size must be > 0")
+            self.expect("p", "]")
+            t = ("arr", t, cnt)
+        init = None
+        if self.accept("p", "="):
+            if is_extern:
+                raise Cc(line, "extern declaration with initializer")
+            if t[0] == "arr":
+                if not is_int(t[1]):
+                    raise Cc(line, "only integer arrays can be "
+                                   "initialized in m1")
+                self.expect("p", "{")
+                init = []
+                while True:
+                    init.append(self.const_expr("initializer"))
+                    if self.accept("p", "}"):
+                        break
+                    self.expect("p", ",")
+                    if self.accept("p", "}"):
+                        break
+                if len(init) > t[2]:
+                    raise Cc(line, f"too many initializers ({len(init)} "
+                                   f"for {t[2]} elements)")
+            elif is_int(t):
+                init = self.const_expr("initializer")
+            else:
+                raise Cc(line, "only integer scalars and arrays take "
+                               "initializers in m1 (no address "
+                               "initializers)")
+        self.expect("p", ";")
+        old = self.u.globals.get(name)
+        if old is not None:
+            if old["type"] != t:
+                raise Cc(line, f"conflicting declaration of '{name}'")
+            if not old["extern"] and not is_extern:
+                raise Cc(line, f"'{name}' redefined")
+            if is_extern:
+                return
+            old["extern"] = False
+            old["init"] = init
+            return
+        if name in self.u.funcs:
+            raise Cc(line, f"'{name}' already declared as a function")
+        self.u.globals[name] = {"type": t, "init": init,
+                                "extern": is_extern, "line": line}
+        self.u.gorder.append(name)
+
+    # ---- constant expressions (global inits, array sizes)
+
+    def const_expr(self, what):
+        line = self.line()
+        e = fold(self.parse_expr(), self.u)
+        if e[0] != "num":
+            raise Cc(line, f"{what} must be a constant expression")
+        return to_signed(e[2])
+
+    # ---- statements
+
+    def parse_block(self):
+        self.expect("p", "{")
+        stmts = []
+        while not self.accept("p", "}"):
+            stmts.append(self.parse_stmt())
+        return ("block", stmts)
+
+    def parse_stmt(self):
+        line = self.line()
+        if self.peek()[:2] == ("p", "{"):
+            return self.parse_block()
+        if self.at_type():
+            t = self.parse_type()
+            if t == ("void",):
+                raise Cc(line, "void variable")
+            name = self.expect("id", what="a variable name")
+            if self.accept("p", "["):
+                cnt = self.const_expr("array size")
+                if cnt <= 0:
+                    raise Cc(line, "array size must be > 0")
+                self.expect("p", "]")
+                t = ("arr", t, cnt)
+            init = None
+            if self.accept("p", "="):
+                if not is_scalar(t):
+                    raise Cc(line, "arrays and structs cannot be "
+                                   "initialized in m1")
+                init = self.parse_expr()
+            self.expect("p", ";")
+            return ("decl", line, t, name, init)
+        if self.accept("kw", "if"):
+            self.expect("p", "(")
+            cond = self.parse_expr()
+            self.expect("p", ")")
+            then = self.parse_stmt()
+            els = self.parse_stmt() if self.accept("kw", "else") else None
+            return ("if", line, cond, then, els)
+        if self.accept("kw", "while"):
+            self.expect("p", "(")
+            cond = self.parse_expr()
+            self.expect("p", ")")
+            return ("while", line, cond, self.parse_stmt())
+        if self.accept("kw", "break"):
+            self.expect("p", ";")
+            return ("break", line)
+        if self.accept("kw", "continue"):
+            self.expect("p", ";")
+            return ("continue", line)
+        if self.accept("kw", "return"):
+            e = None if self.peek()[:2] == ("p", ";") else self.parse_expr()
+            self.expect("p", ";")
+            return ("return", line, e)
+        if self.accept("p", ";"):
+            return ("empty", line)
+        e = self.parse_expr()
+        self.expect("p", ";")
+        return ("expr", line, e)
+
+    # ---- expressions (C precedence, cc-m1.md 5.2)
+
+    def parse_expr(self):
+        return self.parse_assign()
+
+    def parse_assign(self):
+        lhs = self.parse_or()
+        if self.peek()[:2] == ("p", "="):
+            line = self.line()
+            self.next()
+            return ("assign", line, lhs, self.parse_assign())
+        return lhs
+
+    BINLEVELS = [("||",), ("&&",), ("|",), ("^",), ("&",),
+                 ("==", "!="), ("<", ">", "<=", ">="), ("<<", ">>"),
+                 ("+", "-"), ("*", "/", "%")]
+
+    def parse_or(self):
+        return self.parse_bin(0)
+
+    def parse_bin(self, lvl):
+        if lvl == len(self.BINLEVELS):
+            return self.parse_unary()
+        e = self.parse_bin(lvl + 1)
+        while True:
+            k, v, line = self.peek()
+            if k == "p" and v in self.BINLEVELS[lvl]:
+                self.next()
+                rhs = self.parse_bin(lvl + 1)
+                kind = "logic" if v in ("&&", "||") else "bin"
+                e = (kind, line, v, e, rhs)
+            else:
+                return e
+
+    def parse_unary(self):
+        k, v, line = self.peek()
+        if (k, v) == ("p", "("):
+            # cast?  '(' type ... ')'
+            nk, nv, _ = self.peek(1)
+            if nk == "kw" and (nv in TYPE_KW or nv == "struct"):
+                self.next()
+                t = self.parse_type()
+                self.expect("p", ")")
+                if not is_scalar(t):
+                    raise Cc(line, "casts are scalar-to-scalar only")
+                return ("cast", line, t, self.parse_unary())
+        if self.accept("p", "-"):
+            return ("neg", line, self.parse_unary())
+        if self.accept("p", "!"):
+            return ("not", line, self.parse_unary())
+        if self.accept("p", "*"):
+            return ("deref", line, self.parse_unary())
+        if self.accept("p", "&"):
+            return ("addr", line, self.parse_unary())
+        if self.accept("kw", "sizeof"):
+            self.expect("p", "(")
+            t = self.parse_type()
+            self.expect("p", ")")
+            if not is_scalar(t) and t[0] != "struct":
+                raise Cc(line, "sizeof takes a scalar, pointer, or "
+                               "struct type")
+            return ("num", line, self.u.t_size(t) & MASK128, T_U64)
+        return self.parse_postfix()
+
+    def parse_postfix(self):
+        k, v, line = self.next()
+        if k == "num":
+            e = ("num", line, v & MASK128, literal_type(v))
+        elif k == "str":
+            e = ("strlit", line, v)
+        elif k == "id":
+            if self.peek()[:2] == ("p", "("):
+                self.next()
+                args = []
+                if not self.accept("p", ")"):
+                    while True:
+                        args.append(self.parse_expr())
+                        if self.accept("p", ")"):
+                            break
+                        self.expect("p", ",")
+                e = ("call", line, v, args)
+            else:
+                e = ("var", line, v)
+        elif (k, v) == ("p", "("):
+            e = self.parse_expr()
+            self.expect("p", ")")
+        else:
+            got = repr(v) if v != "" else "end of file"
+            raise Cc(line, f"expected an expression, got {got}")
+        while True:
+            line = self.line()
+            if self.accept("p", "["):
+                e = ("index", line, e, self.parse_expr())
+                self.expect("p", "]")
+            elif self.accept("p", "."):
+                e = ("field", line, e, self.expect("id"), False)
+            elif self.accept("p", "->"):
+                e = ("field", line, e, self.expect("id"), True)
+            elif self.peek()[:2] == ("p", "("):
+                raise Cc(line, "calls apply to function names only "
+                               "(no function pointers in m1)")
+            else:
+                return e
+
+
+def literal_type(v):
+    """cc-m1.md 5.4: first of i64, u64, i128, u128 that holds the value."""
+    if v < 1 << 63:
+        return T_I64
+    if v < 1 << 64:
+        return T_U64
+    if v < 1 << 127:
+        return T_I128
+    return T_U128
+
+
+# ------------------------------------------------------- constant folding
+# cc-m1.md 5.5: literal-on-literal only, never / or %, exact machine
+# semantics (wrap at width, shift counts mod width).
+
+def common_type(a, b):
+    """Balance two promoted integer types: larger size wins; at equal
+    size, unsigned wins (cc-m1.md 5.1)."""
+    if a[1] != b[1]:
+        return a if a[1] > b[1] else b
+    return a if not a[2] else b
+
+
+def promote(t):
+    return T_U64 if t == ("int", 8, False) else t
+
+
+FOLDABLE = ("+", "-", "*", "&", "|", "^", "<<", ">>")
+
+
+def fold(e, unit):
+    op = e[0]
+    if op in ("num", "strlit", "var", "call"):
+        if op == "call":
+            e = ("call", e[1], e[2], [fold(a, unit) for a in e[3]])
+        return e
+    parts = [fold(x, unit) if isinstance(x, tuple) else x for x in e]
+    e = tuple(parts)
+    if e[0] == "neg" and e[2][0] == "num":
+        _, line, pat, t = e[2]
+        t = promote(t)
+        return ("num", line, sext(-to_val(pat, t), t[1]), t)
+    if e[0] == "bin" and e[2] in FOLDABLE \
+            and e[3][0] == "num" and e[4][0] == "num":
+        v = fold_bin(e[2], e[3], e[4])
+        if v is not None:
+            return v
+    return e
+
+
+def to_val(pattern, t):
+    """Interpret a canonical 128-bit image as t's mathematical value."""
+    v = pattern & ((1 << t[1]) - 1)
+    if t[2] and v >> (t[1] - 1):
+        v -= 1 << t[1]
+    return v
+
+
+def fold_bin(op, l, r):
+    lt, rt = promote(l[3]), promote(r[3])
+    if op in ("<<", ">>"):
+        t = lt
+        a = to_val(l[2], t)
+        sh = to_val(r[2], rt) % t[1]
+        if op == "<<":
+            v = a << sh
+        elif t[2]:
+            v = a >> sh                      # arithmetic
+        else:
+            v = (a & ((1 << t[1]) - 1)) >> sh  # logical
+        return ("num", l[1], sext(v, t[1]), t)
+    t = common_type(lt, rt)
+    a, b = to_val(l[2], t), to_val(r[2], t)
+    v = {"+": a + b, "-": a - b, "*": a * b, "&": a & b,
+         "|": a | b, "^": a ^ b}[op]
+    return ("num", l[1], sext(v, t[1]), t)
+
+
+# ---------------------------------------------------------------- codegen
+
+LOADS = {8: "ldz.8", 64: "lds.64"}       # lds.64 keeps u64 canonical too
+STORES = {8: "st.8", 64: "st.64"}
+ALU = {"+": "add", "-": "sub", "*": "mul", "&": "and", "|": "or",
+       "^": "xor", "<<": "shl"}
+
+
+def suffix(t):
+    """ALU/compare width suffix for a scalar type (width discipline)."""
+    if is_ptr(t):
+        return ""
+    bits = promote(t)[1]
+    return ".64" if bits == 64 else ""
+
+
+class Func:
+    def __init__(self, unit, name):
+        self.u = unit
+        self.name = name
+        self.ret, self.params, self.body, self.dline = unit.funcs[name]
+        self.lines = []          # body text; %%FRAME%% patched at render
+        self.depth = 0
+        self.peak = 0
+        self.nlabel = 0
+        self.scopes = []
+        self.loopstack = []      # (continue_label, break_label)
+        self.slot_of = {}        # id(decl node) -> frame offset
+        self.calls = False
+        self.maxargs = 0
+        # params first (one 16-byte home each), then decls in source
+        # order - prescan continues the running offset.
+        self.locals_size = 16 * len(self.params)
+        self.prescan(self.body)
+        self.out_size = 16 * max(0, self.maxargs - 8)
+        self.locals_base = self.out_size
+        self.spill_base = self.out_size + self.locals_size
+
+    # ---- prescan: every decl gets a frame slot; calls/maxargs found.
+    # Slot order = source order, so offsets are deterministic.
+
+    def prescan(self, node):
+        stack = [node]
+        order = []
+        while stack:
+            n = stack.pop()
+            if not isinstance(n, tuple):
+                if isinstance(n, list):
+                    stack.extend(reversed(n))
+                continue
+            order.append(n)
+            stack.extend(reversed([x for x in n
+                                   if isinstance(x, (tuple, list))]))
+        for n in order:
+            if n[0] == "decl":
+                size = self.u.t_size(n[2])
+                size = (size + 15) & ~15
+                self.slot_of[id(n)] = self.locals_size
+                self.locals_size += size
+            elif n[0] == "call":
+                self.calls = True
+                self.maxargs = max(self.maxargs, len(n[3]))
+
+    # ---- emit helpers
+
+    def emit(self, s):
+        self.lines.append("        " + s)
+
+    def emit_label(self, l):
+        self.lines.append(l + ":")
+
+    def label(self):
+        self.nlabel += 1
+        return f"{self.name}.L{self.nlabel}"
+
+    def home(self, slot):
+        return self.spill_base + 16 * slot
+
+    def reg(self, slot):
+        return f"r{8 + slot % 8}"
+
+    def push(self):
+        d = self.depth
+        if d >= 8:
+            self.emit(f"st128 [sp + {self.home(d - 8)}], {self.reg(d)}")
+        self.depth += 1
+        self.peak = max(self.peak, self.depth)
+        return self.reg(d)
+
+    def pop(self):
+        self.depth -= 1
+        d = self.depth
+        if d >= 8:
+            self.emit(f"ld128 {self.reg(d)}, [sp + {self.home(d - 8)}]")
+
+    def top(self):
+        return self.reg(self.depth - 1)
+
+    # ---- scoping
+
+    def lookup(self, name, line):
+        for sc in reversed(self.scopes):
+            if name in sc:
+                return sc[name]
+        g = self.u.globals.get(name)
+        if g is not None:
+            return ("global", name, g["type"])
+        raise Cc(line, f"'{name}' is not declared")
+
+    # ---- conversions (cc-m1.md section 4); operate on register r
+
+    def convert(self, r, src, dst, line):
+        if src == dst:
+            return
+        if is_ptr(src) and is_ptr(dst):
+            return
+        sbits = src[1] if is_int(src) else 128
+        if is_int(dst) and dst[1] == 8:
+            self.emit(f"and.64 {r}, {r}, 0xff")
+            return
+        dbits = dst[1] if is_int(dst) else 128
+        if dbits == 64:
+            if sbits != 64:
+                self.emit(f"or.64 {r}, {r}, 0")
+            return
+        # dbits == 128 (or pointer)
+        if sbits == 128:
+            return
+        if is_int(src) and src == T_U64:
+            self.emit(f"shl {r}, {r}, 64")   # zxt mod caps at 63:
+            self.emit(f"shr {r}, {r}, 64")   # the pinned pair lowering
+            return
+        return                                # i64 image is the sext
+
+    def implicit(self, r, src, dst, line, what):
+        if src == dst or (is_int(src) and is_int(dst)):
+            self.convert(r, promote(src) if is_int(src) else src, dst, line)
+            return
+        raise Cc(line, f"{what}: cannot convert {type_str(src)} to "
+                       f"{type_str(dst)} implicitly (cast needed?)")
+
+    # ---- lvalues: push the address, return the object type
+
+    def lvalue(self, e):
+        op = e[0]
+        if op == "var":
+            kind = self.lookup(e[2], e[1])
+            r = self.push()
+            if kind[0] == "local":
+                self.emit(f"add {r}, sp, {kind[1]}")
+                return kind[2]
+            self.emit(f"la {r}, {kind[1]}")
+            return kind[2]
+        if op == "deref":
+            t = self.rvalue(e[2])
+            if not is_ptr(t):
+                raise Cc(e[1], f"cannot dereference {type_str(t)}")
+            return t[1]
+        if op == "index":
+            bt = self.rvalue(e[2])
+            if not is_ptr(bt):
+                raise Cc(e[1], f"cannot index {type_str(bt)}")
+            it = self.rvalue(e[3])
+            if not is_int(it):
+                raise Cc(e[1], "index must be an integer")
+            self.index_to_128(self.top(), it)
+            self.scale_index(bt[1])
+            rl, rr = self.reg(self.depth - 2), self.top()
+            self.emit(f"add {rl}, {rl}, {rr}")
+            self.pop()
+            return bt[1]
+        if op == "field":
+            _, line, base, fname, arrow = e
+            if arrow:
+                bt = self.rvalue(base)
+                if not (is_ptr(bt) and bt[1][0] == "struct"):
+                    raise Cc(line, f"-> needs a struct pointer, got "
+                                   f"{type_str(bt)}")
+                st = bt[1]
+            else:
+                st = self.lvalue(base)
+                if st[0] != "struct":
+                    raise Cc(line, f". needs a struct, got {type_str(st)}")
+            ft, off = self.u.field(st[1], fname, line)
+            if off:
+                self.emit(f"add {self.top()}, {self.top()}, {off}")
+            return ft
+        raise Cc(e[1], "not an lvalue")
+
+    def index_to_128(self, r, t):
+        """Pointer arithmetic runs at width 128: a u64 offset must be
+        zero-extended first (its canonical image is the sign-extension,
+        cc-m1.md section 4)."""
+        if t == T_U64:
+            self.emit(f"shl {r}, {r}, 64")
+            self.emit(f"shr {r}, {r}, 64")
+
+    def scale_index(self, elem):
+        """Top of stack: index value. Scale by sizeof(elem), width 128."""
+        size = self.u.t_size(elem)
+        r = self.top()
+        if size == 1:
+            return
+        if size & (size - 1) == 0:
+            self.emit(f"shl {r}, {r}, {size.bit_length() - 1}")
+        else:
+            self.emit(f"mul {r}, {r}, {size}")
+
+    # ---- rvalues: push one slot with the value, return its type
+
+    def rvalue(self, e):
+        op = e[0]
+        if op == "num":
+            r = self.push()
+            self.emit(f"li {r}, {to_signed(e[2])}")
+            return promote(e[3])
+        if op == "strlit":
+            label = self.u.intern_string(e[2])
+            r = self.push()
+            self.emit(f"la {r}, {label}")
+            return ("ptr", ("int", 8, False))
+        if op == "var":
+            kind = self.lookup(e[2], e[1])
+            t = kind[2]
+            if kind[0] == "local" and is_scalar(t):
+                r = self.push()
+                bits = t[1] if is_int(t) else 128
+                if bits == 128:
+                    self.emit(f"ld128 {r}, [sp + {kind[1]}]")
+                else:
+                    self.emit(f"{LOADS[bits]} {r}, [sp + {kind[1]}]")
+                return promote(t)
+        if op in ("var", "deref", "index", "field"):
+            t = self.lvalue(e)
+            r = self.top()
+            if t[0] == "arr":
+                return ("ptr", t[1])          # decay: address already up
+            if t[0] == "struct":
+                raise Cc(e[1], "struct values are not usable directly "
+                               "in m1 (no struct assignment/copy)")
+            self.load(r, t)
+            return promote(t)
+        if op == "addr":
+            t = self.lvalue(e[2])
+            if t[0] == "arr":
+                raise Cc(e[1], "&array is not in m1 - the array itself "
+                               "already decays to a pointer")
+            return ("ptr", t)
+        if op == "neg":
+            t = self.rvalue(e[2])
+            if not is_int(t):
+                raise Cc(e[1], f"unary - needs an integer, got {type_str(t)}")
+            r = self.top()
+            self.emit(f"sub{suffix(t)} {r}, zero, {r}")
+            return t
+        if op == "not":
+            t = self.rvalue(e[2])
+            if not is_scalar(t):
+                raise Cc(e[1], "! needs a scalar")
+            r = self.top()
+            self.emit(f"cmpeq{suffix(t)} p1, {r}, 0")
+            self.emit(f"li {r}, 1")
+            self.emit(f"(!p1) li {r}, 0")
+            return T_I64
+        if op == "cast":
+            t = self.rvalue(e[3])
+            src = t if is_ptr(t) else promote(t)
+            dst = e[2]
+            self.convert(self.top(), src, dst, e[1])
+            return promote(dst) if is_int(dst) else dst
+        if op == "bin":
+            return self.gen_bin(e)
+        if op == "logic":
+            return self.gen_logic(e)
+        if op == "assign":
+            return self.gen_assign(e)
+        if op == "call":
+            return self.gen_call(e)
+        raise AssertionError(op)
+
+    def load(self, r, t):
+        bits = t[1] if is_int(t) else 128
+        if bits == 128:
+            self.emit(f"ld128 {r}, [{r} + 0]")
+        else:
+            self.emit(f"{LOADS[bits]} {r}, [{r} + 0]")
+
+    def store_to(self, addr_reg, val_reg, t):
+        bits = t[1] if is_int(t) else 128
+        if bits == 128:
+            self.emit(f"st128 [{addr_reg} + 0], {val_reg}")
+        else:
+            self.emit(f"{STORES[bits]} [{addr_reg} + 0], {val_reg}")
+
+    CMP = {"==": ("cmpeq", False, False), "!=": ("cmpeq", True, False),
+           "<": ("cmplt", False, False), ">=": ("cmplt", True, False),
+           "<=": ("cmple", False, False), ">": ("cmple", True, True)}
+    # (mnemonic, invert, swap): '>' is cmple inverted-and-swapped-free?
+    # No - see gen_cmp: a > b  ==  !(a <= b); a >= b  ==  !(a < b).
+
+    def gen_bin(self, e):
+        _, line, opname, l, r = e
+        if opname in self.CMP:
+            return self.gen_cmp(e)
+        lt = self.rvalue(l)
+        rt = self.rvalue(r)
+        rl, rr = self.reg(self.depth - 2), self.top()
+
+        # pointer arithmetic (cc-m1.md 5.3)
+        if opname in ("+", "-") and (is_ptr(lt) or is_ptr(rt)):
+            if is_ptr(lt) and is_ptr(rt):
+                if opname != "-" or lt != rt:
+                    raise Cc(line, "pointer +/- pointer: only p - q of "
+                                   "the same type")
+                size = self.u.t_size(lt[1])
+                self.emit(f"sub {rl}, {rl}, {rr}")
+                if size > 1:
+                    self.emit(f"li {rr}, {size}")
+                    self.emit(f"sdiv {rl}, {rl}, {rr}")
+                self.pop()
+                return T_I128
+            if is_ptr(rt):
+                # n + p: the integer sits in rl, the pointer in rr.
+                if opname == "-":
+                    raise Cc(line, "integer - pointer is meaningless")
+                if not is_int(lt):
+                    raise Cc(line, "pointer arithmetic needs an integer")
+                self.index_to_128(rl, lt)
+                size = self.u.t_size(rt[1])
+                if size > 1:
+                    if size & (size - 1) == 0:
+                        self.emit(f"shl {rl}, {rl}, {size.bit_length() - 1}")
+                    else:
+                        self.emit(f"mul {rl}, {rl}, {size}")
+                self.emit(f"add {rl}, {rl}, {rr}")
+                self.pop()
+                return rt
+            if not is_int(rt):
+                raise Cc(line, "pointer arithmetic needs an integer")
+            self.index_to_128(rr, rt)
+            size = self.u.t_size(lt[1])
+            if size > 1:
+                if size & (size - 1) == 0:
+                    self.emit(f"{ALU[opname]} {rl}, {rl}, {rr} shl "
+                              f"{size.bit_length() - 1}")
+                    self.pop()
+                    return lt
+                self.emit(f"mul {rr}, {rr}, {size}")
+            self.emit(f"{ALU[opname]} {rl}, {rl}, {rr}")
+            self.pop()
+            return lt
+
+        if not (is_int(lt) and is_int(rt)):
+            raise Cc(line, f"operator {opname} needs integers, got "
+                           f"{type_str(lt)} and {type_str(rt)}")
+
+        if opname in ("<<", ">>"):
+            t = lt
+            if opname == "<<":
+                mnem = "shl"
+            else:
+                mnem = "sar" if t[2] else "shr"
+            self.emit(f"{mnem}{suffix(t)} {rl}, {rl}, {rr}")
+            self.pop()
+            return t
+
+        t = common_type(lt, rt)
+        self.balance(lt, rt, t, line)
+        if opname in ("/", "%"):
+            table = {("/", True): "sdiv", ("/", False): "udiv",
+                     ("%", True): "srem", ("%", False): "urem"}
+            mnem = table[(opname, t[2])]
+        else:
+            mnem = ALU[opname]
+        self.emit(f"{mnem}{suffix(t)} {rl}, {rl}, {rr}")
+        self.pop()
+        return t
+
+    def balance(self, lt, rt, t, line):
+        """Convert the two top slots (lhs below rhs) to common type t."""
+        if lt != t:
+            self.convert(self.reg(self.depth - 2), lt, t, line)
+        if rt != t:
+            self.convert(self.top(), rt, t, line)
+
+    def gen_cmp(self, e):
+        _, line, opname, l, r = e
+        lt = self.rvalue(l)
+        rt = self.rvalue(r)
+        rl, rr = self.reg(self.depth - 2), self.top()
+        if is_ptr(lt) or is_ptr(rt):
+            ok = (lt == rt) \
+                or (is_ptr(lt) and r[0] == "num" and r[2] == 0) \
+                or (is_ptr(rt) and l[0] == "num" and l[2] == 0)
+            if not ok:
+                raise Cc(line, f"cannot compare {type_str(lt)} with "
+                               f"{type_str(rt)}")
+            t = lt if is_ptr(lt) else rt
+            unsigned = True
+            sfx = ""
+        else:
+            if not (is_int(lt) and is_int(rt)):
+                raise Cc(line, "comparison needs scalars")
+            t = common_type(lt, rt)
+            self.balance(lt, rt, t, line)
+            unsigned = not t[2]
+            sfx = suffix(t)
+        if opname in ("==", "!="):
+            mnem, inv = "cmpeq", opname == "!="
+            a, b = rl, rr
+        elif opname == "<":
+            mnem, inv, a, b = "cmplt", False, rl, rr
+        elif opname == ">=":
+            mnem, inv, a, b = "cmplt", True, rl, rr
+        elif opname == "<=":
+            mnem, inv, a, b = "cmple", False, rl, rr
+        else:                                     # >  ==  !(a <= b)
+            mnem, inv, a, b = "cmple", True, rl, rr
+        if unsigned and mnem in ("cmplt", "cmple"):
+            mnem += "u"
+        self.emit(f"{mnem}{sfx} p1, {a}, {b}")
+        self.pop()
+        rl = self.top()
+        self.emit(f"li {rl}, {0 if inv else 1}")
+        self.emit(f"(!p1) li {rl}, {1 if inv else 0}")
+        return T_I64
+
+    def gen_logic(self, e):
+        _, line, opname, l, r = e
+        end = self.label()
+        lt = self.rvalue(l)
+        if not is_scalar(lt):
+            raise Cc(line, f"{opname} needs scalar operands")
+        rl = self.top()
+        self.emit(f"cmpeq{suffix(lt)} p1, {rl}, 0")
+        if opname == "&&":
+            self.emit(f"li {rl}, 0")
+            self.emit(f"(p1) b {end}")       # lhs false decides: 0
+        else:
+            self.emit(f"li {rl}, 1")
+            self.emit(f"(!p1) b {end}")      # lhs true decides: 1
+        rt = self.rvalue(r)
+        if not is_scalar(rt):
+            raise Cc(line, f"{opname} needs scalar operands")
+        rr = self.top()
+        self.emit(f"cmpeq{suffix(rt)} p1, {rr}, 0")
+        self.emit(f"li {rl}, 1")
+        self.emit(f"(p1) li {rl}, 0")
+        self.pop()
+        self.emit_label(end)
+        return T_I64
+
+    def gen_assign(self, e):
+        _, line, lhs, rhs = e
+        # Simple scalar variable: nothing observable in the lvalue, so
+        # the direct-addressing form is semantics-preserving.
+        if lhs[0] == "var":
+            kind = self.lookup(lhs[2], line)
+            t = kind[2]
+            if is_scalar(t):
+                vt = self.rvalue(rhs)
+                rv = self.top()
+                self.implicit(rv, vt, t, line, "assignment")
+                if kind[0] == "local":
+                    self.store_direct(kind[1], rv, t)
+                else:
+                    ra = self.push()
+                    self.emit(f"la {ra}, {kind[1]}")
+                    self.store_to(ra, rv, t)
+                    self.pop()
+                return promote(t) if is_int(t) else t
+        # General: lvalue address first (left-to-right), then the value.
+        t = self.lvalue(lhs)
+        if not is_scalar(t):
+            raise Cc(line, f"cannot assign to {type_str(t)}")
+        vt = self.rvalue(rhs)
+        ra, rv = self.reg(self.depth - 2), self.top()
+        self.implicit(rv, vt, t, line, "assignment")
+        self.store_to(ra, rv, t)
+        self.emit(f"mov {ra}, {rv}")
+        self.pop()
+        return promote(t) if is_int(t) else t
+
+    def store_direct(self, off, val_reg, t):
+        bits = t[1] if is_int(t) else 128
+        if bits == 128:
+            self.emit(f"st128 [sp + {off}], {val_reg}")
+        else:
+            self.emit(f"{STORES[bits]} [sp + {off}], {val_reg}")
+
+    def gen_call(self, e):
+        _, line, name, args = e
+        if name not in self.u.funcs:
+            raise Cc(line, f"call to undeclared function '{name}'")
+        ret, params, _, _ = self.u.funcs[name]
+        if len(args) != len(params):
+            raise Cc(line, f"{name}() takes {len(params)} arguments, "
+                           f"got {len(args)}")
+        base = self.depth
+        for i, a in enumerate(args):
+            at = self.rvalue(a)
+            self.implicit(self.top(), at, params[i][1], line,
+                          f"argument {i + 1} of {name}()")
+        # Spill every live register slot to its home (r8-r15 are
+        # caller-saved; homes double as the argument staging area).
+        lo = max(0, self.depth - 8)
+        for s in range(lo, self.depth):
+            self.emit(f"st128 [sp + {self.home(s)}], {self.reg(s)}")
+        # Stack-slot arguments (SABI/ISA 12: [sp + 0], 16 bytes each).
+        for i in range(8, len(args)):
+            self.emit(f"ld128 r8, [sp + {self.home(base + i)}]")
+            self.emit(f"st128 [sp + {16 * (i - 8)}], r8")
+        # Register arguments.
+        for i in range(min(8, len(args))):
+            self.emit(f"ld128 r{i}, [sp + {self.home(base + i)}]")
+        self.emit(f"jal {name}")
+        # Result: slot `base`; its home already holds the pre-call
+        # value of any displaced deeper slot, so no push() spill here.
+        self.depth = base + 1
+        self.peak = max(self.peak, self.depth)
+        self.emit(f"mov {self.reg(base)}, r0")
+        for s in range(max(0, self.depth - 8), base):
+            self.emit(f"ld128 {self.reg(s)}, [sp + {self.home(s)}]")
+        if ret == ("void",):
+            return ("void",)
+        return promote(ret) if is_int(ret) else ret
+
+    # ---- conditions: set p1, return the polarity that means "true"
+
+    def cond(self, e):
+        """Emit compare(s); afterwards the condition is true iff
+        p1 == returned polarity."""
+        if e[0] == "bin" and e[2] in self.CMP:
+            _, line, opname, l, r = e
+            lt = self.rvalue(l)
+            rt = self.rvalue(r)
+            rl, rr = self.reg(self.depth - 2), self.top()
+            if is_ptr(lt) or is_ptr(rt):
+                t, unsigned, sfx = None, True, ""
+            else:
+                if not (is_int(lt) and is_int(rt)):
+                    raise Cc(line, "comparison needs scalars")
+                t = common_type(lt, rt)
+                self.balance(lt, rt, t, line)
+                unsigned, sfx = not t[2], suffix(t)
+            table = {"==": ("cmpeq", True), "!=": ("cmpeq", False),
+                     "<": ("cmplt", True), ">=": ("cmplt", False),
+                     "<=": ("cmple", True), ">": ("cmple", False)}
+            mnem, pol = table[opname]
+            if unsigned and mnem in ("cmplt", "cmple"):
+                mnem += "u"
+            self.emit(f"{mnem}{sfx} p1, {rl}, {rr}")
+            self.pop()
+            self.pop()
+            return pol
+        if e[0] == "not":
+            pol = self.cond(e[2])
+            return not pol
+        t = self.rvalue(e)
+        if not is_scalar(t):
+            raise Cc(e[1], "condition must be a scalar")
+        self.emit(f"cmpeq{suffix(t)} p1, {self.top()}, 0")
+        self.pop()
+        return False          # p1 set means the condition is FALSE
+
+    def branch_unless(self, e, target):
+        """Branch to target when the condition is false."""
+        pol = self.cond(e)
+        self.emit(f"({'!' if pol else ''}p1) b {target}")
+
+    # ---- statements
+
+    def gen_stmt(self, s):
+        op = s[0]
+        if op == "block":
+            self.scopes.append({})
+            for x in s[1]:
+                self.gen_stmt(x)
+            self.scopes.pop()
+        elif op == "decl":
+            _, line, t, name, init = s
+            if name in self.scopes[-1]:
+                raise Cc(line, f"'{name}' redeclared in the same block")
+            off = self.locals_base + self.slot_of[id(s)]
+            self.scopes[-1][name] = ("local", off, t)
+            if init is not None:
+                vt = self.rvalue(init)
+                rv = self.top()
+                self.implicit(rv, vt, t, line, "initializer")
+                self.store_direct(off, rv, t)
+                self.pop()
+        elif op == "expr":
+            self.rvalue(s[2])
+            self.pop()
+        elif op == "empty":
+            pass
+        elif op == "return":
+            _, line, e = s
+            if e is None:
+                if self.ret != ("void",):
+                    raise Cc(line, "return without a value in a "
+                                   "non-void function")
+            else:
+                if self.ret == ("void",):
+                    raise Cc(line, "return with a value in a void "
+                                   "function")
+                t = self.rvalue(e)
+                self.implicit(self.top(), t, self.ret, line, "return")
+                self.emit(f"mov r0, {self.top()}")
+                self.pop()
+            self.emit(f"b {self.name}.Lret")
+        elif op == "if":
+            _, line, cond, then, els = s
+            if els is None:
+                end = self.label()
+                self.branch_unless(cond, end)
+                self.gen_stmt(then)
+                self.emit_label(end)
+            else:
+                lelse = self.label()
+                end = self.label()
+                self.branch_unless(cond, lelse)
+                self.gen_stmt(then)
+                self.emit(f"b {end}")
+                self.emit_label(lelse)
+                self.gen_stmt(els)
+                self.emit_label(end)
+        elif op == "while":
+            _, line, cond, body = s
+            top = self.label()
+            end = self.label()
+            self.emit_label(top)
+            self.branch_unless(cond, end)
+            self.loopstack.append((top, end))
+            self.gen_stmt(body)
+            self.loopstack.pop()
+            self.emit(f"b {top}")
+            self.emit_label(end)
+        elif op == "break":
+            if not self.loopstack:
+                raise Cc(s[1], "break outside a loop")
+            self.emit(f"b {self.loopstack[-1][1]}")
+        elif op == "continue":
+            if not self.loopstack:
+                raise Cc(s[1], "continue outside a loop")
+            self.emit(f"b {self.loopstack[-1][0]}")
+        else:
+            raise AssertionError(op)
+
+    # ---- whole function
+
+    def generate(self):
+        # entry: bind parameters, spill r0-r7 / copy stack args
+        self.scopes.append({})
+        entry = []
+        for i, (pn, pt) in enumerate(self.params):
+            off = self.locals_base + 16 * i
+            self.scopes[0][pn] = ("local", off, pt)
+            bits = pt[1] if is_int(pt) else 128
+            stmn = "st128" if bits == 128 else STORES[bits]
+            if i < 8:
+                entry.append(f"        {stmn} [sp + {off}], r{i}")
+            else:
+                # incoming stack slot i-8 lives above the frame
+                # (ISA 12: [sp + framesize + 16*(i-8)])
+                entry.append(f"        ld128 r8, [sp + %%ARG{16 * (i - 8)}%%]")
+                entry.append(f"        {stmn} [sp + {off}], r8")
+        self.gen_stmt(self.body)
+        if self.depth != 0:
+            raise AssertionError(f"{self.name}: temp stack leak "
+                                 f"({self.depth})")
+        self.scopes.pop()
+
+        if self.calls:
+            spill_size = 16 * self.peak
+        else:
+            spill_size = 16 * max(0, self.peak - 8)
+        frame = self.out_size + self.locals_size + spill_size
+        if self.calls:
+            frame += 16                     # ra slot on top
+        if frame > 1 << 20:
+            raise Cc(self.dline, f"{self.name}(): frame size {frame} "
+                                 f"exceeds the m1 limit of 2^20 bytes "
+                                 f"(cc-m1.md section 11)")
+
+        def patch(line):
+            if "%%ARG" in line:
+                pre, rest = line.split("%%ARG", 1)
+                extra, post = rest.split("%%", 1)
+                return pre + str(frame + int(extra)) + post
+            return line
+
+        out = [f"# cc: func {self.name} frame={frame} "
+               f"calls={1 if self.calls else 0}",
+               f"{self.name}:"]
+        if frame:
+            out.append(f"        add sp, sp, -{frame}")
+        if self.calls:
+            out.append(f"        st128 [sp + {frame - 16}], ra")
+        out.extend(patch(x) for x in entry)
+        out.extend(patch(x) for x in self.lines)
+        if self.ret != ("void",):
+            out.append("        li r0, 0")   # end of a non-void body:
+        out.append(f"{self.name}.Lret:")      # defined return 0
+        if self.calls:
+            out.append(f"        ld128 ra, [sp + {frame - 16}]")
+        if frame:
+            out.append(f"        add sp, sp, {frame}")
+        out.append("        ret")
+        return out
+
+
+# ----------------------------------------------------------------- output
+
+DATA_DIRECTIVE = {1: ".byte", 8: ".quad", 16: ".oct"}
+
+
+def escape_string(data):
+    out = []
+    for b in data:
+        if b == 0x22:
+            out.append('\\"')
+        elif b == 0x5C:
+            out.append("\\\\")
+        elif 0x20 <= b <= 0x7E:
+            out.append(chr(b))
+        elif b == 0x0A:
+            out.append("\\n")
+        elif b == 0x09:
+            out.append("\\t")
+        else:
+            out.append(f"\\x{b:02x}")
+    return "".join(out)
+
+
+def render(unit, basename):
+    lines = [f"# {basename} - CC-M1 compiled output (lang/cc/cc.py; "
+             f"spec lang/cc/cc-m1.md)"]
+
+    # text
+    lines.append("        .align 16")
+    for fname in unit.forder:
+        lines.extend(Func(unit, fname).generate())
+
+    # rodata: string literals, first-use order (dict = insertion order)
+    lines.append("        .align 16")
+    lines.append("__etext:")
+    for data, label in unit.strings.items():
+        lines.append(f"{label}:")
+        lines.append(f'        .asciiz "{escape_string(data)}"')
+
+    # data: initialized globals, declaration order
+    lines.append("        .align 16")
+    lines.append("__erodata:")
+    for name in unit.gorder:
+        g = unit.globals[name]
+        if g["extern"] or g["init"] is None:
+            continue
+        t, init = g["type"], g["init"]
+        elem = t[1] if t[0] == "arr" else t
+        size = unit.t_size(elem)
+        align = unit.t_align(t)
+        if align > 1:
+            lines.append(f"        .align {align}")
+        lines.append(f"{name}:")
+        values = init if isinstance(init, list) else [init]
+        if t[0] == "arr" and len(values) < t[2]:
+            values = values + [0] * (t[2] - len(values))
+        mask = (1 << (8 * size)) - 1
+        directive = DATA_DIRECTIVE[size]
+        for i in range(0, len(values), 8):
+            chunk = ", ".join(f"0x{v & mask:x}" for v in values[i:i + 8])
+            lines.append(f"        {directive} {chunk}")
+
+    # bss: uninitialized globals, declaration order
+    lines.append("        .align 16")
+    lines.append("__edata:")
+    for name in unit.gorder:
+        g = unit.globals[name]
+        if g["extern"] or g["init"] is not None:
+            continue
+        t = g["type"]
+        align = unit.t_align(t)
+        if align > 1:
+            lines.append(f"        .align {align}")
+        lines.append(f"{name}:")
+        lines.append(f"        .space {unit.t_size(t)}")
+
+    lines.append("        .align 16")
+    lines.append("_end:")
+    return "\n".join(lines) + "\n"
+
+
+# ------------------------------------------------------------------- main
+
+def fold_body(node, unit):
+    if not isinstance(node, tuple):
+        if isinstance(node, list):
+            return [fold_body(x, unit) for x in node]
+        return node
+    if node[0] in ("num", "strlit", "var"):
+        return node
+    if node and isinstance(node[0], str) and node[0] in (
+            "bin", "logic", "neg", "not", "cast", "addr", "deref",
+            "index", "field", "call", "assign", "strlit"):
+        return fold(tuple(fold_body(x, unit) for x in node), unit)
+    return tuple(fold_body(x, unit) for x in node)
+
+
+def compile_unit(path, out_path):
+    try:
+        src = open(path, "r").read()
+    except OSError as ex:
+        print(f"cc: cannot read {path}: {ex}", file=sys.stderr)
+        sys.exit(1)
+    unit = Unit()
+    try:
+        parser = Parser(lex(src), unit)
+        parser.parse_unit()
+        # fold literal subexpressions (cc-m1.md 5.5)
+        for name, (ret, params, body, line) in list(unit.funcs.items()):
+            if body is not None:
+                unit.funcs[name] = (ret, params, fold_body(body, unit),
+                                    line)
+        m = unit.funcs.get("main")
+        if m is None or m[2] is None:
+            raise Cc(1, "no main() defined (cc-m1.md section 1)")
+        if m[1] or m[0] not in (T_I64, T_U64):
+            raise Cc(m[3], "main must be 'i64 main()' or 'u64 main()' "
+                           "with no parameters")
+        text = render(unit, os.path.basename(path))
+    except Cc as ex:
+        print(f"{path}:{ex.line}: error: {ex.msg}", file=sys.stderr)
+        sys.exit(1)
+    with open(out_path, "w") as f:
+        f.write(text)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="CC-M1 compiler (lang/cc/cc-m1.md)")
+    ap.add_argument("input", help="one .c translation unit")
+    ap.add_argument("-o", dest="output", required=True,
+                    help="output .s path")
+    args = ap.parse_args()
+    compile_unit(args.input, args.output)
+
+
+if __name__ == "__main__":
+    main()
