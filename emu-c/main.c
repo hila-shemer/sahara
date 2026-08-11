@@ -153,8 +153,8 @@ static SeEvRec *ev_grow(SeEvRec *evs, uint64_t *cap, uint64_t count)
  * index or a payload violating its device's encoding is a malformed
  * trace (4.5 / 2.4 class 2). The drop flag VALUE is not checked --
  * replay recomputes it (5.4) -- but its reserved bits are. inner is
- * the payload bytes at head + 20 (at most 32: both admitted types fit;
- * validated before anything is copied out of head's 52 bytes). */
+ * the payload bytes at head + 20 (at most a full NIC frame; validated
+ * before anything is copied out of head). */
 static void validate_event(uint64_t off, uint64_t device, uint32_t inner,
                            const uint8_t *p)
 {
@@ -194,12 +194,13 @@ static void validate_event(uint64_t off, uint64_t device, uint32_t inner,
         return;
     }
     case SE_DEVIDX_NIC:
-        /* Valid per trace.md 4.3, but the NIC RX model (64-frame
-         * queue, buffer exposure -- nic.md 4) does not exist yet;
-         * consuming the record would silently drop the frame, so fail
-         * loud instead (SPEC-ISSUES 35 records the NIC gap). */
-        die("--replay contains NIC EVENT records; NIC RX injection not "
-            "implemented");
+        /* Frame bytes, opaque (trace.md 4.3): the model admits only
+         * padded legal frames, so any other length is not a v1 trace.
+         * Content is not validated -- the trace stores whatever the
+         * NIC accepted, byte-for-byte. */
+        if (inner < SE_NIC_FRAME_MIN || inner > SE_NIC_FRAME_MAX)
+            malformed(off, "NIC frame payload outside [60, 1514] "
+                           "(nic.md 3.1)");
         return;
     default:
         malformed(off, "EVENT device index outside the reference device "
@@ -288,8 +289,9 @@ static SeEvRec *validate_replay(const char *path, const char *sha_hex,
         }
         /* Types 1-6: stream the payload (fseek cannot detect a torn
          * tail), keeping the leading bytes every field check needs --
-         * cycle at 0, EVENT inner length at 16, EXEC flags at 48. */
-        uint8_t head[52] = { 0 };
+         * cycle at 0, EVENT inner length at 16, EXEC flags at 48 --
+         * plus the largest EVENT inner payload (a NIC frame). */
+        uint8_t head[20u + SE_NIC_FRAME_MAX] = { 0 };
         uint8_t chunk[4096];
         size_t total = 0;
         while (total < plen) {
@@ -332,7 +334,7 @@ static SeEvRec *validate_replay(const char *path, const char *sha_hex,
             SeEvRec *e = &evs[ev_count++];
             e->cycle = cycle;
             e->device = (uint8_t)device;
-            e->len = (uint8_t)inner;
+            e->len = (uint16_t)inner;
             memcpy(e->payload, head + 20u, inner);
         }
         records++;
@@ -448,6 +450,7 @@ int main(int argc, char **argv)
 
     SeDev dev;
     SeDev_reset(&dev);
+    dev.mem = &mem; /* NIC RX exposure writes through the device */
 
     SeCpu *cpu = se_host_alloc(sizeof *cpu); /* one startup allocation */
     SeCpu_reset(cpu, &mem, &tr);

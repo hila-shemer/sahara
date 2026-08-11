@@ -1,0 +1,12 @@
+# t_nic.script — drives the --nic fake NIC session (run-gui-tests).
+# The guest is autonomous; the waits only advance the fake clock so
+# the pacing loop keeps stepping and the pump tick between them hands
+# the fake backend's queued UDP echo back to the translator. The
+# session ends at the guest's own HALT; close is a backstop.
+wait 500
+wait 500
+wait 500
+wait 500
+wait 500
+wait 500
+close

@@ -918,10 +918,17 @@ def test_replay_reader():
         kbd_flags = (0x100000004).to_bytes(8, "little") + b"\x02"
         expect_reject("event-flags-reserved-bits",
                       TV2_TRC + ev_rec(1, kbd_flags), b"flags bits")
-        # NIC EVENTs are trace-valid (4.3) but the RX model is the one
-        # missing device piece - refused loudly, never dropped.
-        expect_reject("nic-event-refused", TV2_TRC + ev_rec(3, bytes(64)),
-                      b"NIC")
+        # NIC EVENTs load into the RX model (SPEC-ISSUES 35's gap is
+        # closed): frame-length payloads are accepted and injected,
+        # anything outside [60, 1514] is not a v1 trace (nic.md 3.1).
+        p = replay(TV2_TRC + ev_rec(3, bytes(64)), "wellformed-nic.trc")
+        check("nic-event-accepted",
+              p.returncode == 0 and p.stdout == halt,
+              f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}")
+        expect_reject("nic-event-under-min",
+                      TV2_TRC + ev_rec(3, bytes(59)), b"1514")
+        expect_reject("nic-event-over-max",
+                      TV2_TRC + ev_rec(3, bytes(1515)), b"1514")
 
         # Level nesting (trace.md 5.3): filtering the level-2 trace to
         # level-1 record types must equal the level-1 trace post-META,

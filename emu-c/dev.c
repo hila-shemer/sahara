@@ -48,6 +48,43 @@ void SeDev_reset(SeDev *d)
     d->disp_stride = DISP_REF_STRIDE;
 }
 
+/* Expose the RX queue head: write exactly len bytes to the RX buffer
+ * (nic.md 2.3 -- bytes beyond len keep their prior contents) and
+ * publish RX_LEN. Device-internal writes: no trace records (nic.md
+ * 7.2); the frame's only trace footprint is its EVENT record. */
+static void nic_expose_head(SeDev *d, SeMem *m)
+{
+    const SeNicRxQ *q = &d->nic_rxq;
+    RWC_ASSERT(q->count != 0u);
+    uint16_t len = q->len[q->head];
+    for (uint16_t i = 0; i < len; i++)
+        SeMem_write(m, SE_PLAT_NIC_RXBUF + i, 1u, q->frame[q->head][i]);
+    d->nic_rx_len = len;
+}
+
+bool SeDev_inject_nic(SeDev *d, SeMem *m, const uint8_t *frame,
+                      uint16_t len)
+{
+    RWC_ASSERT(m != NULL && m == d->mem);
+    RWC_ASSERT(len >= SE_NIC_FRAME_MIN && len <= SE_NIC_FRAME_MAX);
+    SeNicRxQ *q = &d->nic_rxq;
+    if (q->count == SE_NIC_QDEPTH)
+        return true; /* discarded before admission (nic.md 4.3): no
+                        event, no record, no guest-visible effect */
+    uint32_t slot = (q->head + q->count) % SE_NIC_QDEPTH;
+    memcpy(q->frame[slot], frame, len);
+    q->len[slot] = len;
+    q->count += 1u;
+    if (d->nic_rx_len == 0u) {
+        /* Mailbox empty implies the queue was too (a pop always
+         * exposes the next head immediately), so the new frame IS the
+         * head. */
+        RWC_ASSERT(q->count == 1u);
+        nic_expose_head(d, m);
+    }
+    return false;
+}
+
 static SeDevAcc acc_fault(void)
 {
     return (SeDevAcc){ .fault = true, .val = 0 };
@@ -141,19 +178,35 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
     case SE_SPACE_NIC:
         switch (off) {
         case NIC_TX_DOORBELL:
-            if (val < 60u || val > 1514u)
+            if (val < SE_NIC_FRAME_MIN || val > SE_NIC_FRAME_MAX)
                 return acc_fault(); /* E5; transmits nothing */
-            /* Transmit TX buffer bytes [0, val): synchronous and
-             * silent in v1.0 (TX_STATUS stays 0). The nic.md 6
-             * translator is not implemented -- headless replay sources
-             * RX frames from the trace alone, so every live-mode frame
-             * is dropped with no reply (SPEC-ISSUES.md entry 35). */
+            /* Transmit TX buffer bytes [0, val): the hook captures
+             * synchronously (nic.md 2.2 -- the guest cannot run until
+             * this store completes) and runs the GUI's translator.
+             * NULL headless: replay sources RX frames from the trace
+             * alone (nic.md 7.3), so the frame is dropped with no
+             * reply and its only footprint is the caller's DEVW. */
+            if (d->tx_doorbell != NULL)
+                d->tx_doorbell(d->tx_ctx, (uint32_t)val);
             return acc_val(0);
-        case NIC_RX_POP:
+        case NIC_RX_POP: {
             if (d->nic_rx_len == 0u)
                 return acc_fault(); /* E6: empty pop is a DEVERR */
-            d->nic_rx_len = 0u; /* nothing queued behind it headless */
+            SeNicRxQ *q = &d->nic_rxq;
+            RWC_ASSERT(q->count != 0u); /* exposed implies held */
+            q->head = (q->head + 1u) % SE_NIC_QDEPTH;
+            q->count -= 1u;
+            if (q->count != 0u) {
+                /* Expose the next frame immediately: the very next
+                 * instruction observes the new RX_LEN and bytes
+                 * (nic.md 2.4). */
+                RWC_ASSERT(d->mem != NULL); /* wired at setup */
+                nic_expose_head(d, d->mem);
+            } else {
+                d->nic_rx_len = 0u;
+            }
             return acc_val(0);
+        }
         default:
             return acc_fault(); /* read-only (E4) or unlisted (E2) */
         }
