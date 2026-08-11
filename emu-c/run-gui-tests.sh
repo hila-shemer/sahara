@@ -73,4 +73,31 @@ PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/replay.out"
 grep -qx "$PASS_LINE" "$OUT/replay.out"
 cmp_post_meta "$OUT/session.trc" "$OUT/session.trc.replay.trc"
 
+echo "scripted NIC session gate (--nic fake)"
+# The whole nic.md local plane end to end through the real binary:
+# TV-S1 DHCP handshake, ARP, virtual-host ping, one UDP flow echoed
+# by the socket-free fake backend. Same idioms as above: double-run
+# whole-file cmp, then replay via the printed command -- a networked
+# session reproduced by the frozen headless binary with no network.
+python3 "$ASM" -o "$OUT/t_nic.img" gui/t_nic.s
+SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui "$OUT/t_nic.img" \
+    --script gui/t_nic.script --nic fake --trace "$OUT/nic.trc" \
+    > "$OUT/nic.out"
+grep -qx "$PASS_LINE" "$OUT/nic.out"
+SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui "$OUT/t_nic.img" \
+    --script gui/t_nic.script --nic fake --trace "$OUT/nic2.trc" \
+    > /dev/null
+cmp "$OUT/nic.trc" "$OUT/nic2.trc"
+CMD="$(grep '^sahara-emu ' "$OUT/nic.out")"
+PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/nic-replay.out"
+grep -qx "$PASS_LINE" "$OUT/nic-replay.out"
+cmp_post_meta "$OUT/nic.trc" "$OUT/nic.trc.replay.trc"
+
+# --nic host must be refused under --script: the scripted gate stays
+# socket-free by construction (work-order decision 7).
+if SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui "$OUT/t_nic.img" \
+    --script gui/t_nic.script --nic host >/dev/null 2>&1; then
+    echo "ERROR: --script --nic host was accepted"; exit 1
+fi
+
 echo "run-gui-tests: all green"
