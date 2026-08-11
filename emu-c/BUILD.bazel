@@ -60,18 +60,21 @@ rwc_binary(
 )
 
 # The SDL-free half of the GUI front end (translation, HID filter,
-# frame blit): full doctrine, unit-tested by test_gui. Only the SDL
-# shim below gets the carve-out.
+# frame blit, the sans-IO NIC translator and its socket-free fake
+# backend): full doctrine, unit-tested by test_gui/test_nic. Only the
+# SDL and socket shims get the carve-out.
 rwc_library(
     name = "gui_core",
     srcs = [
         "gui/blit.c",
         "gui/hid_map.c",
+        "gui/nic.c",
         "gui/translate.c",
     ],
     hdrs = [
         "gui/blit.h",
         "gui/hid_map.h",
+        "gui/nic.h",
         "gui/translate.h",
     ],
     deps = [":core"],
@@ -101,6 +104,16 @@ rwc_test(
 rwc_test(
     name = "test_gui",
     srcs = ["test_gui.c"],
+    tier = "short",
+    deps = [
+        ":core",
+        ":gui_core",
+    ],
+)
+
+rwc_test(
+    name = "test_nic",
+    srcs = ["test_nic.c"],
     tier = "short",
     deps = [
         ":core",
