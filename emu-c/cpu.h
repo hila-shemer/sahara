@@ -41,15 +41,17 @@ typedef struct SeOrdEnt {
 } SeOrdEnt;
 
 /* One replay-feed event: an EVENT record of the --replay trace, parsed
- * and validated by main.c (devspec/trace.md 4, 5.1). Only input and
- * resize payloads reach the CPU (main.c rejects NIC frames until an RX
- * model exists), so the inner payload fits inline: 9 bytes for
- * keyboard/mouse, 32 for resize. */
+ * and validated by main.c (devspec/trace.md 4, 5.1), or a live front
+ * end's feed entry. The inner payload is inline and sized for the
+ * largest device payload -- a full NIC frame (trace.md 4.3); input is
+ * 9 bytes, resize 32. ~1.5 KB per event is fine at realistic event
+ * counts; an arena-backed payload is the escape hatch if it ever
+ * measurably hurts. */
 typedef struct SeEvRec {
     uint64_t cycle;
     uint8_t device; /* 0-based device-table index (SE_DEVIDX_*) */
-    uint8_t len;
-    uint8_t payload[32];
+    uint16_t len;
+    uint8_t payload[SE_NIC_FRAME_MAX];
 } SeEvRec;
 
 typedef struct SeCpu {
@@ -116,7 +118,7 @@ void SeCpu_step(SeCpu *c);
  * sorted so wfi_wait's head peek is always the next wake. Feeding
  * clears wfi_idle. Must not be mixed with a --replay feed. */
 void SeCpu_feed(SeCpu *c, uint8_t device, const uint8_t *payload,
-                uint8_t len, uint64_t earliest_cycle);
+                uint16_t len, uint64_t earliest_cycle);
 /* Exposed for unit tests: translate va for an access kind under the
  * current MMU state (ISA-SPEC section 8). */
 SeXlate SeCpu_translate(SeCpu *c, se_u128 va, int acc);

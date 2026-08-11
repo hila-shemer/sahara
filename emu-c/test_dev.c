@@ -2,10 +2,13 @@
  * device table (devspec/boot.md vector V1 -- the 328-byte dump
  * transcribed below, plus zeros through the end of the window), the
  * MAC packing vector V5, the physical-space classifier's boundaries,
- * and the register fault matrix at the SeDev level (direction, unlisted
+ * the register fault matrix at the SeDev level (direction, unlisted
  * offsets, doorbell range, empty pop; the trap plumbing above it is
- * exercised by the shared c7_dev image). */
+ * exercised by the shared c7_dev image), and the NIC RX frame store
+ * (nic.md 4: FIFO exposure, exact-length buffer writes, the 64-cap
+ * overflow discard). */
 #include <stdio.h>
+#include <string.h>
 
 #include "dev.h"
 #include "mem.h"
@@ -153,6 +156,71 @@ static void test_input_queue(void)
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 0u).val == ~0ull);
 }
 
+static void test_nic_rx_model(void)
+{
+    SeMem m;
+    SeMem_init(&m, 0x20000u); /* RXBUF is a device window, not RAM */
+    SeDev d;
+    SeDev_reset(&d);
+    d.mem = &m;
+    uint64_t rx = se_lo64(SE_PLAT_NIC_RXBUF);
+    uint8_t f[SE_NIC_FRAME_MAX];
+
+    /* Pre-fill buffer tail bytes, then expose a short frame: exactly
+     * len bytes are written, the tail keeps its prior contents
+     * (NIC-C-14). */
+    SeMem_write(&m, rx + 60u, 1u, 0xAAu);
+    SeMem_write(&m, rx + 61u, 1u, 0xBBu);
+    for (unsigned i = 0; i < 60u; i++)
+        f[i] = (uint8_t)(i + 1u);
+    RWC_ASSERT(!SeDev_inject_nic(&d, &m, f, 60u));
+    RWC_ASSERT(d.nic_rx_len == 60u);
+    RWC_ASSERT(SeDev_ext_pending(&d)); /* NIC-C-19: pending iff exposed */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_NIC, 16u).val == 60u);
+    for (unsigned i = 0; i < 60u; i++)
+        RWC_ASSERT(se_lo64(SeMem_read(&m, rx + i, 1u)) == i + 1u);
+    RWC_ASSERT(se_lo64(SeMem_read(&m, rx + 60u, 1u)) == 0xAAu);
+    RWC_ASSERT(se_lo64(SeMem_read(&m, rx + 61u, 1u)) == 0xBBu);
+
+    /* A second frame queues with no guest-visible effect; a max-size
+     * third proves the u16 length plumbing. Pop exposes each in FIFO
+     * order immediately (NIC-C-16/17), and the final pop empties the
+     * mailbox and clears EXTINT. */
+    memset(f, 0x22u, sizeof f);
+    RWC_ASSERT(!SeDev_inject_nic(&d, &m, f, 61u));
+    memset(f, 0x33u, sizeof f);
+    RWC_ASSERT(!SeDev_inject_nic(&d, &m, f, SE_NIC_FRAME_MAX));
+    RWC_ASSERT(d.nic_rx_len == 60u); /* first frame still exposed */
+    RWC_ASSERT(se_lo64(SeMem_read(&m, rx, 1u)) == 1u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+    RWC_ASSERT(d.nic_rx_len == 61u);
+    RWC_ASSERT(se_lo64(SeMem_read(&m, rx, 1u)) == 0x22u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+    RWC_ASSERT(d.nic_rx_len == SE_NIC_FRAME_MAX);
+    RWC_ASSERT(se_lo64(SeMem_read(&m, rx + 1513u, 1u)) == 0x33u);
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+    RWC_ASSERT(d.nic_rx_len == 0u);
+    RWC_ASSERT(!SeDev_ext_pending(&d));
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault); /* E6 */
+
+    /* Overflow (NIC-C-18): the 65th arrival while 64 are held is
+     * discarded -- inject reports it, the queue and its contents are
+     * untouched -- and the first 64 drain intact in order. */
+    for (unsigned i = 0; i < 64u; i++) {
+        memset(f, (uint8_t)i, 60u);
+        RWC_ASSERT(!SeDev_inject_nic(&d, &m, f, (uint16_t)(60u + i)));
+    }
+    memset(f, 0xEEu, 60u);
+    RWC_ASSERT(SeDev_inject_nic(&d, &m, f, 60u)); /* discarded */
+    for (unsigned i = 0; i < 64u; i++) {
+        RWC_ASSERT(d.nic_rx_len == 60u + i);
+        RWC_ASSERT(se_lo64(SeMem_read(&m, rx, 1u)) == i);
+        RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+    }
+    RWC_ASSERT(d.nic_rx_len == 0u);
+}
+
 static void test_resize_inject(void)
 {
     SeDev d;
@@ -181,6 +249,7 @@ int main(void)
     test_classify();
     test_registers();
     test_input_queue();
+    test_nic_rx_model();
     test_resize_inject();
     printf("test_dev: all passed\n");
     return 0;

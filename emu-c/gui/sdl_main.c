@@ -442,6 +442,7 @@ int main(int argc, char **argv)
     }
 
     SeDev_reset(&g.dev);
+    g.dev.mem = &g.mem; /* NIC RX exposure writes through the device */
     g.cpu = se_host_alloc(sizeof *g.cpu);
     SeCpu_reset(g.cpu, &g.mem, &g.tr);
     g.cpu->dev = &g.dev;

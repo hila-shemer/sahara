@@ -1058,8 +1058,9 @@ static void apply_events(SeCpu *c)
         const SeEvRec *e = &c->ev[c->ev_next];
         c->ev_next += 1u;
         RWC_ASSERT(c->dev != NULL); /* main.c wires both or neither */
-        uint8_t out[32];
-        memcpy(out, e->payload, e->len);
+        const uint8_t *rec = e->payload;
+        uint8_t inbuf[9];
+        bool record = true;
         switch (e->device) {
         case SE_DEVIDX_DISPLAY:
             SeDev_inject_resize(c->dev, ev_u64(e->payload),
@@ -1068,20 +1069,38 @@ static void apply_events(SeCpu *c)
             break;
         case SE_DEVIDX_KBD:
         case SE_DEVIDX_MOUSE: {
+            /* Input's overflow drop IS recorded, flagged (trace.md
+             * 4.1/5.4)... */
             bool dropped = SeDev_inject_input(
                 c->dev, e->device == SE_DEVIDX_KBD, ev_u64(e->payload));
-            out[8] = dropped ? 1u : 0u;
+            memcpy(inbuf, e->payload, sizeof inbuf);
+            inbuf[8] = dropped ? 1u : 0u;
+            rec = inbuf;
             break;
         }
+        case SE_DEVIDX_NIC:
+            /* ...but the NIC's overflow discard is NOT (nic.md 4.3):
+             * an unadmitted frame never enters the trace, so replay
+             * cannot double-apply it. A genuine --replay trace holds
+             * only admitted frames and replays into the same queue
+             * occupancy, so a discard under replay means the trace was
+             * tampered with -- die loudly. */
+            if (SeDev_inject_nic(c->dev, c->mem, e->payload, e->len)) {
+                RWC_ASSERT(c->ev == c->feed);
+                record = false;
+            }
+            break;
         default:
-            RWC_ASSERT(0); /* both feeders admit only the three above */
+            RWC_ASSERT(0); /* both feeders admit only the four above */
         }
-        SeTrace_event(c->tr, se_lo64(c->cycle), e->device, out, e->len);
+        if (record)
+            SeTrace_event(c->tr, se_lo64(c->cycle), e->device, rec,
+                          e->len);
     }
 }
 
 void SeCpu_feed(SeCpu *c, uint8_t device, const uint8_t *payload,
-                uint8_t len, uint64_t earliest_cycle)
+                uint16_t len, uint64_t earliest_cycle)
 {
     RWC_ASSERT(len <= sizeof c->feed[0].payload);
     RWC_ASSERT(c->ev == NULL || c->ev == c->feed); /* never mix with --replay */

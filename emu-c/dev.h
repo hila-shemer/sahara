@@ -12,9 +12,11 @@
  * elaborated by devspec/display.md, input.md, nic.md; the device table
  * by devspec/boot.md). This is the register surface, the fault matrix,
  * and the EVENT-injection targets of --replay (devspec/trace.md 4-5):
- * input queues and the live display geometry. The NIC RX queue is the
- * one still-missing model (SPEC-ISSUES 35); main.c rejects NIC EVENT
- * records loudly until it exists. */
+ * input queues, the live display geometry, and the NIC RX queue
+ * (nic.md 4 -- the model that closed SPEC-ISSUES 35's gap). The
+ * translator that authors NIC events lives in the GUI front end
+ * (gui/nic.c); headless, frames arrive only through SeDev_inject_nic
+ * from the replay feed. */
 
 /* 0-based positions among the reference device table's device records
  * (boot.md V1 order, written by se_plat_write_devtable). EVENT records
@@ -38,6 +40,25 @@ typedef struct SeInputQ {
     uint32_t count; /* 0..SE_INPUT_QDEPTH */
 } SeInputQ;
 
+/* Ethernet II frame length bounds at the NIC interface, FCS-less
+ * (nic.md 3.1): doorbell values, exposed RX_LEN, and EVENT inner
+ * payloads all live in this range. */
+#define SE_NIC_FRAME_MIN 60u
+#define SE_NIC_FRAME_MAX 1514u
+
+/* NIC RX frame store (nic.md 4.1): capacity 64 admitted frames total,
+ * 1 exposed + up to 63 queued, fixed FIFO ring, no allocation. The
+ * exposed frame is the ring head; its bytes were copied to the RX
+ * buffer at exposure, so the ring keeps only what RX_POP still needs. */
+#define SE_NIC_QDEPTH 64u
+
+typedef struct SeNicRxQ {
+    uint8_t frame[SE_NIC_QDEPTH][SE_NIC_FRAME_MAX];
+    uint16_t len[SE_NIC_QDEPTH];
+    uint32_t head;  /* index of the exposed frame when count > 0 */
+    uint32_t count; /* 0..SE_NIC_QDEPTH, exposed frame included */
+} SeNicRxQ;
+
 typedef struct SeDev {
     /* Live display geometry (display.md 6): reference mode at reset,
      * rewritten atomically by resize events. FORMAT never changes. */
@@ -47,6 +68,19 @@ typedef struct SeDev {
     uint64_t display_irq_status; /* bit 0: mode changed (resize) */
     SeInputQ kbd, mouse;
     uint64_t nic_rx_len; /* exposed RX frame length; 0 = none */
+    SeNicRxQ nic_rxq;
+    /* Guest memory, wired at setup by every front end (dev = mem = one
+     * machine): RX exposure writes frame bytes into the RX buffer
+     * window, both at admission and at RX_POP -- device-internal
+     * writes, never trace records (nic.md 7.2). */
+    SeMem *mem;
+    /* TX consumer hook: called after E5 validation with the doorbell
+     * length; the hook captures TX buffer bytes [0, len) synchronously
+     * (nic.md 2.2) and runs the GUI's translator. NULL headless --
+     * byte-for-byte the pre-translator drop, and the structural half
+     * of the replay isolation guarantee (nic.md 7.3). */
+    void (*tx_doorbell)(void *ctx, uint32_t len);
+    void *tx_ctx;
     /* Set by a PRESENT store, cleared by the GUI's render pump (its
      * coalescing hook: repaint iff a frame was presented since the
      * last tick). Pure front-end state -- never read headless, no
@@ -67,6 +101,16 @@ RWC_WARN_UNUSED bool SeDev_inject_input(SeDev *d, bool kbd, uint64_t word);
  * boundary. The caller has validated the geometry (display.md 3.4). */
 void SeDev_inject_resize(SeDev *d, uint64_t width, uint64_t height,
                          uint64_t stride);
+
+/* Apply one NIC arrival event (nic.md 4.2) at a boundary: admit the
+ * frame -- expose it immediately if the mailbox is empty, else queue
+ * it -- or discard it when 64 frames are already held. Returns true
+ * for the overflow discard, and the caller then records NO event
+ * (nic.md 4.3): the one asymmetry against input's flagged-record drop,
+ * kept explicit at the apply_events call site. m must be the wired
+ * d->mem (passed for symmetry with the setup contract). */
+RWC_WARN_UNUSED bool SeDev_inject_nic(SeDev *d, SeMem *m,
+                                      const uint8_t *frame, uint16_t len);
 
 /* Result of a 64-bit register access: fault = DEVERR (wrong direction,
  * unlisted offset, bad doorbell value, empty-pop -- the caller supplies
