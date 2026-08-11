@@ -202,6 +202,14 @@ static void validate_event(uint64_t off, uint64_t device, uint32_t inner,
             malformed(off, "NIC frame payload outside [60, 1514] "
                            "(nic.md 3.1)");
         return;
+    case SE_DEVIDX_TIMER:
+        /* The timer is a pure function of guest DEVW writes and the
+         * cycle counter: no EVENT payload exists for type 5, so any
+         * EVENT naming it is malformed regardless of content
+         * (timer.md 5, trace.md 4.5). */
+        malformed(off, "EVENT names the timer: type 5 defines no EVENT "
+                       "payload (trace.md 4.5)");
+        return;
     default:
         malformed(off, "EVENT device index outside the reference device "
                        "table (trace.md 4.5)");

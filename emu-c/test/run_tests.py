@@ -259,11 +259,12 @@ def test_devspace():
     windows have per-device semantics (dev.c; the shared c7_dev image
     owns the full matrix -- these are the harness-level boundary
     probes); the NIC buffers and the pixel window are memory-like
-    device space; [0x0F06_0000, 0x1000_0000) and everything past the
-    pixel window are holes trapping DEVERR (BOOT-15)."""
+    device space; [0x0F07_0000, 0x1000_0000) and everything past the
+    pixel window are holes trapping DEVERR (BOOT-15; the hole's first
+    64 KB became the timer window, timer.md 1)."""
     KBD = 0x0F010000       # keyboard window base
     BELOW = 0x0EFFFFF8     # last 8 RAM bytes below the windows
-    HOLE = 0x0F060000      # first hole byte after the NIC window
+    HOLE = 0x0F070000      # first hole byte after the timer window
     RXTOP = 0x0F05FFF8     # last 8 bytes of the NIC RX buffer
     PIXBUF = 0x10000000    # pixel window base
     PIXEND = 0x11000000    # first byte past the 16 MB pixel window
@@ -904,8 +905,13 @@ def test_replay_reader():
         check("wellformed-event-accepted",
               p.returncode == 0 and p.stdout == halt,
               f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}")
-        expect_reject("event-device-oob", TV2_TRC + ev_rec(4, kbd),
+        expect_reject("event-device-oob", TV2_TRC + ev_rec(5, kbd),
                       b"device index")
+        # Index 4 is the timer now, and type 5 defines no EVENT payload
+        # at all: any EVENT naming it is malformed regardless of
+        # content (timer.md 5, trace.md 4.5).
+        expect_reject("event-timer-rejected", TV2_TRC + ev_rec(4, kbd),
+                      b"no EVENT payload")
         expect_reject("event-resize-bad-len", TV2_TRC + ev_rec(0, kbd),
                       b"32 bytes")
         resize_fmt2 = b"".join(v.to_bytes(8, "little")

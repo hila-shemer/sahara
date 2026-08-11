@@ -26,7 +26,9 @@ enum {
     SE_DEVIDX_KBD = 1,
     SE_DEVIDX_MOUSE = 2,
     SE_DEVIDX_NIC = 3,
-    SE_DEVIDX_COUNT = 4,
+    SE_DEVIDX_TIMER = 4, /* never EVENT-fed: a timer EVENT is malformed
+                            (devspec/timer.md 5, trace.md 4.5) */
+    SE_DEVIDX_COUNT = 5,
 };
 
 /* Input event FIFO (input.md 4.1): depth exactly 256 on the reference
@@ -69,6 +71,18 @@ typedef struct SeDev {
     SeInputQ kbd, mouse;
     uint64_t nic_rx_len; /* exposed RX frame length; 0 = none */
     SeNicRxQ nic_rxq;
+    /* Timer (devspec/timer.md 4): guest-visible state is exactly
+     * {period, next_fire}; next_fire lives in the full cycle-counter
+     * domain (timer.md 3) so W + N and the ACK advance are exact.
+     * tmr_now/tmr_pending are the boundary-cycle cache, not state:
+     * SeDev_timer_tick recomputes them every boundary, and register
+     * accesses read them as their C/W/A -- the cached value equals the
+     * accessing instruction's record cycle, i.e. exactly the DEVW
+     * stamp the spec pins. No inject function: not EVENT-fed. */
+    uint64_t tmr_period;
+    se_u128 tmr_next;
+    se_u128 tmr_now;
+    bool tmr_pending;
     /* Guest memory, wired at setup by every front end (dev = mem = one
      * machine): RX exposure writes frame bytes into the RX buffer
      * window, both at admission and at RX_POP -- device-internal
@@ -129,13 +143,20 @@ RWC_WARN_UNUSED SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp,
 RWC_WARN_UNUSED SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp,
                                         uint64_t off, uint64_t val);
 
+/* The boundary device phase for the timer (trace.md 3.3: after EVENT
+ * apply, before interrupt recognition): cache the boundary cycle and
+ * recompute the derived pending bit, pending(C) = period > 0 &&
+ * C >= next_fire (timer.md 4.3). */
+void SeDev_timer_tick(SeDev *d, se_u128 cycle);
+
 /* EXTINT is the OR of every device pending condition (PLATFORM-SPEC 3). */
 RWC_WARN_UNUSED bool SeDev_ext_pending(const SeDev *d);
 
 /* Write the device table at PA 0x0800 before reset (devspec/boot.md 3,
- * 5): header, one RAM region of ram_region_len bytes, and the four
- * reference device records. With ram_region_len = 0x0F00_0000 the bytes
- * equal boot.md vector V1 exactly (asserted by test_dev.c). */
+ * 5): header, one RAM region of ram_region_len bytes, and the five
+ * reference device records (types 1-4 per boot.md 5, type 5 per
+ * timer.md 1). With ram_region_len = 0x0F00_0000 the bytes equal
+ * timer.md vector V1-T exactly (asserted by test_dev.c). */
 void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len);
 
 #endif /* SE_DEV_H */

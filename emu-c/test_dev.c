@@ -1,12 +1,13 @@
 /* Short-tier unit tests for the device layer: the byte-exact reference
- * device table (devspec/boot.md vector V1 -- the 328-byte dump
- * transcribed below, plus zeros through the end of the window), the
- * MAC packing vector V5, the physical-space classifier's boundaries,
- * the register fault matrix at the SeDev level (direction, unlisted
- * offsets, doorbell range, empty pop; the trap plumbing above it is
- * exercised by the shared c7_dev image), and the NIC RX frame store
- * (nic.md 4: FIFO exposure, exact-length buffer writes, the 64-cap
- * overflow discard). */
+ * device table (devspec/timer.md vector V1-T -- boot.md's V1 grown by
+ * the type-5 timer record, the 392-byte dump transcribed below, plus
+ * zeros through the end of the window), the MAC packing vector V5, the
+ * physical-space classifier's boundaries, the register fault matrix at
+ * the SeDev level (direction, unlisted offsets, doorbell range, empty
+ * pop, timer E1-E5; the trap plumbing above it is exercised by the
+ * shared c7_dev image), the NIC RX frame store (nic.md 4: FIFO
+ * exposure, exact-length buffer writes, the 64-cap overflow discard),
+ * and the timer arm/fire/ack model (timer.md 4). */
 #include <stdio.h>
 #include <string.h>
 
@@ -16,12 +17,12 @@
 #include "rwc/status.h"
 #include "u128.h"
 
-/* devspec/boot.md section 7, vector V1: the emulator must produce
- * exactly these 328 bytes at [0x0800, 0x0948). */
-static const uint8_t v1_table[328] = {
+/* devspec/timer.md section 8, vector V1-T: the emulator must produce
+ * exactly these 392 bytes at [0x0800, 0x0988). */
+static const uint8_t v1t_table[392] = {
     0x53, 0x41, 0x48, 0x41, 0x52, 0x41, 0x50, 0x54, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -46,17 +47,22 @@ static const uint8_t v1_table[328] = {
     0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x52, 0x54, 0x00, 0x12,
     0x34, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x06, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static void test_devtable_v1(void)
+static void test_devtable_v1t(void)
 {
     SeMem m;
     SeMem_init(&m, se_lo64(SE_PLAT_RAM_MAX));
     se_plat_write_devtable(&m, se_lo64(SE_PLAT_RAM_MAX));
-    for (unsigned i = 0; i < sizeof v1_table; i++)
-        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x800u + i, 1u)) == v1_table[i]);
-    for (unsigned a = 0x948u; a < 0x1000u; a++)
+    for (unsigned i = 0; i < sizeof v1t_table; i++)
+        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x800u + i, 1u)) == v1t_table[i]);
+    for (unsigned a = 0x988u; a < 0x1000u; a++)
         RWC_ASSERT(SeMem_read(&m, a, 1u) == 0u); /* BOOT-2: window zeros */
 }
 
@@ -79,7 +85,11 @@ static void test_classify(void)
     RWC_ASSERT(se_plat_classify(0x0F030000u) == SE_SPACE_NIC);
     RWC_ASSERT(se_plat_classify(0x0F040000u) == SE_SPACE_BUF); /* TX */
     RWC_ASSERT(se_plat_classify(0x0F050000u) == SE_SPACE_BUF); /* RX */
-    RWC_ASSERT(se_plat_classify(0x0F060000u) == SE_SPACE_HOLE); /* V9 */
+    RWC_ASSERT(se_plat_classify(0x0F060000u) == SE_SPACE_TIMER);
+    RWC_ASSERT(se_plat_classify(0x0F06FFF8u) == SE_SPACE_TIMER);
+    /* The hole moved with the timer carve-out (timer.md 1): it now
+     * starts one window later than boot.md V9's pre-timer platform. */
+    RWC_ASSERT(se_plat_classify(0x0F070000u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x0FFFFFF8u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x10000000u) == SE_SPACE_BUF); /* pixels */
     RWC_ASSERT(se_plat_classify(0x10FFFFF8u) == SE_SPACE_BUF);
@@ -126,7 +136,70 @@ static void test_registers(void)
     RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 60u).fault);
     RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 1514u).fault);
     RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 1u).fault); /* E6 */
+    /* Timer: reset reads, direction/offset faults, strict ACK value
+     * (timer.md 2, TV-T1 shape). */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 0u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 8u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 24u).fault);      /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 0u, 5u).fault);  /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 16u, 0u).fault); /* E2 */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 32u).fault);      /* E1 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 0xFFF8u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 0u).fault); /* E5 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 2u).fault); /* E5 */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u).fault);
     RWC_ASSERT(!SeDev_ext_pending(&d));
+}
+
+static void test_timer_model(void)
+{
+    SeDev d;
+    SeDev_reset(&d);
+    /* Arm at W = 1000 with N = 100: pending derives at the first
+     * boundary >= 1100 and holds level-high (timer.md 4.2-4.3). */
+    SeDev_timer_tick(&d, 1000u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 8u, 100u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 8u).val == 100u);
+    SeDev_timer_tick(&d, 1099u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 0u);
+    RWC_ASSERT(!SeDev_ext_pending(&d));
+    /* Not-pending ACK is a no-op, not a state change (TMR-09). */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u).fault);
+    SeDev_timer_tick(&d, 1100u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 1u);
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 0u).val == 1100u);
+    /* A bad-value ACK faults with no state change (TMR-10)... */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 3u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 1u);
+    /* ...a prompt ACK advances by exactly one period (k = 1)... */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u).fault);
+    SeDev_timer_tick(&d, 1101u);
+    RWC_ASSERT(!d.tmr_pending);
+    SeDev_timer_tick(&d, 1200u);
+    RWC_ASSERT(d.tmr_pending);
+    /* ...and a late ACK collapses k > 1 elapsed periods back onto the
+     * W + m*N grid: A = 1437 with next_fire = 1200 gives k = 3,
+     * next_fire = 1500 (TMR-08/17). */
+    SeDev_timer_tick(&d, 1437u);
+    RWC_ASSERT(d.tmr_pending); /* one level, however many periods */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u).fault);
+    SeDev_timer_tick(&d, 1499u);
+    RWC_ASSERT(!d.tmr_pending);
+    SeDev_timer_tick(&d, 1500u);
+    RWC_ASSERT(d.tmr_pending);
+    /* Rewrite while armed re-arms fresh from the new W (TMR-06). */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 8u, 7u).fault);
+    SeDev_timer_tick(&d, 1501u);
+    RWC_ASSERT(!d.tmr_pending);
+    SeDev_timer_tick(&d, 1507u);
+    RWC_ASSERT(d.tmr_pending);
+    /* Disarm drops pending with no ACK handshake (TMR-04). */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 8u, 0u).fault);
+    SeDev_timer_tick(&d, 1508u);
+    RWC_ASSERT(!d.tmr_pending);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 8u).val == 0u);
 }
 
 static void test_input_queue(void)
@@ -244,13 +317,14 @@ static void test_resize_inject(void)
 
 int main(void)
 {
-    test_devtable_v1();
+    test_devtable_v1t();
     test_mac_packing();
     test_classify();
     test_registers();
     test_input_queue();
     test_nic_rx_model();
     test_resize_inject();
+    test_timer_model();
     printf("test_dev: all passed\n");
     return 0;
 }
