@@ -39,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <time.h>
 
 #include "cpu.h"
@@ -123,6 +124,10 @@ typedef struct Gui {
     /* one stamp per pump iteration: all events polled together feed
      * at the same cycle, in poll order (work-order rule 3/8) */
     uint64_t pump_earliest;
+    /* --script fake entropy source (rng.md 7.5): a fixed-seed
+     * SplitMix64 stands in for getrandom so the scripted gate never
+     * touches real entropy and double-runs stay byte-identical. */
+    uint64_t script_rng_state;
 } Gui;
 
 static uint64_t now_ms(const Gui *g)
@@ -196,6 +201,47 @@ static void nic_pump(Gui *g)
         SeNicFake_pump(&g->nic_fake, &g->nic);
     else
         SeNicHost_pump(&g->nic_host, &g->nic);
+}
+
+/* RNG watermark top-up (rng.md 7.5, non-normative reference policy):
+ * one 32-word batch whenever guest-visible depth is below 64, stamped
+ * like the input batch polled alongside it. Arrival depth therefore
+ * never exceeds 95, so live truncation cannot happen and every fed
+ * word is recorded (the apply path IS the recording path). Under
+ * --script the words come from a fixed-seed SplitMix64 instead of
+ * getrandom: the scripted gate is real-entropy-free by construction,
+ * exactly like --nic fake. */
+#define RNG_BATCH_WORDS 32u
+#define RNG_WATERMARK 64u
+
+static void rng_topup(Gui *g)
+{
+    if (g->dev.rng_count >= RNG_WATERMARK)
+        return;
+    uint8_t buf[RNG_BATCH_WORDS * 8u];
+    if (g->script_mode) {
+        for (unsigned w = 0; w < RNG_BATCH_WORDS; w++) {
+            g->script_rng_state += 0x9E3779B97F4A7C15ull;
+            uint64_t z = g->script_rng_state;
+            z ^= z >> 30;
+            z *= 0xBF58476D1CE4E5B9ull;
+            z ^= z >> 27;
+            z *= 0x94D049BB133111EBull;
+            z ^= z >> 31;
+            for (unsigned i = 0; i < 8u; i++)
+                buf[8u * w + i] = (uint8_t)(z >> (8u * i));
+        }
+    } else {
+        size_t got = 0;
+        while (got < sizeof buf) {
+            ssize_t r = getrandom(buf + got, sizeof buf - got, 0);
+            if (r < 0)
+                die("getrandom failed");
+            got += (size_t)r;
+        }
+    }
+    SeCpu_feed(g->cpu, SE_DEVIDX_RNG, buf, (uint16_t)sizeof buf,
+               g->pump_earliest);
 }
 
 /* Capture loss for any reason (focus loss, release chord): the guest
@@ -574,6 +620,10 @@ int main(int argc, char **argv)
     g.t0_ms = now_ms(&g);
     g.c0 = 0;
 
+    /* Session-start entropy batch (rng.md 7.5): fed at cycle 0, so a
+     * guest that reads STATUS early already sees a stocked well. */
+    rng_topup(&g);
+
     /* The throttled chunked loop (work-order rule 7): step to the
      * pacing target in <=16 ms slices, pump host input, repaint on
      * PRESENT, sleep to the next tick; block properly while the guest
@@ -611,8 +661,11 @@ int main(int argc, char **argv)
                 handle_sdl_event(&g, &e);
         }
         /* NIC backend sweep after input: one deterministic poll order
-         * per tick (input batch, then flow-order return traffic). */
+         * per tick (input batch, then flow-order return traffic),
+         * then the entropy watermark - last, so its batch lands after
+         * everything else fed this tick at the same stamp. */
         nic_pump(&g);
+        rng_topup(&g);
         render_if_pending(&g);
         if (!running || g.quit)
             break;
