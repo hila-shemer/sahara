@@ -1060,6 +1060,7 @@ static void apply_events(SeCpu *c)
         RWC_ASSERT(c->dev != NULL); /* main.c wires both or neither */
         const uint8_t *rec = e->payload;
         uint8_t inbuf[9];
+        uint16_t rec_len = e->len;
         bool record = true;
         switch (e->device) {
         case SE_DEVIDX_DISPLAY:
@@ -1090,12 +1091,31 @@ static void apply_events(SeCpu *c)
                 record = false;
             }
             break;
+        case SE_DEVIDX_RNG: {
+            /* Truncate-to-fit, recorded = accepted prefix (rng.md
+             * 4.2, trace.md 4.6): the model recomputes acceptance on
+             * every apply -- live and replay alike, so an overflowing
+             * feed truncates deterministically instead of dying, and
+             * the trace diff is the loud replay check (SPEC-ISSUES
+             * 40). The recorded bytes are the payload prefix: word
+             * boundaries are byte boundaries, no re-encoding needed. */
+            uint64_t w[SE_RNG_EV_WORDS_MAX];
+            uint32_t n = e->len / 8u;
+            RWC_ASSERT(n >= 1u && n <= SE_RNG_EV_WORDS_MAX);
+            for (uint32_t i = 0; i < n; i++)
+                w[i] = ev_u64(e->payload + 8u * i);
+            uint32_t took = SeDev_inject_rng(c->dev, w, n);
+            if (took == 0u)
+                record = false; /* zero accepted: no EVENT record */
+            rec_len = (uint16_t)(8u * took);
+            break;
+        }
         default:
-            RWC_ASSERT(0); /* both feeders admit only the four above */
+            RWC_ASSERT(0); /* both feeders admit only the five above */
         }
         if (record)
             SeTrace_event(c->tr, se_lo64(c->cycle), e->device, rec,
-                          e->len);
+                          rec_len);
     }
 }
 

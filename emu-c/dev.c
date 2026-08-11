@@ -40,6 +40,34 @@ enum {
     NIC_MAC = 32,
 };
 
+/* RNG register offsets (rng.md 2; fault catalog rng.md 8). */
+enum {
+    RNG_DATA = 0,
+    RNG_STATUS = 8,
+    RNG_CTRL = 16,
+    RNG_SEED = 24,
+};
+
+/* CTRL bit assignments (rng.md 2): everything above bit 1 is reserved
+ * and write-rejected (E5), so future bits stay opt-in. */
+#define RNG_CTRL_MODE 1ull /* 0 = QUEUE, 1 = PRNG */
+#define RNG_CTRL_IE 2ull
+#define RNG_CTRL_RESERVED (~3ull)
+
+/* SplitMix64, normative in rng.md 5.1. One call = one PRNG-mode DATA
+ * pop; the state advance and the output are inseparable by design. */
+static uint64_t rng_splitmix64(uint64_t *state)
+{
+    *state += 0x9E3779B97F4A7C15ull;
+    uint64_t z = *state;
+    z ^= z >> 30;
+    z *= 0xBF58476D1CE4E5B9ull;
+    z ^= z >> 27;
+    z *= 0x94D049BB133111EBull;
+    z ^= z >> 31;
+    return z;
+}
+
 void SeDev_reset(SeDev *d)
 {
     memset(d, 0, sizeof *d);
@@ -139,6 +167,30 @@ SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp, uint64_t off)
              * register region is unlisted (E2). */
             return acc_fault();
         }
+    case SE_SPACE_RNG:
+        switch (off) {
+        case RNG_DATA:
+            if (d->rng_ctrl & RNG_CTRL_MODE)
+                /* PRNG mode: the queue is untouched (rng.md 5.2). */
+                return acc_val(rng_splitmix64(&d->rng_prng_state));
+            if (d->rng_count == 0u)
+                return acc_fault(); /* E6: no sentinel exists -- every
+                                       u64 is a legal entropy word
+                                       (rng.md 4.1 rule 4) */
+            {
+                uint64_t w = d->rng_q[d->rng_head];
+                d->rng_head = (d->rng_head + 1u) % SE_RNG_QDEPTH;
+                d->rng_count -= 1u;
+                return acc_val(w); /* pop the oldest (FIFO, rng.md 4.1) */
+            }
+        case RNG_STATUS:
+            return acc_val(d->rng_count); /* mode-independent depth */
+        case RNG_CTRL:
+            return acc_val(d->rng_ctrl);
+        default:
+            return acc_fault(); /* SEED is write-only (E2); the rest
+                                   is unlisted (E1) */
+        }
     default:
         RWC_ASSERT(0); /* only register windows reach here */
         return acc_fault();
@@ -210,6 +262,24 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
         default:
             return acc_fault(); /* read-only (E4) or unlisted (E2) */
         }
+    case SE_SPACE_RNG:
+        switch (off) {
+        case RNG_CTRL:
+            if (val & RNG_CTRL_RESERVED)
+                return acc_fault(); /* E5: reserved bits stay opt-in
+                                       (rng.md 9), no state change */
+            d->rng_ctrl = val;
+            return acc_val(0);
+        case RNG_SEED:
+            /* state = value, stream restarts (rng.md 5.1); legal in
+             * either mode, replay-safe because this store is DEVW-
+             * traced like any other (rng.md 5.3). */
+            d->rng_prng_state = val;
+            return acc_val(0);
+        default:
+            return acc_fault(); /* DATA/STATUS read-only (E2); the
+                                   rest unlisted (E1) */
+        }
     default:
         RWC_ASSERT(0);
         return acc_fault();
@@ -227,6 +297,20 @@ bool SeDev_inject_input(SeDev *d, bool kbd, uint64_t word)
     return false;
 }
 
+uint32_t SeDev_inject_rng(SeDev *d, const uint64_t *words, uint32_t nwords)
+{
+    /* Truncate-to-fit (rng.md 4.2): accept the front, drop the rest.
+     * The return value is the recording contract -- the caller traces
+     * exactly the accepted prefix, or nothing when it is 0. */
+    uint32_t space = SE_RNG_QDEPTH - d->rng_count;
+    uint32_t take = nwords < space ? nwords : space;
+    for (uint32_t i = 0; i < take; i++)
+        d->rng_q[(d->rng_head + d->rng_count + i) % SE_RNG_QDEPTH] =
+            words[i];
+    d->rng_count += take;
+    return take;
+}
+
 void SeDev_inject_resize(SeDev *d, uint64_t width, uint64_t height,
                          uint64_t stride)
 {
@@ -240,9 +324,12 @@ bool SeDev_ext_pending(const SeDev *d)
 {
     /* Level-triggered OR of every device pending condition
      * (PLATFORM-SPEC 3): input queue non-empty, display IRQ_STATUS
-     * nonzero, NIC frame exposed. */
+     * nonzero, NIC frame exposed, RNG depth behind its IE gate --
+     * IE-qualified so the device stays invisible to type-7-unaware
+     * kernels (rng.md 6). Pure state: no cycle plumbing anywhere. */
     return d->kbd.count != 0u || d->mouse.count != 0u ||
-           d->display_irq_status != 0u || d->nic_rx_len != 0u;
+           d->display_irq_status != 0u || d->nic_rx_len != 0u ||
+           ((d->rng_ctrl & RNG_CTRL_IE) != 0u && d->rng_count != 0u);
 }
 
 /* ---------------------------------------------------- device table */
@@ -276,7 +363,7 @@ void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len)
     SeMem_write(m, off + 8u, 8u, 1u);  /* version */
     SeMem_write(m, off + 16u, 8u, 1u); /* cpu_count */
     SeMem_write(m, off + 24u, 8u, 1u); /* ram_region_count */
-    SeMem_write(m, off + 32u, 8u, 4u); /* device_count */
+    SeMem_write(m, off + 32u, 8u, 5u); /* device_count */
     off += 40u;
     SeMem_write(m, off + 0u, 16u, 0u); /* region 0 base */
     SeMem_write(m, off + 16u, 16u, (se_u128)ram_region_len);
@@ -292,6 +379,10 @@ void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len)
     devtab_record(m, &off, 2u, SE_PLAT_KBD_BASE, 0x10000u, no_params);
     devtab_record(m, &off, 3u, SE_PLAT_MOUSE_BASE, 0x10000u, no_params);
     devtab_record(m, &off, 4u, SE_PLAT_NIC_BASE, 0x30000u, nic_params);
+    /* Type 7 rng, all params 0 ("0 = v1 behavior", rng.md 1; depth
+     * 256 is spec-fixed, not a param). Fifth record on this branch --
+     * SE_DEVIDX_RNG carries the wave-renumber note. */
+    devtab_record(m, &off, 7u, SE_PLAT_RNG_BASE, 0x10000u, no_params);
     /* Window bytes past the encoded table stay 0: sparse memory reads
      * zero untouched, and the loader rejects segments overlapping
      * [0x800, 0x1000) (boot.md BOOT-4, image.c). */
