@@ -4,3 +4,4 @@ slice/encoding.h
 __pycache__/
 tests/out/
 emu-c/gui/out/
+test_results.txt
