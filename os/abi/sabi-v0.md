@@ -351,6 +351,11 @@ adding a consumer is a one-line change to this list.
 
 **Change log:**
 
+- 2026-08-11 — Amendment v0.1 (user-mode conventions) signed off after
+  owner review: A.2 gains the window-growth note, A.4 the `cur_proc`
+  reachability answer, A.6 the committed direction on user-space fault
+  handling. Consumers: Oasis M2.
+
 - 2026-08-11 — v0 signed off. Trust-boundary section 1.4 added and the
   section 1.1 below-`sp` license scoped to kernel-mode interruption, from
   owner review (cfff4aa). No consumer code change required: Oasis M1 has
@@ -359,7 +364,7 @@ adding a consumer is a one-line change to this list.
 
 ---
 
-## Amendment v0.1 — user-mode conventions (DRAFT — awaiting owner sign-off)
+## Amendment v0.1 — user-mode conventions (SIGNED OFF 2026-08-11)
 
 Fills the "user-mode conventions" deferral of section 7 — partially.
 Defined here: the address-space model, the user window and its layout,
@@ -405,6 +410,11 @@ table. The kernel heap of section 4.6 is hereby capped at UBASE —
 growth direction unchanged, ceiling noted; the allocator amendment
 revisits this.
 
+Owner note at sign-off: 16 MB is a v0.1 value, not an architectural
+bound — expect the window to grow considerably in later amendments.
+It must grow (or move) before any allocator consumes the heap ceiling,
+which is why the allocator amendment owns the revisit.
+
 ### A.3 Entry contract
 
 - `pc` = UBASE. A user program's first byte is its entry point — no
@@ -434,7 +444,15 @@ size: 16 KB.
 
 M2 instantiates exactly one such structure; M3 changes a count, not a
 design. Trap paths reach the stack only through "the current process's
-structure", never through a global bare stack symbol. The shared
+structure", never through a global bare stack symbol. Reachability
+(owner question at sign-off, answered): the structure is found through
+`cur_proc`, a kernel global in U = 0 memory whose address enters the
+trap path as an instruction immediate from kernel text (`la k0,
+cur_proc` — k0 is write-before-read per section 1.4 rule 1). No
+register a user context can write participates; user code cannot store
+to the pointer or the structure (PERM_*). On this single-CPU machine a
+plain kernel global is the whole per-CPU mechanism; a context switch
+updates `cur_proc` and nothing else changes. The shared
 boot/shell kernel stack of section 4.5 is NOT a trap stack for
 user-mode traps.
 
@@ -457,6 +475,15 @@ Any trap with `status.PS` = 0 and cause ∈ {2..9, 11, 12} terminates
 the user program. What termination means — diagnostic, return to
 shell, exit status — is per-OS policy; signal-like upcalls remain
 deferred (A.8).
+
+Owner direction at sign-off (binding on future amendments):
+user-space fault handling — a user-registered SIGSEGV-style handler
+receiving the fault instead of unconditional termination — is a
+COMMITTED future amendment, not a mere deferral. Managed memory makes
+signals real (guard-page stacks, GC barriers, Smalltalk-style tricks
+are anticipated consumers). v0.1's kill-on-fault is the placeholder
+policy, and nothing in this amendment may be read as precluding
+delivery of user faults to user handlers later.
 
 Consequences worth spelling out: `HALT` and `WFI` from user mode are
 `PRIV` traps (ISA-SPEC 2.4) — a user program cannot stop, halt, or
@@ -488,6 +515,7 @@ remains out of scope per amendment rule 2:
 - User heap / allocator.
 - W^X (the v0.1 image mapping is U+R+W+X).
 
-**Amendment status: DRAFT — awaiting owner sign-off.** Consumers may
-develop against this draft only on the branch that carries it; nothing
-merges to main until the owner flips this flag and logs the change.
+**Amendment status: SIGNED OFF** — owner review 2026-08-11
+(conversation review: items 1–7; window-growth note, `cur_proc`
+reachability answer, and the user-fault-handling commitment integrated
+at sign-off). Consumers may build against v0.1.
