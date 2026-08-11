@@ -93,12 +93,17 @@ def main(argv):
     nic_rx = devices.Buffer(devices.NIC_BASE + devices.NIC_RX_OFFSET,
                             0x10000)
     nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac, nic_rx)
-    for dev in (display, kbd, mouse, nic, pixbuf, nic_tx, nic_rx):
+    timer = devices.Timer()
+    for dev in (display, kbd, mouse, nic, timer, pixbuf, nic_tx, nic_rx):
         phys.add_device(dev)
 
     # trace.md 4/boot.md V1: EVENT device indices are 0-based positions
     # among the device-table *entries*, not phys.devices (which also
     # carries the pixel/TX/RX buffer routing windows) — PROBLEMS.md P12.
+    # The timer (table index 4) is deliberately absent: type 5 defines
+    # no EVENT payload, so an index-4 EVENT must hit the
+    # nonexistent-device fatal in Machine.process_events (timer.md 5,
+    # trace.md 4.5) — matching emu-c's malformed-trace rejection.
     event_devices = [display, kbd, mouse, nic]
 
     # PLATFORM-SPEC 2 device table: table entries advertise the
@@ -110,6 +115,7 @@ def main(argv):
         (2, devices.KBD_BASE, devices.KBD_SIZE, (0, 0, 0, 0)),
         (3, devices.MOUSE_BASE, devices.MOUSE_SIZE, (0, 0, 0, 0)),
         (4, devices.NIC_BASE, devices.NIC_WINDOW_SIZE, (mac, 0, 0, 0)),
+        (5, devices.TIMER_BASE, devices.TIMER_SIZE, (0, 0, 0, 0)),
     ]
     # P8: the table's RAM region must match what PhysMap actually
     # routes as RAM — the dev_base-clamped length, not the raw --ram
@@ -138,7 +144,8 @@ def main(argv):
         ])
 
     m = machine.Machine(phys, tracer=tracer, check_invtp=args.check_invtp,
-                        events=events, event_devices=event_devices)
+                        events=events, event_devices=event_devices,
+                        timer=timer)
     try:
         outcome = m.run(maxcycles=args.maxcycles)
     except machine.CheckFail as cf:
