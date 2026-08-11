@@ -40,8 +40,8 @@ sys_read:                              # read(fd, buf, len) -> count >= 1
         st128   [sp + 32], r8
         mfsr    r8, status
         st128   [sp + 48], r8
-        li      r8, STATUS_S + STATUS_IE
-        mtsr    status, r8             # TL=0, interrupts live
+        li      r8, STATUS_S + STATUS_IE + STATUS_MMU_EN
+        mtsr    status, r8             # TL=0, interrupts live, MMU stays on
 sr_wait:
         ldz.64  r9, [r27 + G_RHEAD]
         ldz.64  r10, [r27 + G_RTAIL]

@@ -25,6 +25,11 @@ dbg_status:                            # boot-stage word (tests assert
 dbg_df:                                # double-fault post-mortem: epc0,
         .space 64                      # cause0, baddr0, epc1, cause1,
                                        # baddr1, status
+        .align 64
+mmu_nodes:                             # page-table pool (ISA 8.2 nodes,
+        .space 74880                   # 64-aligned): 18 x 4160 B - root
+mmu_nodes_end:                         # + one shift-0 node per chunk
         .align 16
 _end:                                  # heap grows UP from here (SABI
-                                       # 4.6); no allocator in M1
+                                       # 4.6, ceiling now UBASE per
+                                       # v0.1 A.2); no allocator yet

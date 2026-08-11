@@ -55,7 +55,8 @@ Unknown commands print an error line.
 ## Boot-stage debug word
 
 Boot stores ordered u64 stage codes to the bss word `dbg_status`:
-1 table-ok, 2 vectors-on, 3 irq-on, 4 shell-ready. The tests resolve
+1 table-ok, 2 vectors-on, 3 mmu-on, 4 irq-on, 5 shell-ready. The tests
+resolve
 `dbg_status` from the `.sym` sidecar and assert the ordered MEMW
 sequence via trace-q, each stage exactly once.
 

@@ -38,7 +38,9 @@ import genkeymap as K          # noqa: E402
 # 0-based device-table indices, reference order (boot.md 5)
 DEV_DISPLAY, DEV_KBD, DEV_MOUSE, DEV_NIC = 0, 1, 2, 3
 
-BOOT_MARGIN = 300000   # boot + banner is ~20k cycles; wide margin
+BOOT_MARGIN = 800000   # boot + page-table build + banner is ~200k
+                       # cycles under M2's MMU bring-up; wide margin,
+                       # bumped once (work-order risk 3), never shaved
 GAP = 10000            # default inter-key spacing (echo is ~3k cycles)
 RELGAP = 2000          # press -> release spacing
 
@@ -197,6 +199,18 @@ def feed_scroll(f):
         t = f.key(t, '\n')
     t = f.text(t + GAP, "echo bottom\n")
     f.text(t + 2 * GAP, "halt\n")
+
+
+def feed_m1_regression(f):
+    # the M1 suite semantics in one session, now under MMU_EN=1: the
+    # identity axiom (SABI 4.4) says conforming kernel code needs zero
+    # changes when translation goes on - this feed proves it instead
+    # of assuming it (work-order risk 1).
+    t = f.text(BOOT_MARGIN, "help\n")
+    t = f.text(t + GAP, "ecXX\x08\x08ho ok\n")
+    t = f.text(t + GAP, "uptime\n")
+    t = f.text(t + GAP, "frob\n")
+    f.text(t + GAP, "halt\n")
 
 
 def feed_resize(f):

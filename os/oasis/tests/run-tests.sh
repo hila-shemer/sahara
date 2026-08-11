@@ -80,12 +80,13 @@ run_emu() {  # rc in $?, stdout echoed; args: img out.trc extra...
         --maxcycles "$MAXCYCLES" "$@" 2>"$trc.err"
 }
 
-check_dbg_status() {  # trace sym -> asserts stage sequence 1,2,3,4
+check_dbg_status() {  # trace sym -> asserts stage sequence 1..5 (M2:
+    # 1 table-ok, 2 vectors-on, 3 mmu-on, 4 irq-on, 5 shell-ready)
     local trc="$1" sym="$2" addr from line cycle val want wanthex
     addr=$(awk '$2=="D" && $3=="dbg_status"{print $1}' "$sym")
     [ -n "$addr" ] || { echo "    dbg_status missing from .sym"; return 1; }
     from=0
-    for want in 1 2 3 4; do
+    for want in 1 2 3 4 5; do
         line=$(python3 "$TRACEQ" find --touched "0x$addr" --from "$from" \
                "$trc") || { echo "    dbg_status: stage $want missing"; return 1; }
         cycle=$(sed 's/.*cycle=\([0-9]*\).*/\1/' <<<"$line")
@@ -99,7 +100,7 @@ check_dbg_status() {  # trace sym -> asserts stage sequence 1,2,3,4
     done
     if python3 "$TRACEQ" find --touched "0x$addr" --from "$from" "$trc" \
             >/dev/null 2>&1; then
-        echo "    dbg_status: unexpected 5th write"
+        echo "    dbg_status: unexpected 6th write"
         return 1
     fi
     return 0
@@ -207,6 +208,7 @@ run_boot_fail() {
     printf '%s\n' "$body" > "$OUT/$name.table.s"
     python3 "$ASM" -o "$img" \
         "$OUT/$name.defs.s" "$OASIS/kernel/boot.s" "$OASIS/kernel/trap.s" \
+        "$OASIS/kernel/mmu.s" \
         "$OASIS/kernel/kbd.s" "$OASIS/kernel/con.s" "$OASIS/kernel/shell.s" \
         "$OASIS/kernel/sys.s" "$OASIS/kernel/lib.s" \
         "$OASIS/build/font.s" "$OASIS/build/keymap.s" \
@@ -261,6 +263,12 @@ run_feed_test scroll "$PASS_HEX" \
 
 run_feed_test resize "$PASS_HEX" \
     --expect-sub "echo hi" --expect "hi" --expect '$ halt'
+
+run_feed_test m1_regression "$PASS_HEX" \
+    --expect '$ help' --expect "builtins: help echo uptime halt" \
+    --expect '$ echo ok' --expect "ok" \
+    --expect-sub "uptime: " --expect-sub " cycles" \
+    --expect '$ frob' --expect "unknown command" --expect '$ halt'
 
 HALT_BADMAGIC=$(printf "%032x" $((0x0BAD0001)))
 HALT_BADVER=$(printf "%032x" $((0x0BAD0002)))
