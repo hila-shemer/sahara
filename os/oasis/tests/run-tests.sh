@@ -208,7 +208,7 @@ run_boot_fail() {
     printf '%s\n' "$body" > "$OUT/$name.table.s"
     python3 "$ASM" -o "$img" \
         "$OUT/$name.defs.s" "$OASIS/kernel/boot.s" "$OASIS/kernel/trap.s" \
-        "$OASIS/kernel/mmu.s" \
+        "$OASIS/kernel/mmu.s" "$OASIS/kernel/uproc.s" \
         "$OASIS/kernel/kbd.s" "$OASIS/kernel/con.s" "$OASIS/kernel/shell.s" \
         "$OASIS/kernel/sys.s" "$OASIS/kernel/lib.s" \
         "$OASIS/build/font.s" "$OASIS/build/keymap.s" \

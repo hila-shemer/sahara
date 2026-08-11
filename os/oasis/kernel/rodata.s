@@ -21,6 +21,14 @@ cmd_echo:
         .asciiz "echo"
 cmd_echosp:
         .asciiz "echo "
+cmd_run:
+        .asciiz "run"
+str_uexit:
+        .asciiz "user: exit "
+str_ukill:
+        .asciiz "user: killed cause="
+str_uepc:
+        .asciiz " epc=0x"
 str_uptime:
         .asciiz "uptime: "
 str_ticks:

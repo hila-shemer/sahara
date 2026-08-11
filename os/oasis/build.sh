@@ -21,7 +21,8 @@ python3 "$HERE/gen/genfont.py"   "$B/font.s"
 python3 "$HERE/gen/genkeymap.py" "$B/keymap.s"
 
 python3 "$ROOT/asm/asm.py" -o "$OUT_IMG" \
-    "$K/defs.s" "$K/boot.s" "$K/trap.s" "$K/mmu.s" "$K/kbd.s" "$K/con.s" \
+    "$K/defs.s" "$K/boot.s" "$K/trap.s" "$K/mmu.s" "$K/uproc.s" \
+    "$K/kbd.s" "$K/con.s" \
     "$K/shell.s" "$K/sys.s" "$K/lib.s" \
     "$B/font.s" "$B/keymap.s" "$K/rodata.s" \
     "$K/data.s" "$K/bss.s" \

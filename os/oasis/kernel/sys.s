@@ -8,6 +8,7 @@
 sys_write:                             # write(fd, buf, len) -> len
         cmpeq   p1, r0, zero           # fd 0 = console
         (!p1) b sys_einval
+        jal     sys_ubuf_check         # -EFAULT out for bad user bufs
         cmpeq   p1, r2, zero
         (p1) b  sys_ret0               # len 0: no bytes, no PRESENT
         add     sp, sp, -32
@@ -26,6 +27,7 @@ sys_read:                              # read(fd, buf, len) -> count >= 1
         (!p1) b sys_einval
         cmpeq   p1, r2, zero           # len 0 can never satisfy ">= 1"
         (p1) b  sys_einval
+        jal     sys_ubuf_check         # validate BEFORE blocking
         # Block until the ring has a byte: ISA 7.3 software-consent
         # pattern per SABI 5 - bank-0 sregs + status to memory (our
         # stack frame: nesting-safe by construction), TL<-0, IE<-1,
@@ -81,11 +83,40 @@ sr_copied:
         mov     r0, r11
         b       sys_ret
 
-sys_exit:                              # exit(code): r0 already = code
-        halt
+sys_exit:                              # exit(code): who dies depends on
+        mfsr    r8, status             # the caller (v0.1 A.6) - a user
+        and     r8, r8, STATUS_PS      # program cannot stop the machine
+        cmpeq   p1, r8, zero
+        (p1) b  uproc_exit             # user: the program terminates
+        halt                           # kernel (shell halt): M1 contract
+
+# ---- user-pointer rule (v0.1 A.5): for a user-mode caller, [buf,
+# buf+len) must lie inside the user window, else -EFAULT; the len cap
+# comes first so buf+len cannot wrap. Kernel callers are trusted.
+# Returns on pass; a failure abandons ra and leaves via sys_ret with
+# the errno - nothing was pushed, so there is nothing to unwind.
+sys_ubuf_check:
+        mfsr    r8, status
+        and     r8, r8, STATUS_PS
+        cmpeq   p1, r8, zero
+        (!p1) ret                      # kernel caller
+        li      r8, USIZE
+        cmpleu  p1, r2, r8
+        (!p1) b sys_efault
+        li      r8, UBASE
+        cmpleu  p1, r8, r1
+        (!p1) b sys_efault
+        li      r9, UTOP
+        add     r10, r1, r2
+        cmpleu  p1, r10, r9
+        (!p1) b sys_efault
+        ret
 
 sys_einval:
         li      r0, -EINVAL
+        b       sys_ret
+sys_efault:
+        li      r0, -EFAULT
         b       sys_ret
 sys_ret0:
         li      r0, 0

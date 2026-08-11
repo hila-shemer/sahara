@@ -22,6 +22,18 @@ sh_ubuf:                               # uptime compose buffer
         .space 128
 dbg_status:                            # boot-stage word (tests assert
         .space 8                       # the ordered MEMW sequence)
+dbg_user:                              # user-program lifecycle word:
+        .space 8                       # 1 entered, 2 exited, 3 killed
+cur_proc:                              # THE current-process pointer
+        .space 8                       # (v0.1 A.4): trap paths reach
+                                       # the structure only through it
+        .align 16
+uproc0:                                # the one M2 process structure
+        .space 112                     # (offsets: defs.s P_*)
+        .align 16
+uproc0_kstack:                         # its kernel trap stack, 16 KB
+        .space 16384                   # (v0.1 A.4 reference size)
+uproc0_kstack_top:
 dbg_df:                                # double-fault post-mortem: epc0,
         .space 64                      # cause0, baddr0, epc1, cause1,
                                        # baddr1, status

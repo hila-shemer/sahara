@@ -116,3 +116,24 @@
 
         .equ RING_SIZE,      256
         .equ LINE_MAX,       120
+
+        # per-process structure offsets (uproc.s instance; the trap
+        # paths reach it only through cur_proc - SABI v0.1 A.4). sp
+        # and gp slots are 16-byte st128 slots; the rest are u64.
+        .equ P_KSTK,         0    # kernel trap-stack pointer (top)
+        .equ P_USP,          16   # interrupted user sp - data, never a stack
+        .equ P_UGP,          32   # user r27 across a syscall (SABI 3.6)
+        .equ P_KSP,          48   # caller's kernel sp across run_user
+        .equ P_STATE,        64   # PSTATE_*
+        .equ P_EXIT,         72   # exit(code) argument
+        .equ P_CAUSE,        80   # kill diagnostics for the shell line
+        .equ P_EPC,          88
+        .equ P_BADDR,        96
+        .equ P_SIZE,         112
+
+        .equ PSTATE_IDLE,    0
+        .equ PSTATE_RUN,     1
+        .equ PSTATE_EXITED,  2
+        .equ PSTATE_KILLED,  3
+
+        .equ KSTK_SIZE,      16384  # reference trap-stack size (v0.1 A.4)
