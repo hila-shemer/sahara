@@ -63,6 +63,18 @@ semantics and what byte-identical quantifies over per level, and trace-q:
 CLI, exit codes, line grammar, .sym resolution, disassembly canonical
 form. T-01..28, vectors TV-1..TV-10 incl. a complete decoded trace.
 
+**rng.md** — The RNG device (accelerator wave, type 7): one 256-deep
+FIFO of 64-bit entropy words fed exclusively by EVENT records
+(truncate-to-fit acceptance, recorded = accepted prefix, zero-accepted
+records nothing — payload bytes owned by trace.md §4.6), empty-pop
+DEVERR (no sentinel — every u64 is a legal word), guest-selected
+SplitMix64 PRNG mode as pure architectural state (DEVW-traced MODE/SEED,
+no emulator fallback path), IE-qualified level pending into the EXTINT
+OR (reset off — invisible to type-7-unaware kernels), DEVERR catalog
+E1–E6 with the nic.md precedence chain. Window 0x0F08_0000/64 KB,
+params all zero. RNG-01..21 + RNG-R1..R4, vectors incl. the SplitMix64
+output table, the truncation byte vector, and the 5-record table dump.
+
 **asm.md** — The assembler: CLI and determinism contract, lexical rules
 and reserved names, full EBNF, 128-bit expression semantics with
 CONST/ADDR kinds and label-arithmetic legality, per-family assembly rules
@@ -78,6 +90,7 @@ through T5.
 | shared semantic | owner | everyone else |
 |---|---|---|
 | EVENT payload encodings (all devices) | trace.md | reference, never define |
+| RNG queue/PRNG/CTRL semantics, type-7 record defaults | rng.md | reference (payload bytes stay trace.md §4.6's) |
 | device register offsets/widths | frozen in PLATFORM-SPEC | reference only |
 | instruction encodings | frozen in encoding.py | asm.md shows worked examples, defines nothing |
 | HID usage subset | input.md | reference |
@@ -103,6 +116,11 @@ through T5.
   validity, peer MAC in TV-6), → asm.md §5 (disassembly surface —
   verified in agreement).
 - asm.md → none (frozen inputs only).
+- rng.md → trace.md §4.6/§3.3/§5.4 (payload bytes, boundary visibility,
+  model-recomputed acceptance); → boot.md §3.5/§4.2/§4.3 (record layout,
+  positional skip, params growth); → input.md §4 (the queue model it
+  instantiates); → nic.md §5.2/§7.1/§7.3 (precedence chain, cycle rules,
+  replay isolation).
 
 ## Integration fixes applied (referencing doc corrected to its owner)
 
