@@ -1,6 +1,7 @@
 /* Short-tier unit tests for the device layer: the byte-exact reference
- * device table (devspec/boot.md vector V1 -- the 328-byte dump
- * transcribed below, plus zeros through the end of the window), the
+ * device table (devspec/rng.md vector V-T -- boot.md V1
+ * plus the type-7 rng record, transcribed below, plus zeros through
+ * the end of the window), the
  * MAC packing vector V5, the physical-space classifier's boundaries,
  * the register fault matrix at the SeDev level (direction, unlisted
  * offsets, doorbell range, empty pop; the trap plumbing above it is
@@ -16,12 +17,15 @@
 #include "rwc/status.h"
 #include "u128.h"
 
-/* devspec/boot.md section 7, vector V1: the emulator must produce
- * exactly these 328 bytes at [0x0800, 0x0948). */
-static const uint8_t v1_table[328] = {
+/* devspec/rng.md section 11.5, vector V-T: this branch's emulator
+ * must produce exactly these 392 bytes at [0x0800, 0x0988) -- boot.md
+ * V1's header and four records with device_count = 5 and the type-7
+ * rng record appended (boot.md V1 itself stays frozen; the wave
+ * judge cuts the combined vector when timer/dma land). */
+static const uint8_t vt_table[392] = {
     0x53, 0x41, 0x48, 0x41, 0x52, 0x41, 0x50, 0x54, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -46,17 +50,22 @@ static const uint8_t v1_table[328] = {
     0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x52, 0x54, 0x00, 0x12,
     0x34, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x08, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static void test_devtable_v1(void)
+static void test_devtable_vt(void)
 {
     SeMem m;
     SeMem_init(&m, se_lo64(SE_PLAT_RAM_MAX));
     se_plat_write_devtable(&m, se_lo64(SE_PLAT_RAM_MAX));
-    for (unsigned i = 0; i < sizeof v1_table; i++)
-        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x800u + i, 1u)) == v1_table[i]);
-    for (unsigned a = 0x948u; a < 0x1000u; a++)
+    for (unsigned i = 0; i < sizeof vt_table; i++)
+        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x800u + i, 1u)) == vt_table[i]);
+    for (unsigned a = 0x988u; a < 0x1000u; a++)
         RWC_ASSERT(SeMem_read(&m, a, 1u) == 0u); /* BOOT-2: window zeros */
 }
 
@@ -80,6 +89,10 @@ static void test_classify(void)
     RWC_ASSERT(se_plat_classify(0x0F040000u) == SE_SPACE_BUF); /* TX */
     RWC_ASSERT(se_plat_classify(0x0F050000u) == SE_SPACE_BUF); /* RX */
     RWC_ASSERT(se_plat_classify(0x0F060000u) == SE_SPACE_HOLE); /* V9 */
+    RWC_ASSERT(se_plat_classify(0x0F07FFF8u) == SE_SPACE_HOLE);
+    RWC_ASSERT(se_plat_classify(0x0F080000u) == SE_SPACE_RNG);
+    RWC_ASSERT(se_plat_classify(0x0F08FFF8u) == SE_SPACE_RNG);
+    RWC_ASSERT(se_plat_classify(0x0F090000u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x0FFFFFF8u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x10000000u) == SE_SPACE_BUF); /* pixels */
     RWC_ASSERT(se_plat_classify(0x10FFFFF8u) == SE_SPACE_BUF);
@@ -221,6 +234,77 @@ static void test_nic_rx_model(void)
     RWC_ASSERT(d.nic_rx_len == 0u);
 }
 
+static void test_rng_model(void)
+{
+    SeDev d;
+    SeDev_reset(&d);
+    /* Reset state (rng.md 2): empty queue, CTRL 0, and QUEUE-mode
+     * empty pop is E6 -- there is no sentinel. */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 16u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).fault);  /* E6 */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 24u).fault); /* E2: SEED */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 32u).fault); /* E1 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 0u, 1u).fault);  /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 8u, 1u).fault);  /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 40u, 1u).fault); /* E1 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 4u).fault); /* E5 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 16u,
+                               0x8000000000000001ull).fault);     /* E5 */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 16u).val == 0u);
+
+    /* FIFO with content; STATUS is mode-independent depth. */
+    const uint64_t w[4] = { 0x1111111111111111ull, 0x2222222222222222ull,
+                            0x3333333333333333ull, 0x4444444444444444ull };
+    RWC_ASSERT(SeDev_inject_rng(&d, w, 4u) == 4u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 4u);
+    RWC_ASSERT(!SeDev_ext_pending(&d)); /* IE off: depth alone is mute */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 2u).fault); /* IE on */
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[0]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[1]);
+
+    /* PRNG mode (rng.md 5.1 seed-0 vector); queue untouched, stream
+     * survives a mode flip, SEED restarts it. */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 3u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0xE220A8397B1DCDAFull);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0x6E789E6AA1B965F4ull);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 2u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 2u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 3u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0x06C45D188009454Full); /* no restart across the flip */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 24u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0xE220A8397B1DCDAFull); /* SEED restarts */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 2u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[2]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[3]);
+    RWC_ASSERT(!SeDev_ext_pending(&d)); /* drained: level deasserts */
+
+    /* Truncate-to-fit (rng.md 4.2): fill to 254, then a 4-word
+     * arrival accepts exactly 2 and a further arrival accepts 0. */
+    uint64_t bulk[128];
+    for (unsigned i = 0; i < 128u; i++)
+        bulk[i] = 0xB000000000000000ull + i;
+    RWC_ASSERT(SeDev_inject_rng(&d, bulk, 128u) == 128u);
+    RWC_ASSERT(SeDev_inject_rng(&d, bulk, 126u) == 126u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 254u);
+    RWC_ASSERT(SeDev_inject_rng(&d, w, 4u) == 2u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 256u);
+    RWC_ASSERT(SeDev_inject_rng(&d, w, 1u) == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 256u);
+    /* Drain the head of the bulk and the truncated tail words. */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == bulk[0]);
+    for (unsigned i = 0; i < 253u; i++)
+        RWC_ASSERT(!SeDev_reg_read(&d, SE_SPACE_RNG, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[0]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[1]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).fault); /* E6 again */
+}
+
 static void test_resize_inject(void)
 {
     SeDev d;
@@ -244,12 +328,13 @@ static void test_resize_inject(void)
 
 int main(void)
 {
-    test_devtable_v1();
+    test_devtable_vt();
     test_mac_packing();
     test_classify();
     test_registers();
     test_input_queue();
     test_nic_rx_model();
+    test_rng_model();
     test_resize_inject();
     printf("test_dev: all passed\n");
     return 0;

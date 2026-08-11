@@ -275,7 +275,9 @@ Emission rules:
 The payload of an EVENT record is interpreted according to the *type*
 field of the device-table entry named by `device`. All integers
 little-endian. Devices and type codes per PLATFORM-SPEC §2: 1 display,
-2 keyboard, 3 mouse, 4 nic.
+2 keyboard, 3 mouse, 4 nic; accelerator-wave codes 5 timer, 6 dma,
+7 rng (devspec/rng.md) — of these, only type 7 carries an event payload,
+defined in §4.6.
 
 ### 4.1 Keyboard (device type 2) — 9 bytes
 
@@ -320,6 +322,22 @@ Future device types define their payloads here (in this document) when
 they are added. A v1 reader encountering an EVENT whose `device` index
 does not exist in the image's device table, or whose device type it does
 not know, must treat the trace as malformed (§2.4 class 2).
+
+### 4.6 RNG entropy (device type 7) — 8·N bytes
+
+The payload is N 64-bit entropy words, little-endian, packed with no
+count field and no flags: `payload_len` = 8·N, with 1 ≤ N ≤ 128 (so a
+payload is 8 to 1024 bytes). A length of 0, a length not a multiple of
+8, or a length above 1024 is malformed (§2.4 class 2).
+
+The recorded words are **exactly the words the device model accepted**
+at the boundary — the accepted prefix under devspec/rng.md §4.2's
+truncate-to-fit rule, not the raw arrival. An arrival of which zero
+words were accepted produces **no EVENT record at all** (the NIC-discard
+asymmetry of §4.3, not the input drop-flag one of §4.1: entropy words
+are fungible, and recording only accepted words makes a recorded trace
+replay without truncation — the record→replay fixed point). Acceptance
+is recomputed by the replayed model per §5.4, like the input drop flag.
 
 ## 5. Replay semantics
 

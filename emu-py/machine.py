@@ -152,9 +152,10 @@ class Machine:
                     f"{ecycle}")
             # D11: apply first, then record what the device model itself
             # decided (e.g. the recomputed drop flag) — never echo the
-            # feed's own bytes.
+            # feed's own bytes. An empty acceptance (rng truncate-to-fit,
+            # rng.md 4.2 / trace.md 4.6) records nothing at all.
             recorded = self.event_devices[dev_idx].event(payload)
-            if self.trace:
+            if self.trace and recorded:
                 self.trace.event(ecycle, dev_idx, recorded)
 
     def pending_interrupt(self):
