@@ -213,7 +213,7 @@ run_boot_fail() {
         "$OASIS/kernel/sys.s" "$OASIS/kernel/lib.s" \
         "$OASIS/build/font.s" "$OASIS/build/keymap.s" \
         "$OASIS/kernel/rodata.s" "$OASIS/kernel/data.s" \
-        "$OASIS/kernel/bss.s" "$OUT/$name.table.s" \
+        "$OASIS/kernel/bss.s" "$OASIS/user/echo.s" "$OUT/$name.table.s" \
         2>"$OUT/$name.asm.err" \
         || { echo "FAIL $name: assembly:"; sed 's/^/    /' \
              "$OUT/$name.asm.err"; note_fail "$name"; return; }

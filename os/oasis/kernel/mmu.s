@@ -63,6 +63,21 @@ mmu_init:
         li      r2, PTE_R + PTE_W + PTE_X
         jal     mmu_map_range
 
+        # user window contents (SABI v0.1 A.2): image pages U+RWX from
+        # UBASE to __uend rounded up (no W^X in v0.1 - deferred), the
+        # top page U+RW as the user stack, and NOTHING in between - a
+        # wild user pointer faults PF_*, loudly. __uend lives in the
+        # .org UBASE segment: cross-segment, hence la.abs (asm.md 6.3).
+        li      r0, UBASE
+        la.abs  r1, __uend
+        sub     r1, r1, r0
+        li      r2, PTE_U + PTE_R + PTE_W + PTE_X
+        jal     mmu_map_range
+        li      r0, USTACK_PAGE
+        li      r1, PAGE_SIZE
+        li      r2, PTE_U + PTE_R + PTE_W
+        jal     mmu_map_range
+
         # device control windows S-RW, straight from the table records
         # (base + size fields, boot.md 3.5); the display record also
         # carries the pixel buffer in params[0]/params[1]. Unknown
