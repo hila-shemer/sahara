@@ -31,6 +31,11 @@ import tracefile as T  # noqa: E402
 import encoding as E  # noqa: E402
 
 DEV_DISPLAY, DEV_KBD, DEV_MOUSE, DEV_NIC = 0, 1, 2, 3
+# WAVE-RENUMBER: becomes 6 when timer/dma records land ahead of this
+# one (table records are positional; this branch's table is boot.md V1
+# + the type-7 rng record fifth, rng.md V-T). Feeds regenerate from
+# these generators at test time, so the renumber is this constant.
+RNG_DEV_INDEX = 4
 
 
 def kbd_event(usage, press, dropped=False):
@@ -46,6 +51,17 @@ def mouse_event(x, y, buttons, dropped=False):
     behavior — a feed cannot exercise it; see the test headers)."""
     word = (x & 0xFFFF) | ((y & 0xFFFF) << 16) | ((buttons & 0xFF) << 32)
     return struct.pack("<Q", word) + bytes([1 if dropped else 0])
+
+
+def rng_words(words):
+    """trace.md 4.6: N LE u64 entropy words, 1 <= N <= 128 — no count
+    field, no flags byte. The feed carries the ARRIVAL; the recorded
+    payload is the accepted prefix, recomputed by the device model at
+    apply time (rng.md 4.2), so an overflowing feed and its recording
+    legitimately differ."""
+    assert 1 <= len(words) <= 128, "rng payload is 1..128 words"
+    return b"".join(struct.pack("<Q", w & 0xFFFFFFFFFFFFFFFF)
+                    for w in words)
 
 
 def resize_event(width, height, stride, fmt=1):

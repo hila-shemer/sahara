@@ -33,9 +33,10 @@ committed generator scripts — never by running an emulator under test).
   - `0x768`-`0x780` c1 TL-lowering save area (epc/cause/baddr/status)
   - `0x788` timer delivery count (c3_irq_dev)
   - `0x790`-`0x7b8` devorder store-queue slots (c7_dev, ORDQ_SLOTS)
+  - `0x7c0` rng drain-count slot (RNG_SCRATCH; c7_rng_overflow)
   - `0x7c8`-`0x7e8` event-fed tests' handler slots (EVT_FLAG /
-    EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize)
-  - `0x7c0`, `0x7f0`-`0x7f8` free for later groups
+    EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize, c7_rng_irq)
+  - `0x7f0`-`0x7f8` free for later groups
 
   Device window base addresses (PLATFORM-SPEC 1) are also in defs.s
   as `DEV_*_BASE`; everything at 0x0F00_0000 and up is device space.
