@@ -12,6 +12,11 @@
  *          with the model-recomputed flag (INPUT-18/19)
  *   multi  keyboard + mouse + resize at one boundary with IE on:
  *          EVENT records before the EXTINT TRAP, one cycle (T-09)
+ *   nicseam NIC frames through the live feed: one during WFI idle, a
+ *          max-length frame + a short one sharing a cycle with a
+ *          keyboard press, then a 70-frame burst against the 64-cap
+ *          -- the 6 overflow discards leave NO event records
+ *          (nic.md 4.3), and replay identity proves it
  *
  * usage: gui-seam-driver SCENARIO IMAGE OUT.trc */
 #include <inttypes.h>
@@ -176,8 +181,40 @@ int main(int argc, char **argv)
         resize_payload(p, 800u, 600u, 3200u);
         SeCpu_feed(cpu, SE_DEVIDX_DISPLAY, p, 32u, 0u);
         run_to_halt(cpu);
+    } else if (strcmp(scenario, "nicseam") == 0) {
+        static uint8_t frame[SE_NIC_FRAME_MAX];
+        /* One frame fed while the core is WFI-yielded, stamped beyond
+         * the WFI cycle -- the NIC arrival wakes WFI at exactly its
+         * cycle (NIC-C-36) through the unchanged wake rule. */
+        run_until_idle(cpu);
+        memset(frame, 0x11, 60u);
+        SeCpu_feed(cpu, SE_DEVIDX_NIC, frame, 60u,
+                   se_lo64(cpu->cycle) + 500u);
+        run_until_idle(cpu);
+        /* Keyboard + a max-length frame + a short frame at ONE
+         * boundary: equal cycles order by feed order (nic.md 7.1
+         * rule 2), and 1514 bytes proves the u16 length plumbing
+         * end to end. */
+        uint64_t e = se_lo64(cpu->cycle) + 700u;
+        kbd_payload(p, 0x04u, true);
+        SeCpu_feed(cpu, SE_DEVIDX_KBD, p, 9u, e);
+        memset(frame, 0x22, sizeof frame);
+        SeCpu_feed(cpu, SE_DEVIDX_NIC, frame, SE_NIC_FRAME_MAX, e);
+        memset(frame, 0x33, 61u);
+        SeCpu_feed(cpu, SE_DEVIDX_NIC, frame, 61u, e);
+        run_until_idle(cpu);
+        /* 70 frames at one boundary against the empty 64-cap: 64
+         * admitted and recorded, 6 discarded with NO records -- the
+         * guest counts 64, and replay applies exactly the recorded
+         * 64 into the same occupancy (NIC-C-18). */
+        e = se_lo64(cpu->cycle) + 900u;
+        for (uint32_t i = 0; i < 70u; i++) {
+            memset(frame, (int)(0x40u + i), 60u);
+            SeCpu_feed(cpu, SE_DEVIDX_NIC, frame, 60u, e);
+        }
+        run_to_halt(cpu);
     } else {
-        die("unknown scenario (wfi | burst | multi)");
+        die("unknown scenario (wfi | burst | multi | nicseam)");
     }
 
     if (fclose(tr.f) != 0)
