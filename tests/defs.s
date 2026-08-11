@@ -83,6 +83,7 @@
         .equ DEV_KBD_BASE, 0x0F010000
         .equ DEV_MOUSE_BASE, 0x0F020000
         .equ DEV_NIC_BASE, 0x0F030000
+        .equ DEV_TIMER_BASE, 0x0F060000  # devspec/timer.md 1
         .equ DEV_PIXBUF_BASE, 0x10000000
         # NIC window sub-regions (PLATFORM-SPEC section 7)
         .equ DEV_NIC_TXBUF, 0x0F040000   # nic base + 0x1_0000
@@ -91,6 +92,8 @@
         # is spec-pinned -- only the device-table INDEX is
         # merge-variant, which is why dma_* tests scan by type)
         .equ DEV_DMA_BASE, 0x0F070000
+        # RNG window (devspec/rng.md 1: type 7 at 0x0F08_0000)
+        .equ DEV_RNG_BASE, 0x0F080000
         # devorder RAM slots (c7_dev; tests/README.md)
         .equ ORDQ_SLOTS, 0x790
         # event-fed tests' handler slots (c7_kbd / c7_resize /
@@ -98,8 +101,17 @@
         .equ EVT_FLAG, 0x7C8    # handler-done flag
         .equ EVT_COUNT, 0x7D0   # handler drain count
         .equ EVT_SLOTS, 0x7D8   # popped words / geometry (3 slots)
+        # rng drain-count slot (c7_rng_overflow; tests/README.md;
+        # aliases TMR_TICK_SLOT — the groups never share a run)
+        .equ RNG_SCRATCH, 0x7C0
+        # timer tests' scratch slots (c7_timer_*; tests/README.md;
+        # TIMER_COUNT_SLOT doubles as their delivery counter)
+        .equ TMR_TICK_SLOT, 0x7C0  # handler COUNT store / 1st cause
+        .equ TMR_W_SLOT, 0x7F0     # in-handler STATUS / aux
+        .equ TMR_AUX_SLOT, 0x7F8   # 2nd cause / aux
         # dma tests' handler slots (dma_err / dma_irq_wfi;
-        # tests/README.md)
+        # tests/README.md; alias TMR_TICK_SLOT / TMR_W_SLOT —
+        # the groups never share a run)
         .equ DMA_CYCLE_SLOT, 0x7C0  # handler-entry cycle sreg
         .equ DMA_COUNT_SLOT, 0x7F0  # EXTINT delivery count
 

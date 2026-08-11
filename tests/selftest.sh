@@ -89,26 +89,39 @@ chmod +x "$FAKE"
 
 NTESTS=$(grep -cv '^\s*\(#\|$\)' "$TESTS/MANIFEST")
 NEV=$(grep -v '^\s*\(#\|$\)' "$TESTS/MANIFEST" | grep -c 'events=')
+# The c7_rng_* checkers demand real device content the stub has no
+# furniture for (harness-selftest/fake-emu.py predates the rng branch,
+# whose tests/ grant is additions-only), so the run-tests steps drive
+# the stub over the pre-rng subset. difftest runs no checkers and
+# keeps the full manifest. The rng tests' first real exercise is the
+# two actual emulators — which is the point of the suite anyway.
+STUB_TESTS=$(grep -v '^\s*\(#\|$\)' "$TESTS/MANIFEST" | awk '{print $1}' \
+    | grep -v '^c7_rng_')
+NSTUB=$(echo "$STUB_TESTS" | grep -c .)
+NSTUBEV=$(grep -v '^\s*\(#\|$\)' "$TESTS/MANIFEST" | grep 'events=' \
+    | awk '{print $1}' | grep -cv '^c7_rng_')
 
 echo "== 3. run-tests.sh against the stub =="
 # Without REPLAY=1 the event-fed tests must be SKIPPED (loudly,
 # counted) — an emulator without --replay cannot run them.
-EMU="$FAKE" "$TESTS/run-tests.sh" > "$TMP/rt.out" 2>&1 \
+# shellcheck disable=SC2086
+EMU="$FAKE" "$TESTS/run-tests.sh" $STUB_TESTS > "$TMP/rt.out" 2>&1 \
     || { cat "$TMP/rt.out"; die "run-tests should pass with the stub"; }
-grep -q "$((NTESTS - NEV)) passed, 0 failed, $NEV skipped" "$TMP/rt.out" \
+grep -q "$((NSTUB - NSTUBEV)) passed, 0 failed, $NSTUBEV skipped" "$TMP/rt.out" \
     || { cat "$TMP/rt.out"; die "unexpected run-tests summary"; }
 grep -q "SKIP c7_kbd:" "$TMP/rt.out" \
     || { cat "$TMP/rt.out"; die "event-fed skip must be printed"; }
-echo "ok: stub passes ($((NTESTS - NEV)) tests, $NEV event-fed skipped)"
+echo "ok: stub passes ($((NSTUB - NSTUBEV)) tests, $NSTUBEV event-fed skipped)"
 
-# With REPLAY=1 the full suite runs, event-fed tests included: the
-# stub echoes the feed's EVENT records and emits check-satisfying
-# furniture, so everything must pass with zero skips.
-REPLAY=1 EMU="$FAKE" "$TESTS/run-tests.sh" > "$TMP/rt-ev.out" 2>&1 \
+# With REPLAY=1 the (stub-capable) suite runs, event-fed tests
+# included: the stub echoes the feed's EVENT records and emits
+# check-satisfying furniture, so everything must pass with zero skips.
+# shellcheck disable=SC2086
+REPLAY=1 EMU="$FAKE" "$TESTS/run-tests.sh" $STUB_TESTS > "$TMP/rt-ev.out" 2>&1 \
     || { cat "$TMP/rt-ev.out"; die "REPLAY=1 full suite should pass"; }
-grep -q "$NTESTS passed, 0 failed, 0 skipped" "$TMP/rt-ev.out" \
+grep -q "$NSTUB passed, 0 failed, 0 skipped" "$TMP/rt-ev.out" \
     || { cat "$TMP/rt-ev.out"; die "unexpected REPLAY=1 summary"; }
-echo "ok: REPLAY=1 stub passes all $NTESTS (event-fed included)"
+echo "ok: REPLAY=1 stub passes all $NSTUB (event-fed included)"
 
 # A stub that loses an EVENT record must fail the test — via the
 # replay-divergence check or the feed-vs-trace byte equality in

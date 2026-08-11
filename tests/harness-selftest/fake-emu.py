@@ -43,6 +43,7 @@ import encoding as E  # noqa: E402
 
 
 DISPLAY, KBD, MOUSE, NIC = 0x0F000000, 0x0F010000, 0x0F020000, 0x0F030000
+TIMER = 0x0F060000
 PIX = 0x10000000
 SENT = 0xFFFFFFFFFFFFFFFF
 
@@ -175,6 +176,75 @@ def emit_furniture(rec, name, entry, events):
                     cyc[0] + 1, E.CAUSES["TIMER"], entry, 0, 1))
             cyc[0] += 2
         rec(cyc[0], T.T_MEMR, T.mem_payload(cyc[0], 0x740, 8, 32))
+    elif name == "c7_timer_tick":
+        # what checks/c7_timer_tick.py demands (its grid re-derives
+        # from these DEVW stamps): W=100, fires 1-3 at W+100m, fire 4
+        # late (620 > W+500), A4=626 so the phase-locked fire 5 lands
+        # at 700, rewrite pair 1000@800/40@801 so fire 6 = 841; tick
+        # MEMWs = [0] + fire+1; COUNT MEMRs val == cycle.
+        rec(10, T.T_MEMW, T.mem_payload(10, 0x7C0, 8, 0))
+        rec(50, T.T_MEMR, T.mem_payload(50, TIMER, 8, 50))
+        rec(100, T.T_DEVW, T.mem_payload(100, TIMER + 8, 8, 100))
+        for f in (200, 300, 400, 620, 700, 841):
+            rec(f, T.T_TRAP, T.trap_payload(
+                f, E.CAUSES["EXTINT"], entry, 0, 1))
+            rec(f + 1, T.T_MEMR, T.mem_payload(f + 1, TIMER, 8, f + 1))
+            rec(f + 1, T.T_MEMW, T.mem_payload(f + 1, 0x7C0, 8, f + 1))
+            rec(f + 6, T.T_DEVW, T.mem_payload(
+                f + 6, TIMER + 0x18, 8, 1))
+        rec(720, T.T_DEVW, T.mem_payload(720, TIMER + 8, 8, 0))
+        rec(800, T.T_DEVW, T.mem_payload(800, TIMER + 8, 8, 1000))
+        rec(801, T.T_DEVW, T.mem_payload(801, TIMER + 8, 8, 40))
+        rec(900, T.T_DEVW, T.mem_payload(900, TIMER + 8, 8, 0))
+    elif name == "c7_timer_deverr":
+        # checks/c7_timer_deverr.py: exact {DEVERR: 18, UNALIGNED: 2}
+        # census, in-window DEVERR baddrs, UNALIGNED baddrs TB+4 then
+        # TB+1, and exactly the three legal timer DEVWs.
+        cyc[0] = 10
+        for _ in range(18):
+            emit(T.T_TRAP, T.trap_payload, E.CAUSES["DEVERR"],
+                 entry, TIMER + 0x18, 1)
+        emit(T.T_TRAP, T.trap_payload, E.CAUSES["UNALIGNED"],
+             entry, TIMER + 4, 1)
+        emit(T.T_TRAP, T.trap_payload, E.CAUSES["UNALIGNED"],
+             entry, TIMER + 1, 1)
+        memr(TIMER + 8, 0)
+        memr(TIMER + 0x10, 0)
+        emit(T.T_DEVW, T.mem_payload, TIMER + 8, 8, 1)
+        memr(TIMER + 0x10, 1)
+        emit(T.T_DEVW, T.mem_payload, TIMER + 0x18, 8, 1)
+        emit(T.T_DEVW, T.mem_payload, TIMER + 8, 8, 0)
+    elif name == "c7_timer_wfi":
+        # checks/c7_timer_wfi.py: W=100, post-WFI COUNT reads at
+        # exactly W+50/W+100 (val == cycle), deliveries at W+150 and
+        # +7 (the no-ACK re-trap), three value-1 ACKs, PERIOD [50, 0].
+        rec(99, T.T_MEMR, T.mem_payload(99, TIMER, 8, 99))
+        rec(100, T.T_DEVW, T.mem_payload(100, TIMER + 8, 8, 50))
+        rec(150, T.T_MEMR, T.mem_payload(150, TIMER, 8, 150))
+        rec(159, T.T_DEVW, T.mem_payload(159, TIMER + 0x18, 8, 1))
+        rec(200, T.T_MEMR, T.mem_payload(200, TIMER, 8, 200))
+        rec(205, T.T_DEVW, T.mem_payload(205, TIMER + 0x18, 8, 1))
+        rec(250, T.T_TRAP, T.trap_payload(
+            250, E.CAUSES["EXTINT"], entry, 0, 1))
+        rec(257, T.T_TRAP, T.trap_payload(
+            257, E.CAUSES["EXTINT"], entry, 0, 1))
+        rec(260, T.T_DEVW, T.mem_payload(260, TIMER + 0x18, 8, 1))
+        rec(261, T.T_DEVW, T.mem_payload(261, TIMER + 8, 8, 0))
+    elif name == "c7_timer_indep":
+        # checks/c7_timer_indep.py: TIMER at exactly T = W+N and
+        # before the EXTINT; cause slots 0x7C0/0x7F0/0x7F8 = TIMER
+        # code / 1 / EXTINT code; PERIOD [arm, disarm].
+        rec(100, T.T_DEVW, T.mem_payload(100, TIMER + 8, 8, 27))
+        rec(127, T.T_TRAP, T.trap_payload(
+            127, E.CAUSES["TIMER"], entry, 0, 1))
+        rec(128, T.T_MEMW, T.mem_payload(
+            128, 0x7C0, 8, E.CAUSES["TIMER"]))
+        rec(129, T.T_MEMW, T.mem_payload(129, 0x7F0, 8, 1))
+        rec(135, T.T_TRAP, T.trap_payload(
+            135, E.CAUSES["EXTINT"], entry, 0, 1))
+        rec(136, T.T_MEMW, T.mem_payload(
+            136, 0x7F8, 8, E.CAUSES["EXTINT"]))
+        rec(137, T.T_DEVW, T.mem_payload(137, TIMER + 8, 8, 0))
     elif name.startswith("dma_"):
         # what checks/dma_*.py demand (added with the dma_* tests,
         # keyed like every block above; dma_boot has no checker and

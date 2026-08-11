@@ -141,7 +141,7 @@ start:
         (!p1) b fail
 
         # ---- 6. unlisted offsets: DEVERR in BOTH directions (E2 —
-        #         no inert reserved window; root SPEC-ISSUES 40):
+        #         no inert reserved window; root SPEC-ISSUES 41):
         #         3 DEVERRs ----
         # test 12: load and store at 0x28, load at the last aligned
         # offset 0xFFF8

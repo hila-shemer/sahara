@@ -31,6 +31,22 @@ c7_dev_ordq c7_dev.s level=2 --check-devorder 4
 c7_kbd c7_kbd.s level=2 events=c7_kbd.py
 c7_kbd_ovf c7_kbd_ovf.s level=2 events=c7_kbd_ovf.py
 c7_resize c7_resize.s level=2 events=c7_resize.py
+# RNG device (devspec/rng.md, dev-rng branch). c7_rng_err and
+# c7_rng_prng are register-model tests (no feed: they run in the
+# difftest gate); the other three follow the EVENT-fed pattern above.
+c7_rng_err c7_rng_err.s
+c7_rng_prng c7_rng_prng.s
+c7_rng_queue c7_rng_queue.s level=2 events=c7_rng_queue.py
+c7_rng_overflow c7_rng_overflow.s level=2 events=c7_rng_overflow.py
+c7_rng_irq c7_rng_irq.s level=2 events=c7_rng_irq.py
+# TIMER device tests (devspec/timer.md). Deterministic by construction
+# — no events= feed exists for type 5 — so all four run everywhere and
+# the REPLAY=1 leg replays each run's own trace (TMR-21). level=2:
+# their checks read the COUNT/STATUS MEMRs.
+c7_timer_tick c7_timer_tick.s level=2
+c7_timer_deverr c7_timer_deverr.s level=2
+c7_timer_wfi c7_timer_wfi.s level=2
+c7_timer_indep c7_timer_indep.s level=2
 # Wave-4 DMA engine (devspec/dma.md). All cycle-driven — no events=
 # line — so every dma_* test runs under difftest today (no REPLAY
 # gate): completion is pure arithmetic on the doorbell DEVW's cycle.

@@ -17,6 +17,11 @@
  *          keyboard press, then a 70-frame burst against the 64-cap
  *          -- the 6 overflow discards leave NO event records
  *          (nic.md 4.3), and replay identity proves it
+ *   rng    entropy batches through the live feed (rng.md 7.5's shape):
+ *          an 8-word batch the guest drains, then a 4-word batch fed
+ *          during WFI idle -- the wake lands at exactly the event
+ *          cycle (RNG-21) and replay identity proves the recorded
+ *          words ARE the session's entropy
  *
  * usage: gui-seam-driver SCENARIO IMAGE OUT.trc */
 #include <inttypes.h>
@@ -213,8 +218,29 @@ int main(int argc, char **argv)
             SeCpu_feed(cpu, SE_DEVIDX_NIC, frame, 60u, e);
         }
         run_to_halt(cpu);
+    } else if (strcmp(scenario, "rng") == 0) {
+        /* Word patterns whose per-batch XOR is 0 (8 and 4 copies of
+         * one high half, low bits 0..n-1): the guest checks the fold
+         * without the driver and the .s sharing a table. */
+        uint8_t batch[8u * 8u];
+        step_n(cpu, 10u); /* guest is polling STATUS */
+        for (uint32_t i = 0; i < 8u; i++) {
+            uint64_t w = 0xF00D000000000000ull | i;
+            for (unsigned b = 0; b < 8u; b++)
+                batch[8u * i + b] = (uint8_t)(w >> (8u * b));
+        }
+        SeCpu_feed(cpu, SE_DEVIDX_RNG, batch, 64u, 0u);
+        run_until_idle(cpu); /* drained all 8, WFI'd */
+        for (uint32_t i = 0; i < 4u; i++) {
+            uint64_t w = 0xBEEF000000000000ull | i;
+            for (unsigned b = 0; b < 8u; b++)
+                batch[8u * i + b] = (uint8_t)(w >> (8u * b));
+        }
+        SeCpu_feed(cpu, SE_DEVIDX_RNG, batch, 32u,
+                   se_lo64(cpu->cycle) + 800u);
+        run_to_halt(cpu);
     } else {
-        die("unknown scenario (wfi | burst | multi | nicseam)");
+        die("unknown scenario (wfi | burst | multi | nicseam | rng)");
     }
 
     if (fclose(tr.f) != 0)

@@ -31,14 +31,21 @@ committed generator scripts — never by running an emulator under test).
   - `0x740` atomic box (16-byte aligned; c3)
   - `0x750`-`0x760` c1 user-mode slots (PRIV count, user epc/status)
   - `0x768`-`0x780` c1 TL-lowering save area (epc/cause/baddr/status)
-  - `0x788` timer delivery count (c3_irq_dev)
+  - `0x788` timer delivery count (c3_irq_dev; the c7_timer_* group
+    reuses it as its EXTINT delivery counter)
   - `0x790`-`0x7b8` devorder store-queue slots (c7_dev, ORDQ_SLOTS)
+  - `0x7c0` TMR_TICK_SLOT — c7_timer_* handler COUNT store / first
+    delivered cause (c7_timer_indep); the rng group aliases it as its
+    drain-count slot (RNG_SCRATCH; c7_rng_overflow) and the dma group
+    as its handler-entry cycle slot (DMA_CYCLE_SLOT; dma_irq_wfi) —
+    safe because the groups never share a run
   - `0x7c8`-`0x7e8` event-fed tests' handler slots (EVT_FLAG /
-    EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize)
-  - `0x7c0` DMA handler-entry cycle (DMA_CYCLE_SLOT; dma_irq_wfi)
-  - `0x7f0` DMA EXTINT delivery count (DMA_COUNT_SLOT; dma_err,
-    dma_irq_wfi)
-  - `0x7f8` free for later groups
+    EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize, c7_rng_irq)
+  - `0x7f0` TMR_W_SLOT, `0x7f8` TMR_AUX_SLOT — c7_timer_* aux
+    (in-handler STATUS snapshot, second delivered cause); the dma
+    group aliases `0x7f0` as its EXTINT delivery count
+    (DMA_COUNT_SLOT; dma_err, dma_irq_wfi) — same never-share-a-run
+    rule as the `0x7c0` aliases above
 
   The dma_* tests additionally use plain RAM well above the images for
   descriptors and transfer buffers (0x10_0000 for descriptors,

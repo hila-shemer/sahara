@@ -1,12 +1,15 @@
 /* Short-tier unit tests for the device layer: the byte-exact reference
- * device table (devspec/boot.md vector V1 -- the 328-byte dump
- * transcribed below, plus zeros through the end of the window), the
- * MAC packing vector V5, the physical-space classifier's boundaries,
- * the register fault matrix at the SeDev level (direction, unlisted
- * offsets, doorbell range, empty pop; the trap plumbing above it is
- * exercised by the shared c7_dev image), and the NIC RX frame store
+ * device table (the wave-final table -- devspec/timer.md vector V1-T ==
+ * devspec/rng.md vector V-T == devspec/dma.md vector V-D, boot.md's V1
+ * grown by the type-7 rng, type-5 timer, and type-6 dma records in that
+ * order, the 520-byte dump transcribed
+ * below, plus zeros through the end of the window), the MAC packing
+ * vector V5, the physical-space classifier's boundaries, the register
+ * fault matrix at the SeDev level (direction, unlisted offsets,
+ * doorbell range, empty pop, timer E1-E5; the trap plumbing above it
+ * is exercised by the shared c7_dev image), the NIC RX frame store
  * (nic.md 4: FIFO exposure, exact-length buffer writes, the 64-cap
- * overflow discard). */
+ * overflow discard), and the timer arm/fire/ack model (timer.md 4). */
 #include <stdio.h>
 #include <string.h>
 
@@ -16,12 +19,13 @@
 #include "rwc/status.h"
 #include "u128.h"
 
-/* devspec/boot.md section 7, vector V1: the emulator must produce
- * exactly these 328 bytes at [0x0800, 0x0948). */
-static const uint8_t v1_table[328] = {
+/* devspec/timer.md section 8, vector V1-T (byte-identical to rng.md
+ * section 11.5 vector V-T and dma.md section 11 vector V-D): the
+ * emulator must produce exactly these 520 bytes at [0x0800, 0x0A08). */
+static const uint8_t v1t_table[520] = {
     0x53, 0x41, 0x48, 0x41, 0x52, 0x41, 0x50, 0x54, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -46,34 +50,17 @@ static const uint8_t v1_table[328] = {
     0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x52, 0x54, 0x00, 0x12,
     0x34, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-};
-
-static void test_devtable_v1(void)
-{
-    /* On this branch the writer emits boot.md V10 (five records); V1
-     * is superseded-at-integration but its bytes stay the reference
-     * for everything except the count: the header (device_count u64
-     * at table offset 0x20 excepted), the RAM region, and records 0-3
-     * must still match V1 byte-for-byte. The new count and the
-     * appended type-6 record are pinned by test_devtable_v10_dma. */
-    SeMem m;
-    SeMem_init(&m, se_lo64(SE_PLAT_RAM_MAX));
-    se_plat_write_devtable(&m, se_lo64(SE_PLAT_RAM_MAX));
-    for (unsigned i = 0; i < sizeof v1_table; i++) {
-        if (i >= 0x20u && i < 0x28u)
-            continue; /* device_count: 4 in V1, 5 on this branch */
-        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x800u + i, 1u)) == v1_table[i]);
-    }
-}
-
-/* devspec/boot.md section 7, vector V10 (dev-dma branch): V1 with
- * device_count = 5 and this type-6 DMA record appended at 0x0948 --
- * base 0x0F07_0000, size 0x1_0000, params all zero (limits live in
- * CAPS, not the table). Encoded table now ends at 0x0988. Superseded
- * at integration by the wave-final table; the record BYTES carry
- * over, the position does not. */
-static const uint8_t v10_dma_record[64] = {
+    0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x08, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x0F, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x0F,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -82,16 +69,18 @@ static const uint8_t v10_dma_record[64] = {
     0x00, 0x00, 0x00, 0x00,
 };
 
-static void test_devtable_v10_dma(void)
+static void test_devtable_v1t(void)
 {
+    /* The wave-final table: boot.md V1's header and four records with
+     * device_count = 7, then rng (type 7), timer (type 5), and the DMA
+     * engine (type 6) in table positions 4/5/6 -- one vector, three
+     * spec names (timer.md V1-T, rng.md V-T, dma.md V-D). */
     SeMem m;
     SeMem_init(&m, se_lo64(SE_PLAT_RAM_MAX));
     se_plat_write_devtable(&m, se_lo64(SE_PLAT_RAM_MAX));
-    RWC_ASSERT(se_lo64(SeMem_read(&m, 0x820u, 8u)) == 5u);
-    for (unsigned i = 0; i < sizeof v10_dma_record; i++)
-        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x948u + i, 1u)) ==
-                   v10_dma_record[i]);
-    for (unsigned a = 0x988u; a < 0x1000u; a++)
+    for (unsigned i = 0; i < sizeof v1t_table; i++)
+        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x800u + i, 1u)) == v1t_table[i]);
+    for (unsigned a = 0xA08u; a < 0x1000u; a++)
         RWC_ASSERT(SeMem_read(&m, a, 1u) == 0u); /* BOOT-2: window zeros */
 }
 
@@ -114,11 +103,16 @@ static void test_classify(void)
     RWC_ASSERT(se_plat_classify(0x0F030000u) == SE_SPACE_NIC);
     RWC_ASSERT(se_plat_classify(0x0F040000u) == SE_SPACE_BUF); /* TX */
     RWC_ASSERT(se_plat_classify(0x0F050000u) == SE_SPACE_BUF); /* RX */
-    RWC_ASSERT(se_plat_classify(0x0F060000u) == SE_SPACE_HOLE); /* V9 */
-    RWC_ASSERT(se_plat_classify(0x0F06FFF8u) == SE_SPACE_HOLE);
+    RWC_ASSERT(se_plat_classify(0x0F060000u) == SE_SPACE_TIMER);
+    RWC_ASSERT(se_plat_classify(0x0F06FFF8u) == SE_SPACE_TIMER);
+    /* boot.md V9's old hole is fully carved up now: timer (timer.md
+     * 1), dma (dma.md 1), and rng (rng.md 1) run contiguously and the
+     * hole starts past the RNG window at 0x0F09_0000. */
     RWC_ASSERT(se_plat_classify(0x0F070000u) == SE_SPACE_DMA);
     RWC_ASSERT(se_plat_classify(0x0F07FFF8u) == SE_SPACE_DMA);
-    RWC_ASSERT(se_plat_classify(0x0F080000u) == SE_SPACE_HOLE);
+    RWC_ASSERT(se_plat_classify(0x0F080000u) == SE_SPACE_RNG);
+    RWC_ASSERT(se_plat_classify(0x0F08FFF8u) == SE_SPACE_RNG);
+    RWC_ASSERT(se_plat_classify(0x0F090000u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x0FFFFFF8u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x10000000u) == SE_SPACE_BUF); /* pixels */
     RWC_ASSERT(se_plat_classify(0x10FFFFF8u) == SE_SPACE_BUF);
@@ -165,7 +159,70 @@ static void test_registers(void)
     RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 60u, 0u).fault);
     RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 1514u, 0u).fault);
     RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 1u, 0u).fault); /* E6 */
+    /* Timer: reset reads, direction/offset faults, strict ACK value
+     * (timer.md 2, TV-T1 shape). */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 0u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 8u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 24u).fault);      /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 0u, 5u, 0u).fault);  /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 16u, 0u, 0u).fault); /* E2 */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 32u).fault);      /* E1 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 0xFFF8u, 0u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 0u, 0u).fault); /* E5 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 2u, 0u).fault); /* E5 */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u, 0u).fault);
     RWC_ASSERT(!SeDev_ext_pending(&d));
+}
+
+static void test_timer_model(void)
+{
+    SeDev d;
+    SeDev_reset(&d);
+    /* Arm at W = 1000 with N = 100: pending derives at the first
+     * boundary >= 1100 and holds level-high (timer.md 4.2-4.3). */
+    SeDev_timer_tick(&d, 1000u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 8u, 100u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 8u).val == 100u);
+    SeDev_timer_tick(&d, 1099u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 0u);
+    RWC_ASSERT(!SeDev_ext_pending(&d));
+    /* Not-pending ACK is a no-op, not a state change (TMR-09). */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u, 0u).fault);
+    SeDev_timer_tick(&d, 1100u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 1u);
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 0u).val == 1100u);
+    /* A bad-value ACK faults with no state change (TMR-10)... */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 3u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 16u).val == 1u);
+    /* ...a prompt ACK advances by exactly one period (k = 1)... */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u, 0u).fault);
+    SeDev_timer_tick(&d, 1101u);
+    RWC_ASSERT(!d.tmr_pending);
+    SeDev_timer_tick(&d, 1200u);
+    RWC_ASSERT(d.tmr_pending);
+    /* ...and a late ACK collapses k > 1 elapsed periods back onto the
+     * W + m*N grid: A = 1437 with next_fire = 1200 gives k = 3,
+     * next_fire = 1500 (TMR-08/17). */
+    SeDev_timer_tick(&d, 1437u);
+    RWC_ASSERT(d.tmr_pending); /* one level, however many periods */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 24u, 1u, 0u).fault);
+    SeDev_timer_tick(&d, 1499u);
+    RWC_ASSERT(!d.tmr_pending);
+    SeDev_timer_tick(&d, 1500u);
+    RWC_ASSERT(d.tmr_pending);
+    /* Rewrite while armed re-arms fresh from the new W (TMR-06). */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 8u, 7u, 0u).fault);
+    SeDev_timer_tick(&d, 1501u);
+    RWC_ASSERT(!d.tmr_pending);
+    SeDev_timer_tick(&d, 1507u);
+    RWC_ASSERT(d.tmr_pending);
+    /* Disarm drops pending with no ACK handshake (TMR-04). */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_TIMER, 8u, 0u, 0u).fault);
+    SeDev_timer_tick(&d, 1508u);
+    RWC_ASSERT(!d.tmr_pending);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_TIMER, 8u).val == 0u);
 }
 
 static void test_input_queue(void)
@@ -258,6 +315,77 @@ static void test_nic_rx_model(void)
         RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u, 0u).fault);
     }
     RWC_ASSERT(d.nic_rx_len == 0u);
+}
+
+static void test_rng_model(void)
+{
+    SeDev d;
+    SeDev_reset(&d);
+    /* Reset state (rng.md 2): empty queue, CTRL 0, and QUEUE-mode
+     * empty pop is E6 -- there is no sentinel. */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 16u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).fault);  /* E6 */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 24u).fault); /* E2: SEED */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 32u).fault); /* E1 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 0u, 1u, 0u).fault);  /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 8u, 1u, 0u).fault);  /* E2 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 40u, 1u, 0u).fault); /* E1 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 4u, 0u).fault); /* E5 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_RNG, 16u,
+                               0x8000000000000001ull, 0u).fault);     /* E5 */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 16u).val == 0u);
+
+    /* FIFO with content; STATUS is mode-independent depth. */
+    const uint64_t w[4] = { 0x1111111111111111ull, 0x2222222222222222ull,
+                            0x3333333333333333ull, 0x4444444444444444ull };
+    RWC_ASSERT(SeDev_inject_rng(&d, w, 4u) == 4u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 4u);
+    RWC_ASSERT(!SeDev_ext_pending(&d)); /* IE off: depth alone is mute */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 2u, 0u).fault); /* IE on */
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[0]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[1]);
+
+    /* PRNG mode (rng.md 5.1 seed-0 vector); queue untouched, stream
+     * survives a mode flip, SEED restarts it. */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 3u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0xE220A8397B1DCDAFull);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0x6E789E6AA1B965F4ull);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 2u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 2u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 3u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0x06C45D188009454Full); /* no restart across the flip */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 24u, 0u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val ==
+               0xE220A8397B1DCDAFull); /* SEED restarts */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_RNG, 16u, 2u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[2]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[3]);
+    RWC_ASSERT(!SeDev_ext_pending(&d)); /* drained: level deasserts */
+
+    /* Truncate-to-fit (rng.md 4.2): fill to 254, then a 4-word
+     * arrival accepts exactly 2 and a further arrival accepts 0. */
+    uint64_t bulk[128];
+    for (unsigned i = 0; i < 128u; i++)
+        bulk[i] = 0xB000000000000000ull + i;
+    RWC_ASSERT(SeDev_inject_rng(&d, bulk, 128u) == 128u);
+    RWC_ASSERT(SeDev_inject_rng(&d, bulk, 126u) == 126u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 254u);
+    RWC_ASSERT(SeDev_inject_rng(&d, w, 4u) == 2u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 256u);
+    RWC_ASSERT(SeDev_inject_rng(&d, w, 1u) == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 8u).val == 256u);
+    /* Drain the head of the bulk and the truncated tail words. */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == bulk[0]);
+    for (unsigned i = 0; i < 253u; i++)
+        RWC_ASSERT(!SeDev_reg_read(&d, SE_SPACE_RNG, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[0]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).val == w[1]);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_RNG, 0u).fault); /* E6 again */
 }
 
 static void test_resize_inject(void)
@@ -492,8 +620,7 @@ static void test_dma_overlap(void)
 
 int main(void)
 {
-    test_devtable_v1();
-    test_devtable_v10_dma();
+    test_devtable_v1t();
     test_dma_registers();
     test_dma_content_errors();
     test_dma_copy_fill();
@@ -503,7 +630,9 @@ int main(void)
     test_registers();
     test_input_queue();
     test_nic_rx_model();
+    test_rng_model();
     test_resize_inject();
+    test_timer_model();
     printf("test_dev: all passed\n");
     return 0;
 }

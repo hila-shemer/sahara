@@ -71,10 +71,11 @@ authoritative for base and size):
 | LEN_MAX | 2^24 bytes (16 MB) |
 | CAPS value (§3.1 encoding) | 0x0000_0000_1808_0301 |
 
-The window is carved from the address range
-[0x0F06_0000, 0x1000_0000), which boot.md declares in no RAM region;
-the remainder of that range — [0x0F06_0000, 0x0F07_0000) and
-[0x0F08_0000, 0x1000_0000) — stays an undeclared hole and traps `DEVERR`
+The window sits between the timer window at 0x0F06_0000
+(devspec/timer.md §1) and the RNG window at 0x0F08_0000 (devspec/rng.md
+§1) — the accelerator wave carved up the old post-NIC hole completely,
+so the contiguous device run now ends at 0x0F09_0000. What remains —
+[0x0F09_0000, 0x1000_0000) — is an undeclared hole and traps `DEVERR`
 per boot.md BOOT-15. The window base is 64 KB aligned (boot.md §3.5).
 The whole window is device space in the sense of ISA-SPEC §9.2: stores
 to it are release fences, loads/stores are mutually program-ordered, and
@@ -835,24 +836,66 @@ expect C_done      = 2000 + 8 + 4096 = 6104
 | 5 | handler: IRQ_ACK ← 1; IRET | pending level drops; no second delivery |
 | 6 | doorbell bit-8 job with IE = 0; poll STATUS to DONE; then set IE = 1 | delivery immediately after IE is set — masking deferred, never lost |
 
-### V6 — reference device table with the DMA engine (informative restatement)
+### V6 — reference device table with the DMA engine (byte-exact, vector V-D)
 
-The dev-dma reference platform emits the boot.md §7 vector V10 table
-(five device records; byte dump owned by boot.md — this document pins
-only the type-6 record's fields):
+**V-D** — the wave-final 7-device reference platform table: boot.md V1's
+header and four records with `device_count` = 7, then the type-7 rng
+record fifth (rng.md §11.5 — its vector V-T is this same table), the
+type-5 timer record sixth (timer.md §8 — vector V1-T, same table), and
+this document's type-6 engine seventh. 520 bytes at `[0x0800, 0x0A08)`;
+the emulator writes zeros through the end of the 2 KB window.
 
 ```
-expect dev[dma].type      = 6
-expect dev[dma].base      = 0x0F070000
-expect dev[dma].size      = 0x10000
-expect dev[dma].params[0] = 0
-expect dev[dma].params[1] = 0
-expect dev[dma].params[2] = 0
-expect dev[dma].params[3] = 0
+00000800: 53 41 48 41 52 41 50 54 01 00 00 00 00 00 00 00
+00000810: 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
+00000820: 07 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000830: 00 00 00 00 00 00 00 00 00 00 00 0f 00 00 00 00
+00000840: 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
+00000850: 00 00 00 0f 00 00 00 00 00 00 00 00 00 00 00 00
+00000860: 00 00 01 00 00 00 00 00 00 00 00 10 00 00 00 00
+00000870: 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00
+00000880: 00 00 00 00 00 00 00 00 02 00 00 00 00 00 00 00
+00000890: 00 00 01 0f 00 00 00 00 00 00 00 00 00 00 00 00
+000008a0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+000008b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+000008c0: 00 00 00 00 00 00 00 00 03 00 00 00 00 00 00 00
+000008d0: 00 00 02 0f 00 00 00 00 00 00 00 00 00 00 00 00
+000008e0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+000008f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000900: 00 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00
+00000910: 00 00 03 0f 00 00 00 00 00 00 00 00 00 00 00 00
+00000920: 00 00 03 00 00 00 00 00 52 54 00 12 34 56 00 00
+00000930: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000940: 00 00 00 00 00 00 00 00 07 00 00 00 00 00 00 00
+00000950: 00 00 08 0f 00 00 00 00 00 00 00 00 00 00 00 00
+00000960: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000970: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000980: 00 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00
+00000990: 00 00 06 0f 00 00 00 00 00 00 00 00 00 00 00 00
+000009a0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009c0: 00 00 00 00 00 00 00 00 06 00 00 00 00 00 00 00
+000009d0: 00 00 07 0f 00 00 00 00 00 00 00 00 00 00 00 00
+000009e0: 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
+000009f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00000a00: 00 00 00 00 00 00 00 00
 ```
 
-`dev[dma]` is located by type-code scan; its index among the device
-records is deliberately not part of this vector.
+```
+expect device_count       = 7
+expect dev[6].type        = 6
+expect dev[6].base        = 0x0F070000
+expect dev[6].size        = 0x10000
+expect dev[6].params[0]   = 0
+expect dev[6].params[1]   = 0
+expect dev[6].params[2]   = 0
+expect dev[6].params[3]   = 0
+expect table_end_pa       = 0x0A08
+```
+
+The `dev[6]` index above pins this vector's bytes only: guests still
+locate the engine by type-code scan (§1), and nothing else anywhere may
+key on the record's position.
 
 ---
 
@@ -860,7 +903,7 @@ records is deliberately not part of this vector.
 
 | dependency | resolution |
 |---|---|
-| devspec/boot.md §3.5 / §7 V10 | device table record layout; the type-6 record and the dev-dma branch reference table bytes (V10, superseded at integration by the wave-final table) |
+| devspec/boot.md §3.5 / §7 V1 | device table record layout and the pre-wave 4-record reference bytes; the wave-final 7-record table is pinned here (V-D) and in timer.md V1-T / rng.md V-T |
 | devspec/trace.md §2.3.3 / §2.3.6 | MEMR/DEVW are per-instruction data accesses — the basis of the §7.2 no-records rule; no trace.md change is made or needed |
 | devspec/trace.md §3.3 | boundary order (EVENTs → interrupt recognition) that §5.5/§7.4 refine with the DMA completion step |
 | devspec/nic.md §2.2 / §7.2 | the device-internal-access precedents (TX capture reads, RX buffer fill writes emit no records) that §3.3/§7.2 follow |

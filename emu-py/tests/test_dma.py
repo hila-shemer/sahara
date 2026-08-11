@@ -53,7 +53,7 @@ def test_reset_and_read_matrix():
     for off in (0x00, 0x08, 0x20):
         with pytest.raises(mem.AccessError):
             d.store(off, 8, 0)
-    # unlisted offsets: DEVERR in BOTH directions (root SPEC-ISSUES 40)
+    # unlisted offsets: DEVERR in BOTH directions (root SPEC-ISSUES 41)
     for off in (0x28, 0xFFF8):
         with pytest.raises(mem.AccessError):
             d.load(off, 8)
@@ -228,7 +228,7 @@ def test_wfi_bit8_clear_job_is_not_a_wake_source():
     m = make_machine(prog, data=data, with_dma=True)
     outcome = m.run(100000)
     # nothing can deliver: the stall deadlocks loudly (root
-    # SPEC-ISSUES 42), the job never reaches its completion boundary
+    # SPEC-ISSUES 43), the job never reaches its completion boundary
     assert outcome == "halt" and m.halted
     assert m.dma.status == ST.BUSY
 

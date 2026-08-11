@@ -2,7 +2,7 @@
 # sreg-cycle reads bracket the doorbell so the cost model is checked
 # EXACTLY (C_done = C_doorbell + 8 + LEN/8, dma.md V3), COMP_CYCLE is
 # readable during BUSY (holds the schedule, dma.md 3.5 / root
-# SPEC-ISSUES 41), STATUS polls to DONE, and the guest checksums the
+# SPEC-ISSUES 42), STATUS polls to DONE, and the guest checksums the
 # destination against the sum it accumulated while writing the source.
 # DMA-C-13/18 instances.
 #

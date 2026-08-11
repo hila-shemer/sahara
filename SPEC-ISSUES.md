@@ -492,7 +492,29 @@ Both emulator implementations must match the readings marked
     them before trusting its own reading. **(emulators already match;
     the gap is spec text, not behavior)**
 
-40. **dma work order — unlisted-offset READS: "reads-0" vs the E2
+40. **rng work order R4 vs c7_rng_overflow — truncation-under-replay
+    cannot both abort and record** (dev-rng agent). R4 says a replayed
+    feed needing truncation trips the NIC-style loud abort
+    (`c->ev == c->feed` assert / ValueError); deliverable 3 requires
+    c7_rng_overflow to FEED an overflowing record set via `--replay`
+    (the harness's only headless event path) and asserts the recorded
+    EVENT payloads are the truncated prefixes — i.e. run a must
+    truncate-and-record, not die. The two are unsatisfiable together:
+    the events= feed and the REPLAY=1 leg go through the same --replay
+    code path. Reading chosen (devspec/rng.md 4.2/7.3, both emulators):
+    acceptance is recomputed on every apply, live and replay alike;
+    recorded = accepted prefix, zero accepted = no record. Replay of a
+    CONFORMING recording then never truncates (the fixed point), and a
+    divergent/tampered feed is caught by the normative trace
+    comparison (trace.md 5.4) — exactly input's drop-flag discipline
+    rather than the NIC's abort, because unlike the NIC's whole-frame
+    drop a truncation still has a defined recordable remainder. Cost:
+    a hand-tampered recording truncates loudly in the diff, not at the
+    first divergent apply. Consequence for emu-py: process_events
+    gained a one-line "record nothing on empty acceptance" guard (the
+    work order's "machine.py untouched" assumed the abort reading).
+
+41. **dma work order — unlisted-offset READS: "reads-0" vs the E2
     DEVERR catalog** (dma agent). The work order's binding section 5
     copies the NIC precedence chain "verbatim" and lists "unlisted
     offset" in the offset/direction DEVERR class with no direction
@@ -507,7 +529,7 @@ Both emulator implementations must match the readings marked
     window was meant instead, dma.md 2/9, both emulators'
     unlisted-load path, and dma_regs rows 18/20 change together.
 
-41. **dma work order — COMP_CYCLE value while BUSY unstated** (dma
+42. **dma work order — COMP_CYCLE value while BUSY unstated** (dma
     agent). The register table defines COMP_CYCLE by terminal state
     ("C_done for accepted jobs, the doorbell cycle for content-error
     jobs") but not what a read returns while STATUS=BUSY. Reading
@@ -519,7 +541,7 @@ Both emulator implementations must match the readings marked
     useful; if preferred, dma.md 3.5/V3 and both emulators' doorbell
     path move the write to the completion boundary together.
 
-42. **dma work order — WFI wake for a bit-8-clear in-flight job**
+43. **dma work order — WFI wake for a bit-8-clear in-flight job**
     (dma agent). "DMA completion is a wake source" is unqualified,
     but a job with IRQ_ON_COMPLETE=0 cannot make an interrupt
     pending, and ISA-SPEC 7.6 wakes WFI only on conditions that can

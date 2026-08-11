@@ -593,6 +593,19 @@ static void wfi_wait(SeCpu *c)
         wake = tc + 1u; /* T = tc, retire lands after the jump (root 20) */
         have = true;
     }
+    /* The device timer follows the event-style rule, not timecmp's
+     * T+1: pending derives at boundaries, so the wake lands at exactly
+     * next_fire (timer.md 4.5, ISA 7.6 "advances directly to the next
+     * cycle at which one becomes pending"). Armed and not already
+     * pending at c0 (the early return above used the cached bit from
+     * this boundary's tick) implies next_fire > c0. */
+    if (c->dev != NULL && c->dev->tmr_period != 0u) {
+        se_u128 tn = c->dev->tmr_next;
+        if (!have || tn < wake) {
+            wake = tn;
+            have = true;
+        }
+    }
     /* A feed event wakes WFI at a boundary stamped exactly its cycle:
      * the recorded EVENT then equals the feed record byte-for-byte,
      * which is what makes replaying a recording idempotent across a
@@ -646,6 +659,8 @@ static bool wfi_wake_exists(const SeCpu *c)
     se_u128 tc = c->sreg[SREG_TIMECMP];
     if (tc != 0u && tc > c->cycle)
         return true;
+    if (c->dev != NULL && c->dev->tmr_period != 0u)
+        return true; /* an armed timer always fires (timer.md 4.5) */
     uint64_t dma_wake;
     if (c->dev != NULL && SeDev_dma_wake(c->dev, &dma_wake))
         return true;
@@ -1076,6 +1091,7 @@ static void apply_events(SeCpu *c)
         RWC_ASSERT(c->dev != NULL); /* main.c wires both or neither */
         const uint8_t *rec = e->payload;
         uint8_t inbuf[9];
+        uint16_t rec_len = e->len;
         bool record = true;
         switch (e->device) {
         case SE_DEVIDX_DISPLAY:
@@ -1106,12 +1122,31 @@ static void apply_events(SeCpu *c)
                 record = false;
             }
             break;
+        case SE_DEVIDX_RNG: {
+            /* Truncate-to-fit, recorded = accepted prefix (rng.md
+             * 4.2, trace.md 4.6): the model recomputes acceptance on
+             * every apply -- live and replay alike, so an overflowing
+             * feed truncates deterministically instead of dying, and
+             * the trace diff is the loud replay check (SPEC-ISSUES
+             * 40). The recorded bytes are the payload prefix: word
+             * boundaries are byte boundaries, no re-encoding needed. */
+            uint64_t w[SE_RNG_EV_WORDS_MAX];
+            uint32_t n = e->len / 8u;
+            RWC_ASSERT(n >= 1u && n <= SE_RNG_EV_WORDS_MAX);
+            for (uint32_t i = 0; i < n; i++)
+                w[i] = ev_u64(e->payload + 8u * i);
+            uint32_t took = SeDev_inject_rng(c->dev, w, n);
+            if (took == 0u)
+                record = false; /* zero accepted: no EVENT record */
+            rec_len = (uint16_t)(8u * took);
+            break;
+        }
         default:
-            RWC_ASSERT(0); /* both feeders admit only the four above */
+            RWC_ASSERT(0); /* both feeders admit only the five above */
         }
         if (record)
             SeTrace_event(c->tr, se_lo64(c->cycle), e->device, rec,
-                          e->len);
+                          rec_len);
     }
 }
 
@@ -1155,9 +1190,16 @@ void SeCpu_step(SeCpu *c)
 {
     RWC_ASSERT(c->state == SE_RUN_RUNNING);
     /* Boundary order (trace.md 3.3 as refined by dma.md 7.4): events
-     * first, then DMA completion, then interrupt recognition, then the
-     * next instruction. */
+     * first, then the device phase (timer tick, then DMA completion),
+     * then interrupt recognition, then the next instruction.
+     * The timer tick caches this boundary's cycle and recomputes the
+     * derived pending bit (timer.md 4.3); register accesses by the
+     * instruction below read the cache as their C/W/A, which equals
+     * the cycle their own records carry -- the whole byte-match
+     * contract with emu-py rides on this one call site. */
     apply_events(c);
+    if (c->dev != NULL)
+        SeDev_timer_tick(c->dev, c->cycle);
     if (c->dev != NULL && c->dev->dma_status == SE_DMA_ST_BUSY &&
         c->cycle >= (se_u128)c->dev->dma_comp_cycle) {
         /* Completion samples live RAM, so the weak-store queue must

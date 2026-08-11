@@ -1,11 +1,12 @@
 # dma_boot.s — device-table discovery of the DMA engine (devspec/
-# boot.md V10, devspec/dma.md 1): parse by counts, locate the type-6
+# dma.md 1 and its vector V-D): parse by counts, locate the type-6
 # record by TYPE-CODE SCAN, and pin every field of that record —
 # base 0x0F07_0000 (u128 read as two u64 loads, boot.md 3.2), size
 # 0x1_0000, params[0..3] all zero. Deliberately NOT pinned: the
-# record's position and device_count — both are merge-variant on this
-# branch (the wave-final table reorders; boot.md V10's superseded-at-
-# integration marker). Unknown-type skip itself is already covered by
+# record's position and device_count — guests must never key on a
+# table position (boot.md 3.5), even now that the wave-final table
+# fixed them (7 records, dma seventh; dma.md V-D pins the bytes).
+# Unknown-type skip itself is already covered by
 # boot.md V2 / the existing suite and is not re-tested here. Finally
 # ties the table to the live device: CAPS at the discovered base
 # reads the dma.md 3.1 constant. DMA-C-01 (CAPS via discovery) and

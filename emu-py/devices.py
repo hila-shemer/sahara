@@ -1,13 +1,16 @@
-"""Sahara headless device model: display, keyboard/mouse input, NIC.
+"""Sahara headless device model: display, keyboard/mouse input, NIC,
+timer.
 
 Register windows, the pixel/TX/RX buffer windows, and event injection
-(`Device.event`) for all four devices — the queue/mailbox behaviour
-(input.md 4, display.md 6.2/6.4, nic.md 4) plus the register model of
-phase 2a.
+(`Device.event`) for the four event-fed devices — the queue/mailbox
+behaviour (input.md 4, display.md 6.2/6.4, nic.md 4) plus the register
+model of phase 2a. The timer (devspec/timer.md) is deliberately NOT
+event-fed: it is a pure function of guest DEVW writes and the cycle
+counter, and has no `event` method at all.
 
 Addresses and register maps are the reference-platform defaults of
 PLATFORM-SPEC.md section 1 and devspec/display.md, devspec/input.md,
-devspec/nic.md.
+devspec/nic.md, devspec/timer.md.
 """
 
 import struct
@@ -32,8 +35,14 @@ NIC_TX_OFFSET = 0x10000
 NIC_RX_OFFSET = 0x20000
 NIC_WINDOW_SIZE = 0x30000       # registers + TX buf + RX buf = 192 KB
 
-DMA_BASE = 0x0F070000
+TIMER_BASE = 0x0F060000         # devspec/timer.md 1, reference default
+TIMER_SIZE = 0x10000
+
+DMA_BASE = 0x0F070000           # devspec/dma.md 1: fills the old hole
 DMA_SIZE = 0x10000
+
+RNG_BASE = 0x0F080000           # devspec/rng.md 1
+RNG_SIZE = 0x10000
 
 PIXBUF_BASE = 0x10000000
 PIXBUF_SIZE = 0x1000000         # 16 MB (devspec/display.md 1, reference default)
@@ -200,6 +209,95 @@ class Input(mem.Device):
         return word + bytes([1 if dropped else 0])
 
 
+class Rng(mem.Device):
+    """RNG register window (devspec/rng.md): DATA (pop / PRNG output),
+    STATUS (queue depth), CTRL (bit 0 MODE, bit 1 IE), SEED (W).
+
+    The entropy queue is fed only by EVENT records; in QUEUE mode an
+    empty pop is DEVERR (rng.md 4.1 rule 4 — every u64 is a legal
+    entropy word, so no in-band sentinel exists; the input-device
+    all-ones sentinel deliberately does not apply). PRNG mode is pure
+    guest-selected architectural state: MODE/SEED move only via
+    DEVW-traced stores, and nothing here ever falls back from queue to
+    PRNG or consults the host (rng.md 5.3)."""
+
+    OFF_DATA = 0x00
+    OFF_STATUS = 0x08
+    OFF_CTRL = 0x10
+    OFF_SEED = 0x18
+    QUEUE_DEPTH = 256           # spec-fixed, not a device-table param
+    CTRL_MODE = 1
+    CTRL_IE = 2
+
+    def __init__(self, base=RNG_BASE, size=RNG_SIZE):
+        super().__init__(base, size)
+        self.queue = []
+        self.ctrl = 0
+        self.prng_state = 0
+
+    def _splitmix64(self):
+        """rng.md 5.1, normative; every step masked to 64 bits."""
+        self.prng_state = (self.prng_state + 0x9E3779B97F4A7C15) & MASK64
+        z = self.prng_state
+        z ^= z >> 30
+        z = (z * 0xBF58476D1CE4E5B9) & MASK64
+        z ^= z >> 27
+        z = (z * 0x94D049BB133111EB) & MASK64
+        z ^= z >> 31
+        return z
+
+    def load(self, off, size):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_DATA:
+            if self.ctrl & self.CTRL_MODE:
+                return self._splitmix64()   # queue untouched (rng.md 5.2)
+            if not self.queue:
+                raise mem.AccessError(self.base + off)      # E6
+            return self.queue.pop(0)
+        if off == self.OFF_STATUS:
+            return len(self.queue)          # mode-independent depth
+        if off == self.OFF_CTRL:
+            return self.ctrl
+        # SEED is write-only (E2); everything else is unlisted (E1).
+        raise mem.AccessError(self.base + off)
+
+    def store(self, off, size, val):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_CTRL:
+            if val & ~3:
+                raise mem.AccessError(self.base + off)      # E5
+            self.ctrl = val
+            return
+        if off == self.OFF_SEED:
+            self.prng_state = val & MASK64  # stream restarts (rng.md 5.1)
+            return
+        raise mem.AccessError(self.base + off)              # E2 / E1
+
+    def pending(self):
+        # IE-qualified level (rng.md 6): reset-off keeps the device
+        # invisible to type-7-unaware kernels.
+        return bool(self.ctrl & self.CTRL_IE) and bool(self.queue)
+
+    def event(self, payload):
+        """rng.md 4.2, trace.md 4.6: N LE u64 words, 1 <= N <= 128.
+        Truncate-to-fit against the 256 cap, recomputed here on every
+        apply (live and replay alike, SPEC-ISSUES 40); the returned
+        bytes are the ACCEPTED prefix — what the caller records, and
+        b\"\" means record nothing at all."""
+        if (len(payload) == 0 or len(payload) % 8 != 0
+                or len(payload) > 8 * 128):
+            raise ValueError(
+                f"RNG EVENT payload length {len(payload)}, want 8*N "
+                f"with 1 <= N <= 128 (trace.md 4.6)")
+        space = self.QUEUE_DEPTH - len(self.queue)
+        take = min(len(payload) // 8, space)
+        for i in range(take):
+            self.queue.append(
+                int.from_bytes(payload[8 * i:8 * i + 8], "little"))
+        return payload[:8 * take]
+
 class Dma(mem.Device):
     """DMA engine register window (devspec/dma.md): CAPS/STATUS/
     DOORBELL/IRQ_ACK/COMP_CYCLE. Memory-to-memory COPY and FILL from a
@@ -255,7 +353,7 @@ class Dma(mem.Device):
             return self.comp_cycle
         # DOORBELL/IRQ_ACK are write-only (E3); unlisted offsets fault
         # in BOTH directions (E2 — no inert reserved window, root
-        # SPEC-ISSUES 40).
+        # SPEC-ISSUES 41).
         raise mem.AccessError(self.base + off)
 
     def store(self, off, size, val):
@@ -343,7 +441,7 @@ class Dma(mem.Device):
         """WFI wake source (dma.md 7.5): the in-flight job's C_done,
         but only when latched OP bit 8 is set — a bit-8-clear job
         cannot make an interrupt pending, so it cannot end a stall
-        (root SPEC-ISSUES 42)."""
+        (root SPEC-ISSUES 43)."""
         if self.status == self.BUSY and (self.op >> 8) & 1:
             return self.comp_cycle
         return None
@@ -450,3 +548,80 @@ class Nic(mem.Device):
         else:
             self.rx_queue.append(payload)
         return payload
+
+
+class Timer(mem.Device):
+    """Periodic-tick accelerator (devspec/timer.md): COUNT/PERIOD/
+    STATUS/ACK, guest state exactly {period, next_fire}, pending
+    derived - never stored - as period > 0 and cycle >= next_fire.
+
+    `tick(cycle)` runs in the boundary device phase (trace.md 3.3:
+    after EVENT apply, before interrupt recognition): it caches the
+    boundary cycle and recomputes pending. Register accesses read the
+    cache as their C/W/A, which equals the accessing instruction's own
+    record cycle - the byte-match contract with emu-c.
+
+    No `event` method on purpose: the timer is a pure function of
+    guest DEVW writes and the counter, and an EVENT naming it is a
+    malformed trace (timer.md 5, trace.md 4.5) - an index that
+    resolves here must never reach a device handler."""
+
+    OFF_COUNT = 0x00
+    OFF_PERIOD = 0x08
+    OFF_STATUS = 0x10
+    OFF_ACK = 0x18
+
+    def __init__(self, base=TIMER_BASE, size=TIMER_SIZE):
+        super().__init__(base, size)
+        self.period = 0
+        self.next_fire = 0
+        self.now = 0                # boundary-cycle cache
+        self.pend = False           # cached derived pending
+
+    def tick(self, cycle):
+        self.now = cycle
+        self.pend = self.period > 0 and cycle >= self.next_fire
+
+    def load(self, off, size):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_COUNT:
+            # low 64 bits of the counter at the boundary preceding the
+            # load (timer.md 4.1) == this MEMR's own record cycle
+            return self.now & MASK64
+        if off == self.OFF_PERIOD:
+            return self.period                              # last written
+        if off == self.OFF_STATUS:
+            return 1 if self.pend else 0
+        if off == self.OFF_ACK:
+            raise mem.AccessError(self.base + off)          # E2
+        raise mem.AccessError(self.base + off)               # E1
+
+    def store(self, off, size, val):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_PERIOD:
+            # Arm: next_fire = W + N, W = this store's DEVW cycle (the
+            # cached boundary cycle). 0 disarms - pending derives from
+            # period > 0, so next_fire goes stale harmlessly. Rewrite
+            # while armed re-arms fresh (timer.md 4.2).
+            self.period = val
+            if val:
+                self.next_fire = self.now + val
+            return
+        if off == self.OFF_ACK:
+            if val != 1:
+                raise mem.AccessError(self.base + off)      # E5
+            if self.pend:
+                # Phase-locked advance (timer.md 4.4): smallest k >= 1
+                # with next_fire + k*period > A keeps fires on the
+                # W + m*N grid; pending implies A >= next_fire.
+                k = (self.now - self.next_fire) // self.period + 1
+                self.next_fire += k * self.period
+            return                                          # else no-op
+        if off in (self.OFF_COUNT, self.OFF_STATUS):
+            raise mem.AccessError(self.base + off)          # E2
+        raise mem.AccessError(self.base + off)               # E1
+
+    def pending(self):
+        return self.pend
