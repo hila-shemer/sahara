@@ -1,11 +1,22 @@
 # CC-M1 — the Sahara C-variant, milestone 1
 
-**Status: FLAGGED FOR OWNER SIGN-OFF.** Written before the compiler,
-exactly as SABI v0 was written before Oasis; `lang/cc/cc.py` is its
-first conforming implementation and proves it implementable, but no m2
-work may start before this document is signed. Divergence between this
-document and the compiler is a bug in one of them, never something to
-paper over.
+**Status: SIGNED OFF** — owner review 2026-08-12, comments integrated
+in the same change. Written before the compiler, exactly as SABI v0 was
+written before Oasis; `lang/cc/cc.py` is its first conforming
+implementation. Divergence between this document and the compiler is a
+bug in one of them, never something to paper over.
+
+**Change policy (owner-set at sign-off: stable, not gospel).** Three
+tiers: (1) the *language surface* — syntax and the semantics ordinary
+code depends on — is frozen SABI-style, because code is being written
+against it; (2) *compiler internals* — codegen strategy, temporary
+allocation, error wording, golden outputs — may change freely (goldens
+are re-blessed, never contorted around); (3) *edge-case semantics* —
+behavior only unusual code could observe — may change with a dated
+change-log entry weighing the change against code in the wild. A
+change in tier 3 that real programs turn out to depend on is a tier-1
+change and gets refused.
+
 
 CC-M1 is a freestanding C variant: one `.c` translation unit in, one
 SABI-v0-conformant `.s` out, assembled by the untouched `asm/asm.py`
@@ -436,23 +447,38 @@ Everything in this section is deliberate and frozen for m1:
 6. Declarations anywhere in a block; end-of-function falls out as
    `return 0` (section 6).
 7. No preprocessor at all: no `#include`, no macros. The language is
-   .c-file-in, .s-file-out.
+   .c-file-in, .s-file-out. (Owner note at sign-off: running an
+   external preprocessor — `cpp`/`gcc -E` — over sources *before*
+   cc.py is compatible and expected; ports will need it. The language
+   cc.py accepts stays preprocessor-free; preprocessing is the build's
+   business.)
+
 8. `main` takes no arguments (freestanding; there is no environment).
 
 Out of m1, each with its reason (see also the roadmap):
 
 - **Floating point** — SABI defers the FP ABI (§7); the flagship port
-  targets are deliberately fixed-point. Not on the critical path.
+  targets are deliberately fixed-point. Not on the critical path, but
+  committed on the roadmap (owner, at sign-off): FP ABI amendment
+  first, codegen after.
+
 - **varargs** — SABI's 16-byte stack slots leave an obvious future
   path (spill r0–r7 to slots and walk memory); noted, not built.
 - **struct by-value / assignment / return** — needs a copy routine
-  and there is no libc to hold one.
+  and there is no libc to hold one. (The mini-libc stream is planned;
+  this unblocks then.)
+
 - **unions, enums, `switch`/`for`/`do`/`goto`** — expressible with
   what is in; table rows and productions for m2, not architecture.
 - **`++ --`, compound assignment, ternary, `~`, unary `+`** — sugar;
   m2 productions.
-- **function pointers** — need typed indirect calls (`jalr`); the
-  calling convention already supports them, the front end defers them.
+- **function pointers** — promoted at sign-off to **m2's first
+  item** (owner). The back end is trivial (`jalr`; the calling
+  convention already supports indirect calls); what m1 cut is front
+  end only — C's function-pointer declarator syntax — and it was cut
+  for milestone size, not difficulty. The flagship ports use function
+  pointers pervasively, so m2 starts here.
+
 - **`typedef`, `static`, `const`, `volatile`** — no optimizer means
   every access is a real access, which is all m1 code could want from
   `volatile`; the rest is m2 bookkeeping.
@@ -520,12 +546,25 @@ boundary-label ownership.*
 
 ## 11. Limits (m1, all loud errors)
 
-- Frame size ≤ 2^20 bytes.
+- Frame size ≤ 2^20 bytes. (Keeps the prologue a single
+  instruction, which is what lets abicheck verify frames mechanically;
+  1 MB already exceeds every allocated stack. Escape hatch when
+  needed: an m2 multi-instruction prologue variant, with abicheck
+  taught the second shape.)
+
 - Integer literals < 2^128.
 - String literals ≤ 4096 bytes (the runtime capture buffer bounds the
   useful size anyway; not a language limit, a diagnostic courtesy —
   the emitted `.asciiz` would be legal).
-- One translation unit per invocation.
+
+- One translation unit per invocation — i.e. no linker, by design:
+  bundling sources is the m1 model (SABI §6: the assembler command
+  line is the layout). Roadmap (owner-shaped at sign-off): m2 grows
+  multi-input-one-output cc.py (compile-time linking inside the
+  compiler); an object format and a real linker come later behind a
+  SABI amendment when compilation stops scaling; runtime linking last,
+  tied to the OS loader deferral — loadable plugins are the real
+  motivation there, shared libraries only an optimization.
 
 ## 12. Roadmap — the ladder this milestone must not saw off
 
@@ -561,6 +600,15 @@ must land as table entries and new productions:
 
 **Sign-off status: FLAGGED FOR OWNER SIGN-OFF** (not yet signed).
 Consumers: `lang/cc/cc.py` (reference implementation, this branch).
-Amendments before sign-off may be made freely by the cc stream;
-after sign-off, SABI-style rules apply (dated change log, consumer
-updates in the same change).
+Amendments follow the tiered change policy in the header (owner-set
+at sign-off): tier 1 SABI-style, tier 2 free, tier 3 by dated
+change-log entry.
+
+**Change log:**
+
+- 2026-08-12 — signed off after owner review. Integrated: the tiered
+  change policy; external-preprocessor compatibility note; FP codegen
+  committed on the roadmap; function pointers promoted to m2's first
+  item; frame-limit rationale and escape hatch; the no-linker ladder
+  (multi-input cc, then object format + linker, then runtime
+  linking).
