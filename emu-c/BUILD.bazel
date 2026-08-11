@@ -38,11 +38,18 @@ rwc_binary(
 # The interactive front end. sdl_main.c is the sanctioned SDL shim
 # carve-out (emu-c-gui-frontend-prompt.md): allow_banned drops the
 # poison header, SDL2 comes from system headers + linkopts (no BCR
-# dep), and the TU stays out of the source audits below. Everything
-# with logic in it lives in :gui_core instead.
+# dep), and the TU stays out of the source audits below. nic_host.c
+# is the socket carve-out on the identical pattern -- both TUs only
+# move bytes; everything with logic in it lives in :gui_core instead,
+# and neither ever links into :core or sahara-emu (audit_banned_syms
+# on the headless binary is the structural NIC-C-35 check).
 rwc_binary(
     name = "sahara-gui",
-    srcs = ["gui/sdl_main.c"],
+    srcs = [
+        "gui/nic_host.c",
+        "gui/nic_host.h",
+        "gui/sdl_main.c",
+    ],
     allow_banned = True,
     linkopts = ["-lSDL2"],
     deps = [
@@ -69,12 +76,14 @@ rwc_library(
         "gui/blit.c",
         "gui/hid_map.c",
         "gui/nic.c",
+        "gui/nic_fake.c",
         "gui/translate.c",
     ],
     hdrs = [
         "gui/blit.h",
         "gui/hid_map.h",
         "gui/nic.h",
+        "gui/nic_fake.h",
         "gui/translate.h",
     ],
     deps = [":core"],
@@ -129,11 +138,16 @@ rwc_test(
 # that stand on their own.
 #
 # gui/ splits: the SDL-free sources join the source audits; the SDL
-# shim (sdl_main.c) is the sanctioned carve-out and stays out, as does
-# the sahara-gui binary from banned_syms (SDL drags in most of libc).
+# shim (sdl_main.c) and the socket shim (nic_host.c) are the
+# sanctioned carve-outs and stay out, as does the sahara-gui binary
+# from banned_syms (SDL drags in most of libc). nic_host.h has no
+# socket types and stays audited.
 AUDIT_SRCS = glob(
     ["*.c", "*.h", "gen/*.h", "gui/*.c", "gui/*.h"],
-    exclude = ["gui/sdl_main.c"],
+    exclude = [
+        "gui/nic_host.c",
+        "gui/sdl_main.c",
+    ],
 )
 
 sh_test(

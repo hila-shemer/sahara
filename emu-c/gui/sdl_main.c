@@ -4,11 +4,19 @@
  *
  *   sahara-gui IMAGE [--trace OUT.trc] [--trace-level {0,1,2}]
  *              [--hz N] [--ram BYTES] [--maxcycles N] [--script FILE]
+ *              [--nic host|off|fake]
  *
  * The front end is a device-event author: host input is translated
  * (gui/translate.c) and fed through SeCpu_feed, where the unchanged
  * boundary path applies, drop-flags and records it -- so the session
- * trace replays byte-identically under the frozen headless CLI.
+ * trace replays byte-identically under the frozen headless CLI. The
+ * NIC is the fourth author: the doorbell hook runs the sans-IO
+ * translator (gui/nic.c) and every arrival -- synthesized reply or
+ * socket return traffic -- enters the machine only as a fed EVENT, so
+ * a networked session replays offline. --nic defaults to host live
+ * (images are trusted by default; gui/nic-notes.md) and to off under
+ * --script, where host is rejected: the scripted gate is socket-free
+ * by construction.
  * Recording is mandatory (default session-<timestamp>.trc, level 0);
  * on exit the exact reproducing `sahara-emu --replay` command is
  * printed. This binary is the only component that reads real time,
@@ -38,6 +46,9 @@
 #include "gen/sahara_isa.h"
 #include "gen/spec_version.h"
 #include "gui/blit.h"
+#include "gui/nic.h"
+#include "gui/nic_fake.h"
+#include "gui/nic_host.h"
 #include "gui/translate.h"
 #include "hostmem.h"
 #include "image.h"
@@ -69,12 +80,27 @@ static uint64_t parse_u64(const char *s, const char *what)
     return (uint64_t)v;
 }
 
+typedef enum NicMode {
+    NIC_OFF = 0, /* dead wire: hook NULL, exactly the pre-NIC phase */
+    NIC_HOST,    /* real sockets (nic_host.c); the live default */
+    NIC_FAKE,    /* echo backend (nic_fake.c); test-only */
+} NicMode;
+
 typedef struct Gui {
     SeMem mem;
     SeDev dev;
     SeTrace tr;
     SeCpu *cpu;
     SeGxl xl;
+    NicMode nic_mode;
+    SeNic nic;
+    SeNicFake nic_fake;
+    SeNicHost nic_host;
+    /* Stamp for the next fed NIC frame: doorbell cycle + 1 inside the
+     * TX hook (nic.md 7.1 rules 3/5), pump_earliest during the pump
+     * sweep -- socket return traffic rides the same stamping rule as
+     * keyboard input, WFI-idle included (NIC-C-36 for free). */
+    uint64_t nic_earliest;
     uint64_t hz; /* cycles per wall second; 0 = free-run */
     uint64_t maxcycles;
     /* pacing anchor: cycle c0 was reached at wall time t0_ms */
@@ -132,6 +158,44 @@ static void host_mouse(Gui *g, int64_t x, int64_t y, uint8_t buttons)
     feed_events(g, &ev,
                 SeGxl_mouse(&g->xl, x, y, buttons, g->dev.disp_width,
                             g->dev.disp_height, &ev));
+}
+
+/* Deliver one translator-synthesized RX frame: fed like any other
+ * host event, applied and recorded by the unchanged boundary path. */
+static void gui_nic_deliver(void *ctx, const uint8_t *frame, uint16_t len)
+{
+    Gui *g = ctx;
+    SeCpu_feed(g->cpu, SE_DEVIDX_NIC, frame, len, g->nic_earliest);
+}
+
+/* The SeDev TX hook: capture TX buffer bytes [0, len) synchronously
+ * (the guest cannot run until the doorbell store completes -- nic.md
+ * 2.2's rule for free) and classify. Local replies feed at doorbell
+ * cycle + 1: strictly after the trigger (nic.md 7.1 rule 3) and the
+ * reference "+1" policy under --script's fake clock (rule 5). */
+static void gui_nic_tx(void *ctx, uint32_t len)
+{
+    Gui *g = ctx;
+    uint8_t buf[SE_NIC_FRAME_MAX];
+    for (uint32_t i = 0; i < len; i++)
+        buf[i] = (uint8_t)se_lo64(
+            SeMem_read(&g->mem, SE_PLAT_NIC_TXBUF + i, 1u));
+    g->nic_earliest = se_lo64(g->cpu->cycle) + 1u;
+    SeNic_tx(&g->nic, buf, (uint16_t)len);
+}
+
+/* One nonblocking backend sweep per pump tick, stamped exactly like
+ * the input batch polled alongside it. During WFI idle the 250 ms
+ * housekeeping tick bounds arrival latency (nic-notes.md). */
+static void nic_pump(Gui *g)
+{
+    if (g->nic_mode == NIC_OFF)
+        return;
+    g->nic_earliest = g->pump_earliest;
+    if (g->nic_mode == NIC_FAKE)
+        SeNicFake_pump(&g->nic_fake, &g->nic);
+    else
+        SeNicHost_pump(&g->nic_host, &g->nic);
 }
 
 /* Capture loss for any reason (focus loss, release chord): the guest
@@ -348,6 +412,7 @@ static void meta_record(SeTrace *tr, const char *image_arg,
 int main(int argc, char **argv)
 {
     const char *image = NULL, *trace_path = NULL, *script_path = NULL;
+    const char *nic_arg = NULL;
     uint64_t maxcycles = 0, ram = DEFAULT_RAM, hz = DEFAULT_HZ;
     int level = 0; /* the cheapest legal level (SPEC-ISSUES 39) */
 
@@ -368,6 +433,8 @@ int main(int argc, char **argv)
             ram = parse_u64(argv[++i], "--ram");
         } else if (strcmp(a, "--script") == 0 && i + 1 < argc) {
             script_path = argv[++i];
+        } else if (strcmp(a, "--nic") == 0 && i + 1 < argc) {
+            nic_arg = argv[++i];
         } else if (a[0] == '-') {
             fprintf(stderr, "sahara-gui: unknown option %s\n", a);
             return 1;
@@ -379,7 +446,27 @@ int main(int argc, char **argv)
     }
     if (!image)
         die("usage: sahara-gui IMAGE [--trace OUT.trc] [--trace-level N] "
-            "[--hz N] [--ram BYTES] [--maxcycles N] [--script FILE]");
+            "[--hz N] [--ram BYTES] [--maxcycles N] [--script FILE] "
+            "[--nic host|off|fake]");
+    /* Mode-dependent default: bridging is the point of a live
+     * session; the scripted gate is socket-free by construction, so
+     * host is not even accepted there. */
+    NicMode nic_mode;
+    if (!nic_arg)
+        nic_mode = script_path ? NIC_OFF : NIC_HOST;
+    else if (strcmp(nic_arg, "host") == 0)
+        nic_mode = NIC_HOST;
+    else if (strcmp(nic_arg, "off") == 0)
+        nic_mode = NIC_OFF;
+    else if (strcmp(nic_arg, "fake") == 0)
+        nic_mode = NIC_FAKE;
+    else {
+        die("--nic must be host, off, or fake");
+        return 1;
+    }
+    if (script_path && nic_mode == NIC_HOST)
+        die("--nic host is rejected under --script (the scripted gate "
+            "must be deterministic and socket-free); use fake or off");
     /* RAM legality mirrors sahara-emu exactly (SPEC-ISSUES 34). */
     if (ram < 0x20000u)
         die("--ram too small for device table + reset vector");
@@ -448,6 +535,20 @@ int main(int argc, char **argv)
     g.cpu->dev = &g.dev;
     g.cpu->live_yield = true; /* live WFI idles instead of halting */
     SeGxl_reset(&g.xl);
+    g.nic_mode = nic_mode;
+    if (nic_mode != NIC_OFF) {
+        if (nic_mode == NIC_FAKE) {
+            SeNicFake_reset(&g.nic_fake);
+            SeNic_reset(&g.nic, gui_nic_deliver, &g, SeNicFake_send,
+                        &g.nic_fake);
+        } else {
+            SeNicHost_init(&g.nic_host);
+            SeNic_reset(&g.nic, gui_nic_deliver, &g, SeNicHost_send,
+                        &g.nic_host);
+        }
+        g.dev.tx_doorbell = gui_nic_tx;
+        g.dev.tx_ctx = &g;
+    }
 
     /* Window at the reset mode, non-resizable: META cannot carry a
      * display mode, so replay depends on the fixed reset default
@@ -509,6 +610,9 @@ int main(int argc, char **argv)
             while (SDL_PollEvent(&e))
                 handle_sdl_event(&g, &e);
         }
+        /* NIC backend sweep after input: one deterministic poll order
+         * per tick (input batch, then flow-order return traffic). */
+        nic_pump(&g);
         render_if_pending(&g);
         if (!running || g.quit)
             break;
