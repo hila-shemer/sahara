@@ -40,6 +40,26 @@ enum {
     NIC_MAC = 32,
 };
 
+/* DMA register offsets (devspec/dma.md 2). No CTRL, no DESC_PA
+ * readback -- resolved and dropped by the work order. */
+enum {
+    DMA_CAPS = 0x00,
+    DMA_STATUS = 0x08,
+    DMA_DOORBELL = 0x10,
+    DMA_IRQ_ACK = 0x18,
+    DMA_COMP_CYCLE = 0x20,
+};
+
+/* Descriptor field offsets (dma.md 4). */
+enum {
+    DMA_DESC_OP = 0,
+    DMA_DESC_SRC = 8,
+    DMA_DESC_DST = 16,
+    DMA_DESC_LEN = 24,
+    DMA_DESC_NEXT = 32,
+    DMA_DESC_BYTES = 64,
+};
+
 void SeDev_reset(SeDev *d)
 {
     memset(d, 0, sizeof *d);
@@ -139,15 +159,85 @@ SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp, uint64_t off)
              * register region is unlisted (E2). */
             return acc_fault();
         }
+    case SE_SPACE_DMA:
+        switch (off) {
+        case DMA_CAPS: return acc_val(SE_DMA_CAPS);
+        case DMA_STATUS: return acc_val(d->dma_status);
+        case DMA_COMP_CYCLE: return acc_val(d->dma_comp_cycle);
+        default:
+            /* DOORBELL/IRQ_ACK are write-only (dma.md E3); unlisted
+             * offsets fault in BOTH directions (E2 -- no inert
+             * reserved window; root SPEC-ISSUES 40). */
+            return acc_fault();
+        }
     default:
         RWC_ASSERT(0); /* only register windows reach here */
         return acc_fault();
     }
 }
 
-SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
-                         uint64_t val)
+/* [base, base+len) wholly inside declared RAM (region 0)? u128 sums:
+ * a guest-supplied base near 2^64 must overflow into BAD_RANGE, not
+ * wrap into legality (dma.md 5.3 "range arithmetic is exact"). */
+static bool dma_range_in_ram(const SeMem *m, uint64_t base, uint64_t len)
 {
+    return (se_u128)base + len <= (se_u128)m->ram_len;
+}
+
+/* The doorbell store's synchronous half (dma.md 5.2 steps 2-5): the
+ * access checks E5-E7 passed in the caller; latch the 64 descriptor
+ * bytes -- a device-internal read, no MEMR records (dma.md 7.2) --
+ * validate content in the fixed order, and arm or terminate. Every
+ * outcome here retires the store; content badness is never a trap. */
+static void dma_doorbell(SeDev *d, SeMem *m, uint64_t pa, uint64_t cycle)
+{
+    uint64_t op = se_lo64(SeMem_read(m, pa + DMA_DESC_OP, 8u));
+    uint64_t src = se_lo64(SeMem_read(m, pa + DMA_DESC_SRC, 8u));
+    uint64_t dst = se_lo64(SeMem_read(m, pa + DMA_DESC_DST, 8u));
+    uint64_t len = se_lo64(SeMem_read(m, pa + DMA_DESC_LEN, 8u));
+    uint64_t next = se_lo64(SeMem_read(m, pa + DMA_DESC_NEXT, 8u));
+    uint64_t resv = se_lo64(SeMem_read(m, pa + 40u, 8u)) |
+                    se_lo64(SeMem_read(m, pa + 48u, 8u)) |
+                    se_lo64(SeMem_read(m, pa + 56u, 8u));
+    uint64_t opcode = op & 0xFFu;
+    bool copy = opcode == 1u;
+
+    uint64_t status;
+    if (opcode != 1u && opcode != 2u)
+        status = SE_DMA_ST_BAD_OP; /* 0 included: zeroed-RAM guard */
+    else if ((op >> 9) != 0u || next != 0u || resv != 0u)
+        status = SE_DMA_ST_BAD_FORMAT;
+    else if ((copy && (src & 7u) != 0u) || (dst & 7u) != 0u ||
+             (len & 7u) != 0u)
+        status = SE_DMA_ST_BAD_ALIGN; /* FILL: src is a pattern */
+    else if (len == 0u || len > SE_DMA_LEN_MAX ||
+             (copy && !dma_range_in_ram(m, src, len)) ||
+             !dma_range_in_ram(m, dst, len))
+        status = SE_DMA_ST_BAD_RANGE;
+    else
+        status = SE_DMA_ST_BUSY;
+
+    d->dma_status = status;
+    if (status != SE_DMA_ST_BUSY) {
+        /* Terminal at the doorbell itself: no BUSY window, nothing
+         * written, one wait-path for software -- pending rises here
+         * iff the latched OP asked for it (dma.md 5.2 step 4). */
+        d->dma_comp_cycle = cycle;
+        if ((op >> 8) & 1u)
+            d->dma_irq_pending = true;
+        return;
+    }
+    d->dma_op = op;
+    d->dma_src = src;
+    d->dma_dst = dst;
+    d->dma_len = len;
+    d->dma_comp_cycle = cycle + SE_DMA_K + len / SE_DMA_W;
+}
+
+SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
+                         uint64_t val, uint64_t cycle)
+{
+    (void)cycle; /* consumed by the DMA doorbell case only */
     switch (sp) {
     case SE_SPACE_DISPLAY:
         switch (off) {
@@ -210,10 +300,73 @@ SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp, uint64_t off,
         default:
             return acc_fault(); /* read-only (E4) or unlisted (E2) */
         }
+    case SE_SPACE_DMA:
+        switch (off) {
+        case DMA_DOORBELL:
+            /* Access-class checks, fixed order E5 -> E6 -> E7
+             * (dma.md 2.1): all trap DEVERR with zero device effect;
+             * an in-flight job is untouched by a rejected doorbell. */
+            if (d->dma_status == SE_DMA_ST_BUSY)
+                return acc_fault(); /* E5 */
+            if ((val & 63u) != 0u)
+                return acc_fault(); /* E6 */
+            RWC_ASSERT(d->mem != NULL); /* wired at setup */
+            if (!dma_range_in_ram(d->mem, val, DMA_DESC_BYTES))
+                return acc_fault(); /* E7 */
+            dma_doorbell(d, d->mem, val, cycle);
+            return acc_val(0);
+        case DMA_IRQ_ACK:
+            if (val != 1u)
+                return acc_fault(); /* dma.md E8: even 0 is loud */
+            d->dma_irq_pending = false; /* no-op if clear: race-free */
+            return acc_val(0);
+        default:
+            return acc_fault(); /* read-only (E4) or unlisted (E2) */
+        }
     default:
         RWC_ASSERT(0);
         return acc_fault();
     }
+}
+
+void SeDev_dma_advance(SeDev *d, SeMem *m, uint64_t cycle)
+{
+    if (d->dma_status != SE_DMA_ST_BUSY || cycle < d->dma_comp_cycle)
+        return;
+    RWC_ASSERT(m != NULL && m == d->mem);
+    /* The whole transfer at one boundary, as if through an
+     * intermediate buffer (dma.md 5.4): sources are live RAM -- never
+     * a doorbell-time stash -- so stores made since the doorbell are
+     * copied. Overlap: chunk-wise memmove; addresses are 8-aligned and
+     * len a multiple of 8 (validated at the doorbell), so u64 chunks
+     * with a direction pick are exact. Device-internal accesses: no
+     * trace records anywhere here (dma.md 7.2). */
+    uint64_t len = d->dma_len;
+    if ((d->dma_op & 0xFFu) == 1u) {
+        uint64_t src = d->dma_src, dst = d->dma_dst;
+        if (dst <= src) {
+            for (uint64_t i = 0; i < len; i += 8u)
+                SeMem_write(m, dst + i, 8u, SeMem_read(m, src + i, 8u));
+        } else {
+            for (uint64_t i = len; i != 0u; i -= 8u)
+                SeMem_write(m, dst + i - 8u, 8u,
+                            SeMem_read(m, src + i - 8u, 8u));
+        }
+    } else {
+        for (uint64_t i = 0; i < len; i += 8u)
+            SeMem_write(m, d->dma_dst + i, 8u, d->dma_src);
+    }
+    d->dma_status = SE_DMA_ST_DONE;
+    if ((d->dma_op >> 8) & 1u)
+        d->dma_irq_pending = true; /* the ONLY completion-path flip */
+}
+
+bool SeDev_dma_wake(const SeDev *d, uint64_t *cycle_out)
+{
+    if (d->dma_status != SE_DMA_ST_BUSY || ((d->dma_op >> 8) & 1u) == 0u)
+        return false; /* bit-8-clear: cannot raise, cannot wake */
+    *cycle_out = d->dma_comp_cycle;
+    return true;
 }
 
 bool SeDev_inject_input(SeDev *d, bool kbd, uint64_t word)
@@ -240,9 +393,14 @@ bool SeDev_ext_pending(const SeDev *d)
 {
     /* Level-triggered OR of every device pending condition
      * (PLATFORM-SPEC 3): input queue non-empty, display IRQ_STATUS
-     * nonzero, NIC frame exposed. */
+     * nonzero, NIC frame exposed, DMA terminal-state IRQ. The DMA term
+     * is the STORED flag only -- the flip happens in the doorbell /
+     * boundary advance, never here, so the predicate stays cycle-free
+     * and the two emulators cannot disagree on WHEN pending becomes
+     * visible (dma work order risk 1). */
     return d->kbd.count != 0u || d->mouse.count != 0u ||
-           d->display_irq_status != 0u || d->nic_rx_len != 0u;
+           d->display_irq_status != 0u || d->nic_rx_len != 0u ||
+           d->dma_irq_pending;
 }
 
 /* ---------------------------------------------------- device table */
@@ -276,7 +434,7 @@ void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len)
     SeMem_write(m, off + 8u, 8u, 1u);  /* version */
     SeMem_write(m, off + 16u, 8u, 1u); /* cpu_count */
     SeMem_write(m, off + 24u, 8u, 1u); /* ram_region_count */
-    SeMem_write(m, off + 32u, 8u, 4u); /* device_count */
+    SeMem_write(m, off + 32u, 8u, 5u); /* device_count */
     off += 40u;
     SeMem_write(m, off + 0u, 16u, 0u); /* region 0 base */
     SeMem_write(m, off + 16u, 16u, (se_u128)ram_region_len);
@@ -292,6 +450,9 @@ void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len)
     devtab_record(m, &off, 2u, SE_PLAT_KBD_BASE, 0x10000u, no_params);
     devtab_record(m, &off, 3u, SE_PLAT_MOUSE_BASE, 0x10000u, no_params);
     devtab_record(m, &off, 4u, SE_PLAT_NIC_BASE, 0x30000u, nic_params);
+    /* Type 6, all params zero: DMA limits are spec-pinned and surfaced
+     * in CAPS, not the table (dma.md 1; boot.md V10 pins the bytes). */
+    devtab_record(m, &off, 6u, SE_PLAT_DMA_BASE, 0x10000u, no_params);
     /* Window bytes past the encoded table stay 0: sparse memory reads
      * zero untouched, and the loader rejects segments overlapping
      * [0x800, 0x1000) (boot.md BOOT-4, image.c). */

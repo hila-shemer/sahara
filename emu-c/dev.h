@@ -26,7 +26,12 @@ enum {
     SE_DEVIDX_KBD = 1,
     SE_DEVIDX_MOUSE = 2,
     SE_DEVIDX_NIC = 3,
-    SE_DEVIDX_COUNT = 4,
+    /* This branch's table position only (boot.md V10) -- the wave-final
+     * table reorders records by base at integration. Nothing may key on
+     * this value: the DMA engine is not EVENT-fed, so no trace record
+     * ever names it, and the EVENT indices 0-3 above stay frozen. */
+    SE_DEVIDX_DMA = 4,
+    SE_DEVIDX_COUNT = 5,
 };
 
 /* Input event FIFO (input.md 4.1): depth exactly 256 on the reference
@@ -51,6 +56,23 @@ typedef struct SeInputQ {
  * exposed frame is the ring head; its bytes were copied to the RX
  * buffer at exposure, so the ring keeps only what RX_POP still needs. */
 #define SE_NIC_QDEPTH 64u
+
+/* DMA engine (devspec/dma.md): STATUS codes (3.2) and the spec-pinned
+ * constants of the cost model (6), all mirrored in CAPS (3.1). */
+enum {
+    SE_DMA_ST_IDLE = 0,
+    SE_DMA_ST_BUSY = 1,
+    SE_DMA_ST_DONE = 2,
+    SE_DMA_ST_BAD_OP = 3,
+    SE_DMA_ST_BAD_FORMAT = 4,
+    SE_DMA_ST_BAD_ALIGN = 5,
+    SE_DMA_ST_BAD_RANGE = 6,
+};
+
+#define SE_DMA_K 8u                       /* fixed job overhead, cycles */
+#define SE_DMA_W 8u                       /* bytes per cycle */
+#define SE_DMA_LEN_MAX (1ull << 24)       /* 16 MB */
+#define SE_DMA_CAPS 0x18080301ull         /* dma.md 3.1 encoding */
 
 typedef struct SeNicRxQ {
     uint8_t frame[SE_NIC_QDEPTH][SE_NIC_FRAME_MAX];
@@ -86,6 +108,19 @@ typedef struct SeDev {
      * last tick). Pure front-end state -- never read headless, no
      * guest-visible effect, not in any trace record. */
     bool present_pending;
+    /* DMA engine (devspec/dma.md 3, 5). No inject fn and no EVENT
+     * path: a job is a pure function of (descriptor latched at the
+     * doorbell, RAM at the completion boundary, doorbell cycle).
+     * dma_comp_cycle is written at the doorbell (dma.md 3.5 / root
+     * SPEC-ISSUES 41), so a BUSY-time COMP_CYCLE read returns the
+     * schedule. dma_irq_pending flips ONLY at a terminal state --
+     * content errors at the doorbell, completion in the boundary
+     * advance -- never inside SeDev_ext_pending, which stays
+     * cycle-free by design. FILL keeps its pattern in dma_src. */
+    uint64_t dma_status;      /* SE_DMA_ST_* */
+    uint64_t dma_comp_cycle;
+    bool dma_irq_pending;
+    uint64_t dma_op, dma_src, dma_dst, dma_len; /* latched at doorbell */
 } SeDev;
 
 void SeDev_reset(SeDev *d);
@@ -120,14 +155,32 @@ typedef struct SeDevAcc {
     uint64_t val;
 } SeDevAcc;
 
-/* sp names which register window (SE_SPACE_DISPLAY/KBD/MOUSE/NIC); off
- * is the byte offset inside it, 8-aligned (the caller has already
+/* sp names which register window (SE_SPACE_DISPLAY/KBD/MOUSE/NIC/DMA);
+ * off is the byte offset inside it, 8-aligned (the caller has already
  * checked alignment and the 64-bit-only size rule). Reads may have side
- * effects (queue pop). */
+ * effects (queue pop). Writes take the executing instruction's cycle --
+ * the value stamped on the store's DEVW record -- because the DMA
+ * doorbell's C_done and error-path COMP_CYCLE are arithmetic on it
+ * (dma.md 5.2, 6); every other device ignores it. */
 RWC_WARN_UNUSED SeDevAcc SeDev_reg_read(SeDev *d, SePlatSpace sp,
                                        uint64_t off);
 RWC_WARN_UNUSED SeDevAcc SeDev_reg_write(SeDev *d, SePlatSpace sp,
-                                        uint64_t off, uint64_t val);
+                                        uint64_t off, uint64_t val,
+                                        uint64_t cycle);
+
+/* The boundary device phase's DMA completion step (dma.md 5.5): when a
+ * job is in flight and cycle has reached its C_done, perform the whole
+ * transfer -- memmove-exact, straight into guest memory, zero trace
+ * records (dma.md 7.2) -- and flip STATUS/pending. Runs after EVENT
+ * apply, before interrupt recognition; the caller asserts the weak-
+ * store queue is already drained (it never re-flushes). */
+void SeDev_dma_advance(SeDev *d, SeMem *m, uint64_t cycle);
+
+/* Is an in-flight job a WFI wake source, and at what cycle? True iff
+ * BUSY with latched OP bit 8 set -- a bit-8-clear job cannot make an
+ * interrupt pending and so cannot end a WFI stall (dma.md 7.5, root
+ * SPEC-ISSUES 42). */
+RWC_WARN_UNUSED bool SeDev_dma_wake(const SeDev *d, uint64_t *cycle_out);
 
 /* EXTINT is the OR of every device pending condition (PLATFORM-SPEC 3). */
 RWC_WARN_UNUSED bool SeDev_ext_pending(const SeDev *d);

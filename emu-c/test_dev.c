@@ -51,12 +51,47 @@ static const uint8_t v1_table[328] = {
 
 static void test_devtable_v1(void)
 {
+    /* On this branch the writer emits boot.md V10 (five records); V1
+     * is superseded-at-integration but its bytes stay the reference
+     * for everything except the count: the header (device_count u64
+     * at table offset 0x20 excepted), the RAM region, and records 0-3
+     * must still match V1 byte-for-byte. The new count and the
+     * appended type-6 record are pinned by test_devtable_v10_dma. */
     SeMem m;
     SeMem_init(&m, se_lo64(SE_PLAT_RAM_MAX));
     se_plat_write_devtable(&m, se_lo64(SE_PLAT_RAM_MAX));
-    for (unsigned i = 0; i < sizeof v1_table; i++)
+    for (unsigned i = 0; i < sizeof v1_table; i++) {
+        if (i >= 0x20u && i < 0x28u)
+            continue; /* device_count: 4 in V1, 5 on this branch */
         RWC_ASSERT(se_lo64(SeMem_read(&m, 0x800u + i, 1u)) == v1_table[i]);
-    for (unsigned a = 0x948u; a < 0x1000u; a++)
+    }
+}
+
+/* devspec/boot.md section 7, vector V10 (dev-dma branch): V1 with
+ * device_count = 5 and this type-6 DMA record appended at 0x0948 --
+ * base 0x0F07_0000, size 0x1_0000, params all zero (limits live in
+ * CAPS, not the table). Encoded table now ends at 0x0988. Superseded
+ * at integration by the wave-final table; the record BYTES carry
+ * over, the position does not. */
+static const uint8_t v10_dma_record[64] = {
+    0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x0F,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+};
+
+static void test_devtable_v10_dma(void)
+{
+    SeMem m;
+    SeMem_init(&m, se_lo64(SE_PLAT_RAM_MAX));
+    se_plat_write_devtable(&m, se_lo64(SE_PLAT_RAM_MAX));
+    RWC_ASSERT(se_lo64(SeMem_read(&m, 0x820u, 8u)) == 5u);
+    for (unsigned i = 0; i < sizeof v10_dma_record; i++)
+        RWC_ASSERT(se_lo64(SeMem_read(&m, 0x948u + i, 1u)) ==
+                   v10_dma_record[i]);
+    for (unsigned a = 0x988u; a < 0x1000u; a++)
         RWC_ASSERT(SeMem_read(&m, a, 1u) == 0u); /* BOOT-2: window zeros */
 }
 
@@ -80,6 +115,10 @@ static void test_classify(void)
     RWC_ASSERT(se_plat_classify(0x0F040000u) == SE_SPACE_BUF); /* TX */
     RWC_ASSERT(se_plat_classify(0x0F050000u) == SE_SPACE_BUF); /* RX */
     RWC_ASSERT(se_plat_classify(0x0F060000u) == SE_SPACE_HOLE); /* V9 */
+    RWC_ASSERT(se_plat_classify(0x0F06FFF8u) == SE_SPACE_HOLE);
+    RWC_ASSERT(se_plat_classify(0x0F070000u) == SE_SPACE_DMA);
+    RWC_ASSERT(se_plat_classify(0x0F07FFF8u) == SE_SPACE_DMA);
+    RWC_ASSERT(se_plat_classify(0x0F080000u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x0FFFFFF8u) == SE_SPACE_HOLE);
     RWC_ASSERT(se_plat_classify(0x10000000u) == SE_SPACE_BUF); /* pixels */
     RWC_ASSERT(se_plat_classify(0x10FFFFF8u) == SE_SPACE_BUF);
@@ -100,19 +139,19 @@ static void test_registers(void)
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 0u).fault);   /* D-03 */
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 48u).fault);  /* D-03 */
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 56u).val == 0u);
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DISPLAY, 8u, 1u).fault);
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 0u, 77u).fault);
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 48u, 1u).fault);
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DISPLAY, 48u, 2u).fault);
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 56u, 5u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DISPLAY, 8u, 1u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 0u, 77u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 48u, 1u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DISPLAY, 48u, 2u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 56u, 5u, 0u).fault);
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 56u).val == 0u);
     /* Input: empty pop sentinel, depth 0, everything else faults. */
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 0u).val == ~0ull);
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 8u).val == 0u);
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_KBD, 16u).fault);
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_KBD, 0u, 1u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_KBD, 0u, 1u, 0u).fault);
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_MOUSE, 0u).val == ~0ull);
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_MOUSE, 8u, 1u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_MOUSE, 8u, 1u, 0u).fault);
     /* NIC: E2-E6. */
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_NIC, 8u).val == 0u);
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_NIC, 16u).val == 0u);
@@ -120,12 +159,12 @@ static void test_registers(void)
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_NIC, 0u).fault);  /* E3 */
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_NIC, 24u).fault); /* E3 */
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_NIC, 40u).fault); /* E2 */
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 8u, 0u).fault);  /* E4 */
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 59u).fault);   /* E5 */
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 1515u).fault); /* E5 */
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 60u).fault);
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 1514u).fault);
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 1u).fault); /* E6 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 8u, 0u, 0u).fault);  /* E4 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 59u, 0u).fault);   /* E5 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 1515u, 0u).fault); /* E5 */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 60u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 0u, 1514u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 1u, 0u).fault); /* E6 */
     RWC_ASSERT(!SeDev_ext_pending(&d));
 }
 
@@ -192,17 +231,17 @@ static void test_nic_rx_model(void)
     RWC_ASSERT(!SeDev_inject_nic(&d, &m, f, SE_NIC_FRAME_MAX));
     RWC_ASSERT(d.nic_rx_len == 60u); /* first frame still exposed */
     RWC_ASSERT(se_lo64(SeMem_read(&m, rx, 1u)) == 1u);
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u, 0u).fault);
     RWC_ASSERT(d.nic_rx_len == 61u);
     RWC_ASSERT(se_lo64(SeMem_read(&m, rx, 1u)) == 0x22u);
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u, 0u).fault);
     RWC_ASSERT(d.nic_rx_len == SE_NIC_FRAME_MAX);
     RWC_ASSERT(se_lo64(SeMem_read(&m, rx + 1513u, 1u)) == 0x33u);
     RWC_ASSERT(SeDev_ext_pending(&d));
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u, 0u).fault);
     RWC_ASSERT(d.nic_rx_len == 0u);
     RWC_ASSERT(!SeDev_ext_pending(&d));
-    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault); /* E6 */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u, 0u).fault); /* E6 */
 
     /* Overflow (NIC-C-18): the 65th arrival while 64 are held is
      * discarded -- inject reports it, the queue and its contents are
@@ -216,7 +255,7 @@ static void test_nic_rx_model(void)
     for (unsigned i = 0; i < 64u; i++) {
         RWC_ASSERT(d.nic_rx_len == 60u + i);
         RWC_ASSERT(se_lo64(SeMem_read(&m, rx, 1u)) == i);
-        RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u).fault);
+        RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_NIC, 24u, 0u, 0u).fault);
     }
     RWC_ASSERT(d.nic_rx_len == 0u);
 }
@@ -233,7 +272,7 @@ static void test_resize_inject(void)
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 24u).val == 3200u);
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 40u).val == 1u);
     RWC_ASSERT(SeDev_ext_pending(&d));
-    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 48u, 1u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DISPLAY, 48u, 1u, 0u).fault);
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 40u).val == 0u);
     RWC_ASSERT(!SeDev_ext_pending(&d));
     SeDev_inject_resize(&d, 640u, 480u, 2560u);
@@ -242,9 +281,223 @@ static void test_resize_inject(void)
     RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DISPLAY, 8u).val == 640u);
 }
 
+/* DMA engine unit tests (devspec/dma.md). Registers and the DEVERR
+ * matrix at the SeDev level; the doorbell's two error classes; the
+ * cost model; latch-vs-sample; memmove overlap; the WFI wake gate.
+ * The trap plumbing and boundary phase above SeDev are exercised by
+ * the shared dma_* conformance images. */
+
+#define DMA_DESC_PA 0x10000u
+#define DMA_SRC_PA 0x20000u
+#define DMA_DST_PA 0x30000u
+
+static void dma_write_desc(SeMem *m, uint64_t op, uint64_t src,
+                           uint64_t dst, uint64_t len)
+{
+    SeMem_write(m, DMA_DESC_PA + 0u, 8u, op);
+    SeMem_write(m, DMA_DESC_PA + 8u, 8u, src);
+    SeMem_write(m, DMA_DESC_PA + 16u, 8u, dst);
+    SeMem_write(m, DMA_DESC_PA + 24u, 8u, len);
+    SeMem_write(m, DMA_DESC_PA + 32u, 8u, 0u);
+    SeMem_write(m, DMA_DESC_PA + 40u, 8u, 0u);
+    SeMem_write(m, DMA_DESC_PA + 48u, 8u, 0u);
+    SeMem_write(m, DMA_DESC_PA + 56u, 8u, 0u);
+}
+
+static void test_dma_registers(void)
+{
+    SeMem m;
+    SeMem_init(&m, 0x100000u);
+    SeDev d;
+    SeDev_reset(&d);
+    d.mem = &m;
+    /* Reset values (dma.md 3.6, V1 rows 1-3). */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x00u).val == SE_DMA_CAPS);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x20u).val == 0u);
+    /* Wrong direction (E3/E4), unlisted both ways (E2). */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x10u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x18u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x00u, 0u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x08u, 0u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x20u, 0u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x28u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x28u, 0u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0xFFF8u).fault);
+    /* IRQ_ACK value rule (E8): only 1 is legal; 0 is loud too. */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x18u, 0u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x18u, 2u, 0u).fault);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x18u, 1u, 0u).fault);
+    RWC_ASSERT(!SeDev_ext_pending(&d));
+    /* Doorbell access class (E6/E7): unaligned PA, PA range past RAM
+     * top -- DEVERR, and STATUS/COMP_CYCLE untouched. */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, 8u, 0u).fault);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, 0x100000u,
+                               0u).fault); /* E7: [ram_top, +64) */
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u,
+                               0xFFFFFFFFFFFFFFC0ull, 0u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val == 0u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x20u).val == 0u);
+}
+
+static void test_dma_content_errors(void)
+{
+    SeMem m;
+    SeMem_init(&m, 0x100000u);
+    SeDev d;
+    SeDev_reset(&d);
+    d.mem = &m;
+    /* Each row: doorbell at a known cycle, expect the STATUS code,
+     * COMP_CYCLE = the doorbell cycle, nothing written (dma.md 5.3,
+     * V2). Check order: first failure wins. */
+    static const struct {
+        uint64_t op, src, dst, len, want;
+    } rows[] = {
+        { 0u, DMA_SRC_PA, DMA_DST_PA, 64u, SE_DMA_ST_BAD_OP },
+        { 7u, DMA_SRC_PA, DMA_DST_PA, 64u, SE_DMA_ST_BAD_OP },
+        { 1u | (1u << 9), DMA_SRC_PA, DMA_DST_PA, 64u,
+          SE_DMA_ST_BAD_FORMAT },
+        { 1u, DMA_SRC_PA + 1u, DMA_DST_PA, 64u, SE_DMA_ST_BAD_ALIGN },
+        { 1u, DMA_SRC_PA, DMA_DST_PA + 4u, 64u, SE_DMA_ST_BAD_ALIGN },
+        { 1u, DMA_SRC_PA, DMA_DST_PA, 12u, SE_DMA_ST_BAD_ALIGN },
+        /* FILL: src is a pattern, no align rule -- an odd src falls
+         * through to the LEN=0 range check instead */
+        { 2u, DMA_SRC_PA + 1u, DMA_DST_PA, 0u, SE_DMA_ST_BAD_RANGE },
+        { 1u, DMA_SRC_PA, DMA_DST_PA, 0u, SE_DMA_ST_BAD_RANGE },
+        { 1u, DMA_SRC_PA, DMA_DST_PA, SE_DMA_LEN_MAX + 8u,
+          SE_DMA_ST_BAD_RANGE },
+        { 1u, DMA_SRC_PA, 0x10000000u, 64u, /* pixel-buffer base */
+          SE_DMA_ST_BAD_RANGE },
+        /* precedence: opcode beats format beats align beats range */
+        { 0u | (1u << 9), DMA_SRC_PA + 1u, DMA_DST_PA, 0u,
+          SE_DMA_ST_BAD_OP },
+        { 1u | (1u << 9), DMA_SRC_PA + 1u, DMA_DST_PA, 0u,
+          SE_DMA_ST_BAD_FORMAT },
+        { 1u, DMA_SRC_PA + 1u, DMA_DST_PA, 0u, SE_DMA_ST_BAD_ALIGN },
+    };
+    for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        dma_write_desc(&m, rows[i].op, rows[i].src, rows[i].dst,
+                       rows[i].len);
+        uint64_t cyc = 1000u + i;
+        RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                                    cyc).fault);
+        RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val ==
+                   rows[i].want);
+        RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x20u).val == cyc);
+        RWC_ASSERT(!d.dma_irq_pending); /* bit 8 clear everywhere here */
+        RWC_ASSERT(SeMem_read(&m, DMA_DST_PA, 8u) == 0u); /* untouched */
+    }
+    /* NEXT != 0 is BAD_FORMAT; error-with-IRQ raises pending. */
+    dma_write_desc(&m, 1u, DMA_SRC_PA, DMA_DST_PA, 64u);
+    SeMem_write(&m, DMA_DESC_PA + 32u, 8u, 1u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                                2000u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val ==
+               SE_DMA_ST_BAD_FORMAT);
+    dma_write_desc(&m, 0x100u, DMA_SRC_PA, DMA_DST_PA, 64u); /* op 0+bit8 */
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                                2001u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val ==
+               SE_DMA_ST_BAD_OP);
+    RWC_ASSERT(d.dma_irq_pending);
+    RWC_ASSERT(SeDev_ext_pending(&d));
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x18u, 1u, 0u).fault);
+    RWC_ASSERT(!SeDev_ext_pending(&d));
+}
+
+static void test_dma_copy_fill(void)
+{
+    SeMem m;
+    SeMem_init(&m, 0x100000u);
+    SeDev d;
+    SeDev_reset(&d);
+    d.mem = &m;
+    for (uint64_t i = 0; i < 512u; i++)
+        SeMem_write(&m, DMA_SRC_PA + 8u * i, 8u, 0x0101010101010101ull * i);
+    /* COPY 4 KB at cycle 1000: C_done = 1520 (dma.md V3), COMP_CYCLE
+     * readable during BUSY, doorbell-while-BUSY is E5. */
+    dma_write_desc(&m, 1u, DMA_SRC_PA, DMA_DST_PA, 4096u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                                1000u).fault);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val ==
+               SE_DMA_ST_BUSY);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x20u).val == 1520u);
+    RWC_ASSERT(SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                               1001u).fault); /* E5 */
+    /* Latch rule: corrupt the descriptor in RAM mid-flight. */
+    SeMem_write(&m, DMA_DESC_PA, 8u, 0u);
+    /* Sample rule: change source word 0 before C_done. */
+    SeMem_write(&m, DMA_SRC_PA, 8u, 0xDEADBEEFDEADBEEFull);
+    SeDev_dma_advance(&d, &m, 1519u); /* one early: nothing happens */
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val ==
+               SE_DMA_ST_BUSY);
+    RWC_ASSERT(SeMem_read(&m, DMA_DST_PA, 8u) == 0u);
+    SeDev_dma_advance(&d, &m, 1520u);
+    RWC_ASSERT(SeDev_reg_read(&d, SE_SPACE_DMA, 0x08u).val ==
+               SE_DMA_ST_DONE);
+    RWC_ASSERT(!d.dma_irq_pending); /* bit 8 was clear */
+    RWC_ASSERT(SeMem_read(&m, DMA_DST_PA, 8u) == 0xDEADBEEFDEADBEEFull);
+    for (uint64_t i = 1; i < 512u; i++)
+        RWC_ASSERT(SeMem_read(&m, DMA_DST_PA + 8u * i, 8u) ==
+                   (se_u128)(0x0101010101010101ull * i));
+    RWC_ASSERT(SeMem_read(&m, DMA_DST_PA + 4096u, 8u) == 0u); /* fence */
+    /* FILL with bit 8 from DONE: re-arm legal, wake gate on, pattern
+     * replicated, pending flips only at the advance. */
+    dma_write_desc(&m, 0x102u, 0xA5A5A5A5A5A5A5A5ull, DMA_DST_PA, 64u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                                2000u).fault);
+    uint64_t wake = 0;
+    RWC_ASSERT(SeDev_dma_wake(&d, &wake));
+    RWC_ASSERT(wake == 2000u + 8u + 8u);
+    RWC_ASSERT(!d.dma_irq_pending);
+    SeDev_dma_advance(&d, &m, wake);
+    RWC_ASSERT(d.dma_irq_pending);
+    RWC_ASSERT(SeDev_dma_wake(&d, &wake) == false); /* DONE: no wake */
+    for (uint64_t i = 0; i < 8u; i++)
+        RWC_ASSERT(SeMem_read(&m, DMA_DST_PA + 8u * i, 8u) ==
+                   0xA5A5A5A5A5A5A5A5ull);
+    RWC_ASSERT(SeMem_read(&m, DMA_DST_PA + 64u, 8u) ==
+               (se_u128)(0x0101010101010101ull * 8u)); /* fence held */
+}
+
+static void test_dma_overlap(void)
+{
+    SeMem m;
+    SeMem_init(&m, 0x100000u);
+    SeDev d;
+    SeDev_reset(&d);
+    d.mem = &m;
+    /* Forward overlap (dst > src): memmove semantics, not a smear. */
+    for (uint64_t i = 0; i < 64u; i++)
+        SeMem_write(&m, DMA_SRC_PA + 8u * i, 8u, 100u + i);
+    dma_write_desc(&m, 1u, DMA_SRC_PA, DMA_SRC_PA + 8u, 512u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                                0u).fault);
+    SeDev_dma_advance(&d, &m, 100u);
+    RWC_ASSERT(SeMem_read(&m, DMA_SRC_PA, 8u) == 100u); /* untouched */
+    for (uint64_t i = 0; i < 64u; i++)
+        RWC_ASSERT(SeMem_read(&m, DMA_SRC_PA + 8u * (i + 1u), 8u) ==
+                   100u + i);
+    /* Backward overlap (dst < src). */
+    for (uint64_t i = 0; i < 65u; i++)
+        SeMem_write(&m, DMA_DST_PA + 8u * i, 8u, 200u + i);
+    dma_write_desc(&m, 1u, DMA_DST_PA + 8u, DMA_DST_PA, 512u);
+    RWC_ASSERT(!SeDev_reg_write(&d, SE_SPACE_DMA, 0x10u, DMA_DESC_PA,
+                                200u).fault);
+    SeDev_dma_advance(&d, &m, 300u);
+    for (uint64_t i = 0; i < 64u; i++)
+        RWC_ASSERT(SeMem_read(&m, DMA_DST_PA + 8u * i, 8u) == 201u + i);
+    RWC_ASSERT(SeMem_read(&m, DMA_DST_PA + 8u * 64u, 8u) == 264u);
+}
+
 int main(void)
 {
     test_devtable_v1();
+    test_devtable_v10_dma();
+    test_dma_registers();
+    test_dma_content_errors();
+    test_dma_copy_fill();
+    test_dma_overlap();
     test_mac_packing();
     test_classify();
     test_registers();
