@@ -470,3 +470,24 @@ Both emulator implementations must match the readings marked
     scope by decision. A future multi-unit cc.py (roadmap) absorbs the
     runtime the same way it absorbs a second .c: by being the one
     emitter.
+
+39. **ISA-SPEC 8.2/8.3 — VA bit roles and page-table node consistency**
+    (owner-approved entry, 2026-08-12, from an external design review).
+    The headline question the review raised — which upper VA bits are
+    reserved/ignored/meaningful — is answered by 8.3 as written: VPN =
+    VA[127:16] participates fully in prefix checks and chunk indexing,
+    so every 128-bit VA is architecturally meaningful (walkable, and
+    either translates or faults PF_*); there is no canonical-form rule
+    and no ignored-bits window, and none should be added silently.
+    What 8.2/8.3 do NOT state, and is today pinned only by the two
+    implementations agreeing under difftest (plus emu-c SPEC-ISSUES 2's
+    malformed-node choices): (a) whether `prefix_mask` must cover
+    exactly the VPN bits above the node's `shift`, or may test bits at
+    or below it; (b) whether `shift` must strictly decrease on descent
+    (the emu-c depth bound of 15 is a backstop, not an ordering rule);
+    (c) whether a root node's shift may be less than 104 (implicitly
+    yes — prefix compression is the point). Recommend a clarifying
+    paragraph in a future spec revision; until then the pinned behavior
+    is the implementations', and any new walker must difftest against
+    them before trusting its own reading. **(emulators already match;
+    the gap is spec text, not behavior)**
