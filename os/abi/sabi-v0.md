@@ -1,9 +1,10 @@
 # SABI v0 — Sahara Software ABI and Conventions
 
-**Version 0. FLAGGED FOR OWNER SIGN-OFF — no second consumer may build
-against this document until the owner has signed off.** First (and so far
-only) conforming client: the Oasis kernel (`os/oasis/`).
-Reviewing. Once we fix this spec, we can continue with multiple clients of it.
+**Version 0 — SIGNED OFF** (owner review 2026-08-11, commit cfff4aa;
+review comments integrated as section 1.4 and the section 1.1 scoping in
+the same change). Multiple consumers may build against this document; the
+consumer registry and amendment rules are at the end. First conforming
+client: the Oasis kernel (`os/oasis/`).
 
 This document defines the machine-wide software conventions of the Sahara
 platform: register roles, calling convention, stack discipline, the
@@ -43,12 +44,7 @@ Informative restatement of the ISA-SPEC 12 table (the ISA text governs):
 | r16–r27 | callee-saved: a function preserves exactly the ones it uses. |
 | r28     | `sp`. 16-byte aligned at all times. Grows down. |
 | r29     | `ra`. Written by JAL/JALR. Caller-saved. |
-| r30     | `k0`. Reserved to the kernel at all times. |
-This worries me - what if an application mangles it by mistake? The kernel should never depend on userspace behavior for its correctness.
-Technically, once we go to userspace the app can do whatever it wants - internally it doesn't have to follow the calling convention
-if it doesn't want to.
-It just makes debugging that app kinda difficult. Kernel-based debugging features can depend on this SABI but must fail cleanly when its violated
-
+| r30     | `k0`. Reserved to the kernel at all times (violating it breaks only the violator — section 1.4). |
 | r31     | `zero` (hardware). |
 
 Predicate registers are caller-saved and not preserved across calls.
@@ -63,10 +59,11 @@ Memory below `sp` is volatile. A trap or interrupt handler may use the
 current stack (pushing its own frames below the interrupted `sp`), so no
 code may keep live data at addresses below `sp`. There is no red zone of
 any size.
-This is fine, right? Most OSs do this - the kernel uses the extra stack the userspace isn't using. It doesn't assume any previous data there so it can't be mangled, and the memory is available so it won't double trap.
-Also this is for program traps, right? An interrupt from HW would send us to a kernel context? In this case a double trap inside the program's handler can just kill the program
-(i.e. - you caused a signal but didn't leave enough stack? OK you get kill-9ed instead, handler doesn't mind :))
 
+The below-`sp` license is scoped: it applies when the interrupted context
+is **kernel** code. Sahara hardware does not switch stacks on trap entry
+(delivery only sets S=1 — ISA-SPEC 7.2); a handler entered from user mode
+must not treat the user's `sp` as a stack at all (section 1.4, rule 2).
 
 ### 1.2 SABI addition: `gp` = r27, kernel-internal only
 
@@ -89,9 +86,42 @@ register, so the kernel's `gp` survives every excursion.
 without notice, by any trap or interrupt — including SYSCALL. No code,
 kernel or user, may keep a value in any of them across any instruction
 that can be interrupted (that is: ever, outside the trap path itself).
-Oh, so user can't mangle it - the user can't depend on it because a trap may modify it.
-This changes my earlier objections - I'm okay with telling user 'never use r30 or your program breaks' as that's not the same as 'dont touch r30 or the kernel will crash'
 
+### 1.4 SABI addition: the kernel/user trust boundary
+
+Owner-review outcome (2026-08-11). The conventions in this document bind
+user code only on pain of **its own** misbehavior. Normatively:
+
+**Kernel correctness must never depend on user-mode adherence to this
+document.** A user-mode violation of any SABI convention — register
+roles, stack discipline, alignment, canonical form — must be containable
+to the violating program. "Never use r30 or your program breaks" is a
+conforming consequence; "don't touch r30 or the kernel crashes" is a
+kernel bug. Two rules make the existing conventions satisfy this:
+
+1. **`k0`/`scratch0`/`scratch1` are write-before-read in the trap path.**
+   The kernel never consumes a value a less-privileged context could have
+   placed in them; the canonical block of section 5 writes `k0` (`la k0,
+   SAVE`) before its first read, and every conforming handler must do the
+   same. User code that touches r30 loses its value at the next trap —
+   which can be any instruction — so it harms only itself.
+2. **User `sp` is data, never infrastructure.** On a trap whose saved
+   status shows the interrupted context was user mode (`status.PS` = 0 at
+   handler entry), the handler must load a kernel-owned stack pointer (or
+   use a kernel-owned save area) before its first push; the interrupted
+   `sp` is register state to be saved, not a stack to be used. The
+   section 1.1 below-`sp` license never crosses the privilege boundary.
+   (Milestone-1 corollary: with no user mode, every trap interrupts
+   kernel code and the license always applies; Oasis's static save areas
+   conform a fortiori.)
+
+Kernel debugging and introspection features (stack walkers over section 2
+frames, symbolization via section 6 labels, and similar) MAY interpret
+SABI structure in user programs, and must **fail cleanly** when it is
+violated: degraded or absent output for that program, never kernel
+misbehavior. What a kernel does to a user program that wrecks itself
+(kill it, signal it) is per-OS policy and, for signal-like upcalls, a
+deferral of section 7.
 
 ## 2. Stack discipline and frames
 
@@ -298,8 +328,31 @@ definition:
 
 ---
 
-**Sign-off status: FLAGGED FOR OWNER SIGN-OFF.** Until the flag is
-removed by the owner, exactly one consumer (Oasis) may track this
-document, and every change here must be reflected there in the same
-change.
-I'm replacing this flag by whatever you think the flag should be replaced weith :D
+**Sign-off status: SIGNED OFF** — owner review 2026-08-11 (commit
+cfff4aa), comments integrated as section 1.4 and the section 1.1 scoping.
+
+**Consumer registry.** Every consumer of this document is listed here;
+adding a consumer is a one-line change to this list.
+
+- Oasis kernel — `os/oasis/`
+
+**Amendment rules, now that the document is live:**
+
+1. Sections 1–6 are frozen. A change to frozen text requires owner
+   approval, a dated entry in the change log below, and same-change
+   updates to every registered consumer.
+2. Filling in a section-7 deferral (user-mode conventions, allocator
+   API, FP ABI, …) is the expected growth path: it is drafted as a
+   `v0.x` amendment appended to this document, flagged for owner
+   sign-off exactly as v0 was, and no consumer may build on it until
+   signed. Deferrals bind before they are signed: code needing an
+   unsigned deferral is out of scope, not creatively unblocked.
+3. Incompatible changes fork: `os/abi/sabi-v1-<name>.md`, per the header.
+
+**Change log:**
+
+- 2026-08-11 — v0 signed off. Trust-boundary section 1.4 added and the
+  section 1.1 below-`sp` license scoped to kernel-mode interruption, from
+  owner review (cfff4aa). No consumer code change required: Oasis M1 has
+  no user mode, and its handlers use static save areas with
+  write-before-read `k0`.
