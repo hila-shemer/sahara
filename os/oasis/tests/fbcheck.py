@@ -15,9 +15,12 @@ renders from (gen/genfont.py - one truth, two consumers), and asserts:
   --min-presents N    at least N PRESENT stores
   --golden FILE       final snapshot as PPM byte-equals FILE
   --write-golden FILE write the PPM instead of comparing
+  --allow-cause N     tolerate TRAP cause N (M2 kill tests: exactly
+                      the expected user-fault cause, nothing else)
 
-Always-on gates: only causes {TIMER, EXTINT, SYSCALL} ever trap,
-tl_after is always 1 (no double faults), and the trace ends in a HALT.
+Always-on gates: only causes {TIMER, EXTINT, SYSCALL} + the explicit
+allow list ever trap, tl_after is always 1 (no double faults), and
+the trace ends in a HALT.
 
 Reference-platform constants (display base, pixbuf base/size, initial
 mode) are test-side knowledge, like tests/defs.s uses - the KERNEL
@@ -92,6 +95,7 @@ def main():
     syscalls = None
     min_extint = min_timer = min_presents = 0
     golden = wgolden = None
+    allow_causes = []
     it = iter(args)
     for a in it:
         if a == "--expect":
@@ -112,6 +116,8 @@ def main():
             golden = next(it)
         elif a == "--write-golden":
             wgolden = next(it)
+        elif a == "--allow-cause":
+            allow_causes.append(int(next(it), 0))
         elif trace is None:
             trace = a
         else:
@@ -126,7 +132,7 @@ def main():
     snap = None                # (bytes, w, h, s) at last PRESENT
     causes = {}
     ok_causes = {E.CAUSES["TIMER"], E.CAUSES["EXTINT"],
-                 E.CAUSES["SYSCALL"]}
+                 E.CAUSES["SYSCALL"]} | set(allow_causes)
     halted = False
     last = None
     for r in recs:

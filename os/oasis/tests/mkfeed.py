@@ -152,6 +152,28 @@ class Feed:
         assert halted, "feed must end with halt\\n (WFI backstop rule)"
         return reads + writes + exits + 1   # + the shell's exit
 
+    def user_syscalls(self):
+        # TRAP-10s whose epc sits in the user window: the user model's
+        # fixed calls per run plus its per-char I/O (ucheck asserts
+        # the count; the shell's own syscalls have kernel epcs)
+        runs = 0
+        line = []
+        per = 0
+        for ch, to_user in self.chars:
+            if to_user:
+                per += sum(self.user_model["per_char"])
+                continue
+            if ch == '\n':
+                if "".join(line) == "run":
+                    runs += 1
+                line = []
+            elif ch == '\x08':
+                if line:
+                    line.pop()
+            else:
+                line.append(ch)
+        return runs * self.user_model["fixed"] + per
+
     def min_extint(self):
         # an event arriving >= GAP/2 after its predecessor lands with
         # the previous one fully processed (echo is ~3k cycles), so it
@@ -239,6 +261,44 @@ def feed_u_enter(f):
     f.text(t + GAP, "halt\n")
 
 
+def feed_u_echo(f):
+    # keystrokes fed while the user program runs, several lines, then
+    # quit; echo.s's burn loop guarantees TIMER traps with user epcs
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.utext(t + GAP, "hello world\n")
+    t = f.utext(t + GAP, "abc\n")
+    t = f.utext(t + GAP, "q\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_u_kill(f):
+    # a crash image: run dies instantly; the keystone is the shell
+    # coming back and WORKING - echo ok, then a clean halt
+    f.user_model = Feed.UM_CRASH
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.text(t + 2 * GAP, "echo ok\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_u_3fixed(f):
+    # hostile_sp / efault images: three fixed user syscalls, no user
+    # input, then the same kernel-survives epilogue
+    f.user_model = Feed.UM_3FIXED
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.text(t + 2 * GAP, "echo ok\n")
+    f.text(t + GAP, "halt\n")
+
+
+def feed_u_rerun(f):
+    # run, quit, run again: the image is loaded once (v0.1 A.7), so
+    # the second entry proves echo.s re-initializes from code
+    t = f.text(BOOT_MARGIN, "run\n")
+    t = f.utext(t + GAP, "q\n")
+    t = f.text(t + GAP, "run\n")
+    t = f.utext(t + GAP, "q\n")
+    f.text(t + GAP, "halt\n")
+
+
 def feed_m1_regression(f):
     # the M1 suite semantics in one session, now under MMU_EN=1: the
     # identity axiom (SABI 4.4) says conforming kernel code needs zero
@@ -283,6 +343,7 @@ def main():
     print(f"SYSCALLS={f.expected_syscalls()}")
     print(f"MIN_EXTINT={f.min_extint()}")
     print(f"LAST_CYCLE={f.events[-1][0]}")
+    print(f"USER_SYSCALLS={f.user_syscalls()}")
 
 
 if __name__ == "__main__":
