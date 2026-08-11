@@ -316,6 +316,10 @@ behavior of PLATFORM-SPEC §4 atomically at the boundary.
 
 ### 4.5 Reservations
 
+Type 5 (timer, per devspec/timer.md): no EVENT payload is defined; an
+EVENT record whose device index resolves to a type-5 device-table
+record makes the trace malformed (§2.4 class 2).
+
 Future device types define their payloads here (in this document) when
 they are added. A v1 reader encountering an EVENT whose `device` index
 does not exist in the image's device table, or whose device type it does

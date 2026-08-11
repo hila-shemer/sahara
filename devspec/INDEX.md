@@ -82,6 +82,7 @@ through T5.
 | instruction encodings | frozen in encoding.py | asm.md shows worked examples, defines nothing |
 | HID usage subset | input.md | reference |
 | device table layout | boot.md | reference |
+| timer device (type 5): registers, derived pending, ACK phase-lock, no-EVENT rule | timer.md | reference, never define |
 | virtual-time/cycle assignment rules | frozen in ISA-SPEC 4 + PLATFORM 8 | nic.md and trace.md elaborate within it |
 
 ## Cross-document dependencies (all resolved at integration)
