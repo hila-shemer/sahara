@@ -335,6 +335,7 @@ cfff4aa), comments integrated as section 1.4 and the section 1.1 scoping.
 adding a consumer is a one-line change to this list.
 
 - Oasis kernel — `os/oasis/`
+- cc compiler — `lang/cc/`
 
 **Amendment rules, now that the document is live:**
 
