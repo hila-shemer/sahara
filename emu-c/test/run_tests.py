@@ -905,12 +905,13 @@ def test_replay_reader():
         check("wellformed-event-accepted",
               p.returncode == 0 and p.stdout == halt,
               f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}")
-        expect_reject("event-device-oob", TV2_TRC + ev_rec(5, kbd),
+        expect_reject("event-device-oob", TV2_TRC + ev_rec(6, kbd),
                       b"device index")
-        # Index 4 is the timer now, and type 5 defines no EVENT payload
-        # at all: any EVENT naming it is malformed regardless of
-        # content (timer.md 5, trace.md 4.5).
-        expect_reject("event-timer-rejected", TV2_TRC + ev_rec(4, kbd),
+        # Index 5 is the timer (the wave's settled order: 4 rng,
+        # 5 timer), and type 5 defines no EVENT payload at all: any
+        # EVENT naming it is malformed regardless of content
+        # (timer.md 5, trace.md 4.5).
+        expect_reject("event-timer-rejected", TV2_TRC + ev_rec(5, kbd),
                       b"no EVENT payload")
         expect_reject("event-resize-bad-len", TV2_TRC + ev_rec(0, kbd),
                       b"32 bytes")
@@ -935,6 +936,15 @@ def test_replay_reader():
                       TV2_TRC + ev_rec(3, bytes(59)), b"1514")
         expect_reject("nic-event-over-max",
                       TV2_TRC + ev_rec(3, bytes(1515)), b"1514")
+        # RNG EVENTs (trace.md 4.6): whole u64 words, 1..128 of them.
+        p = replay(TV2_TRC + ev_rec(4, bytes(16)), "wellformed-rng.trc")
+        check("rng-event-accepted",
+              p.returncode == 0 and p.stdout == halt,
+              f"rc={p.returncode} out={p.stdout!r} err={p.stderr!r}")
+        expect_reject("rng-event-ragged",
+                      TV2_TRC + ev_rec(4, bytes(9)), b"u64 words")
+        expect_reject("rng-event-over-max",
+                      TV2_TRC + ev_rec(4, bytes(1032)), b"u64 words")
 
         # Level nesting (trace.md 5.3): filtering the level-2 trace to
         # level-1 record types must equal the level-1 trace post-META,

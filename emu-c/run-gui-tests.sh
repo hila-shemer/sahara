@@ -45,7 +45,7 @@ print("  identical: %d post-META bytes" % len(a))
 EOF
 }
 
-for sc in wfi burst multi nicseam; do
+for sc in wfi burst multi nicseam rng; do
     echo "seam scenario: $sc"
     python3 "$ASM" -o "$OUT/t_$sc.img" "gui/t_$sc.s"
     bazel-bin/gui-seam-driver "$sc" "$OUT/t_$sc.img" "$OUT/t_$sc.trc"

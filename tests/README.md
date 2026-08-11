@@ -35,9 +35,11 @@ committed generator scripts — never by running an emulator under test).
     reuses it as its EXTINT delivery counter)
   - `0x790`-`0x7b8` devorder store-queue slots (c7_dev, ORDQ_SLOTS)
   - `0x7c0` TMR_TICK_SLOT — c7_timer_* handler COUNT store / first
-    delivered cause (c7_timer_indep)
+    delivered cause (c7_timer_indep); the rng group aliases it as its
+    drain-count slot (RNG_SCRATCH; c7_rng_overflow) — safe because the
+    two groups never share a run
   - `0x7c8`-`0x7e8` event-fed tests' handler slots (EVT_FLAG /
-    EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize)
+    EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize, c7_rng_irq)
   - `0x7f0` TMR_W_SLOT, `0x7f8` TMR_AUX_SLOT — c7_timer_* aux
     (in-handler STATUS snapshot, second delivered cause)
 

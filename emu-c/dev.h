@@ -12,7 +12,8 @@
  * elaborated by devspec/display.md, input.md, nic.md; the device table
  * by devspec/boot.md). This is the register surface, the fault matrix,
  * and the EVENT-injection targets of --replay (devspec/trace.md 4-5):
- * input queues, the live display geometry, and the NIC RX queue
+ * input queues, the live display geometry, the RNG entropy queue, and
+ * the NIC RX queue
  * (nic.md 4 -- the model that closed SPEC-ISSUES 35's gap). The
  * translator that authors NIC events lives in the GUI front end
  * (gui/nic.c); headless, frames arrive only through SeDev_inject_nic
@@ -26,9 +27,13 @@ enum {
     SE_DEVIDX_KBD = 1,
     SE_DEVIDX_MOUSE = 2,
     SE_DEVIDX_NIC = 3,
-    SE_DEVIDX_TIMER = 4, /* never EVENT-fed: a timer EVENT is malformed
+    /* Wave order settled at the rng/timer landing: rng fifth, timer
+     * sixth (table records are positional with no gaps); dma takes 6
+     * when its branch lands. */
+    SE_DEVIDX_RNG = 4,
+    SE_DEVIDX_TIMER = 5, /* never EVENT-fed: a timer EVENT is malformed
                             (devspec/timer.md 5, trace.md 4.5) */
-    SE_DEVIDX_COUNT = 5,
+    SE_DEVIDX_COUNT = 6,
 };
 
 /* Input event FIFO (input.md 4.1): depth exactly 256 on the reference
@@ -54,6 +59,16 @@ typedef struct SeInputQ {
  * buffer at exposure, so the ring keeps only what RX_POP still needs. */
 #define SE_NIC_QDEPTH 64u
 
+/* RNG entropy FIFO (rng.md 4.1): depth exactly 256 u64 words, spec-
+ * fixed (not a device-table param), so STATUS reads 0-256 and the
+ * truncate-to-fit acceptance arithmetic is identical everywhere. */
+#define SE_RNG_QDEPTH 256u
+
+/* EVENT payload word-count bound (trace.md 4.6): 1..128 words, so a
+ * payload is at most 1024 bytes -- under the SE_NIC_FRAME_MAX inline
+ * cap of SeEvRec by design. */
+#define SE_RNG_EV_WORDS_MAX 128u
+
 typedef struct SeNicRxQ {
     uint8_t frame[SE_NIC_QDEPTH][SE_NIC_FRAME_MAX];
     uint16_t len[SE_NIC_QDEPTH];
@@ -71,6 +86,13 @@ typedef struct SeDev {
     SeInputQ kbd, mouse;
     uint64_t nic_rx_len; /* exposed RX frame length; 0 = none */
     SeNicRxQ nic_rxq;
+    /* RNG (rng.md 2): entropy FIFO + CTRL bits 1:0 (MODE, IE) + the
+     * SplitMix64 state. All zero at reset: QUEUE mode, IE off, seed 0. */
+    uint64_t rng_q[SE_RNG_QDEPTH];
+    uint32_t rng_head;  /* index of the oldest word */
+    uint32_t rng_count; /* 0..SE_RNG_QDEPTH */
+    uint64_t rng_ctrl;
+    uint64_t rng_prng_state;
     /* Timer (devspec/timer.md 4): guest-visible state is exactly
      * {period, next_fire}; next_fire lives in the full cycle-counter
      * domain (timer.md 3) so W + N and the ACK advance are exact.
@@ -126,6 +148,14 @@ void SeDev_inject_resize(SeDev *d, uint64_t width, uint64_t height,
 RWC_WARN_UNUSED bool SeDev_inject_nic(SeDev *d, SeMem *m,
                                       const uint8_t *frame, uint16_t len);
 
+/* Apply one RNG arrival (rng.md 4.2) at a boundary: enqueue
+ * min(nwords, 256 - depth) words from the front and return how many
+ * were accepted -- the caller records EXACTLY that prefix, and records
+ * nothing at all when it returns 0 (trace.md 4.6). Acceptance is the
+ * model's own recomputation, live and replay alike (SPEC-ISSUES 40). */
+RWC_WARN_UNUSED uint32_t SeDev_inject_rng(SeDev *d, const uint64_t *words,
+                                          uint32_t nwords);
+
 /* Result of a 64-bit register access: fault = DEVERR (wrong direction,
  * unlisted offset, bad doorbell value, empty-pop -- the caller supplies
  * baddr and delivers). A faulting access has no device effect. */
@@ -153,10 +183,13 @@ void SeDev_timer_tick(SeDev *d, se_u128 cycle);
 RWC_WARN_UNUSED bool SeDev_ext_pending(const SeDev *d);
 
 /* Write the device table at PA 0x0800 before reset (devspec/boot.md 3,
- * 5): header, one RAM region of ram_region_len bytes, and the five
- * reference device records (types 1-4 per boot.md 5, type 5 per
- * timer.md 1). With ram_region_len = 0x0F00_0000 the bytes equal
- * timer.md vector V1-T exactly (asserted by test_dev.c). */
+ * 5): header, one RAM region of ram_region_len bytes, and the six
+ * reference device records (types 1-4 per boot.md 5, then the type-7
+ * rng record per rng.md 1 and the type-5 timer record per timer.md 1
+ * -- the wave's settled table order). With ram_region_len =
+ * 0x0F00_0000 the bytes equal timer.md vector V1-T == rng.md vector
+ * V-T exactly (asserted by test_dev.c; boot.md V1 itself stays
+ * frozen). */
 void se_plat_write_devtable(SeMem *m, uint64_t ram_region_len);
 
 #endif /* SE_DEV_H */

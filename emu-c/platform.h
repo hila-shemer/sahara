@@ -8,12 +8,14 @@
  * by devspec/boot.md: RAM region 0 is [0, 0x0F00_0000) -- 240 MB, ending
  * exactly where the device windows begin ("256 MB" is the address budget
  * below the pixel buffer, devspec SPEC-ISSUES 1); the five register
- * windows and the two NIC buffers are contiguous above it;
- * [0x0F07_0000, 0x1000_0000) is declared in no region and traps DEVERR
- * (boot.md BOOT-15), as does everything past the pixel buffer window.
- * The timer window (devspec/timer.md 1) is carved from what used to be
- * the hole's first 64 KB. SPEC-ISSUES.md entry 32 records the adoption
- * history. */
+ * windows and the two NIC buffers are contiguous above it -- the timer
+ * window (devspec/timer.md 1) is carved from what used to be the
+ * hole's first 64 KB -- and the RNG window sits apart at 0x0F08_0000
+ * (devspec/rng.md 1: 0x0F07 stays free for the wave's dma). The two
+ * gaps -- [0x0F07_0000, 0x0F08_0000) and [0x0F09_0000, 0x1000_0000) --
+ * are declared in no region and trap DEVERR (boot.md BOOT-15), as does
+ * everything past the pixel buffer window. SPEC-ISSUES.md entry 32
+ * records the adoption history. */
 
 #define SE_PLAT_RAM_MAX ((se_u128)0x0F000000u) /* region 0 length cap */
 #define SE_PLAT_DISPLAY_BASE ((se_u128)0x0F000000u)
@@ -23,7 +25,9 @@
 #define SE_PLAT_NIC_TXBUF ((se_u128)0x0F040000u)
 #define SE_PLAT_NIC_RXBUF ((se_u128)0x0F050000u)
 #define SE_PLAT_TIMER_BASE ((se_u128)0x0F060000u)
-#define SE_PLAT_DEV_END ((se_u128)0x0F070000u)
+#define SE_PLAT_DEV_END ((se_u128)0x0F070000u) /* end of the contiguous run */
+#define SE_PLAT_RNG_BASE ((se_u128)0x0F080000u)
+#define SE_PLAT_RNG_END ((se_u128)0x0F090000u)
 #define SE_PLAT_PIXBUF_BASE ((se_u128)0x10000000u)
 #define SE_PLAT_PIXBUF_SIZE ((se_u128)0x01000000u) /* 16 MB, display.md 1 */
 
@@ -43,6 +47,7 @@ typedef enum SePlatSpace {
     SE_SPACE_MOUSE,   /* mouse registers */
     SE_SPACE_NIC,     /* NIC registers */
     SE_SPACE_TIMER,   /* timer registers (devspec/timer.md) */
+    SE_SPACE_RNG,     /* RNG registers (devspec/rng.md) */
     SE_SPACE_BUF,     /* memory-like device space: NIC TX/RX, pixels */
     SE_SPACE_HOLE,    /* in no region and no window: always DEVERR */
 } SePlatSpace;
@@ -63,6 +68,8 @@ RWC_WARN_UNUSED static inline SePlatSpace se_plat_classify(se_u128 pa)
         return SE_SPACE_BUF;
     if (pa < SE_PLAT_DEV_END)
         return SE_SPACE_TIMER;
+    if (pa >= SE_PLAT_RNG_BASE && pa < SE_PLAT_RNG_END)
+        return SE_SPACE_RNG;
     if (pa >= SE_PLAT_PIXBUF_BASE &&
         pa < SE_PLAT_PIXBUF_BASE + SE_PLAT_PIXBUF_SIZE)
         return SE_SPACE_BUF;

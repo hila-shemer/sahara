@@ -38,6 +38,9 @@ NIC_WINDOW_SIZE = 0x30000       # registers + TX buf + RX buf = 192 KB
 TIMER_BASE = 0x0F060000         # devspec/timer.md 1, reference default
 TIMER_SIZE = 0x10000
 
+RNG_BASE = 0x0F080000           # devspec/rng.md 1; 0x0F07 stays a
+RNG_SIZE = 0x10000              # hole for the wave's dma
+
 PIXBUF_BASE = 0x10000000
 PIXBUF_SIZE = 0x1000000         # 16 MB (devspec/display.md 1, reference default)
 
@@ -201,6 +204,96 @@ class Input(mem.Device):
         if not dropped:
             self.queue.append(int.from_bytes(word, "little"))
         return word + bytes([1 if dropped else 0])
+
+
+class Rng(mem.Device):
+    """RNG register window (devspec/rng.md): DATA (pop / PRNG output),
+    STATUS (queue depth), CTRL (bit 0 MODE, bit 1 IE), SEED (W).
+
+    The entropy queue is fed only by EVENT records; in QUEUE mode an
+    empty pop is DEVERR (rng.md 4.1 rule 4 — every u64 is a legal
+    entropy word, so no in-band sentinel exists; the input-device
+    all-ones sentinel deliberately does not apply). PRNG mode is pure
+    guest-selected architectural state: MODE/SEED move only via
+    DEVW-traced stores, and nothing here ever falls back from queue to
+    PRNG or consults the host (rng.md 5.3)."""
+
+    OFF_DATA = 0x00
+    OFF_STATUS = 0x08
+    OFF_CTRL = 0x10
+    OFF_SEED = 0x18
+    QUEUE_DEPTH = 256           # spec-fixed, not a device-table param
+    CTRL_MODE = 1
+    CTRL_IE = 2
+
+    def __init__(self, base=RNG_BASE, size=RNG_SIZE):
+        super().__init__(base, size)
+        self.queue = []
+        self.ctrl = 0
+        self.prng_state = 0
+
+    def _splitmix64(self):
+        """rng.md 5.1, normative; every step masked to 64 bits."""
+        self.prng_state = (self.prng_state + 0x9E3779B97F4A7C15) & MASK64
+        z = self.prng_state
+        z ^= z >> 30
+        z = (z * 0xBF58476D1CE4E5B9) & MASK64
+        z ^= z >> 27
+        z = (z * 0x94D049BB133111EB) & MASK64
+        z ^= z >> 31
+        return z
+
+    def load(self, off, size):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_DATA:
+            if self.ctrl & self.CTRL_MODE:
+                return self._splitmix64()   # queue untouched (rng.md 5.2)
+            if not self.queue:
+                raise mem.AccessError(self.base + off)      # E6
+            return self.queue.pop(0)
+        if off == self.OFF_STATUS:
+            return len(self.queue)          # mode-independent depth
+        if off == self.OFF_CTRL:
+            return self.ctrl
+        # SEED is write-only (E2); everything else is unlisted (E1).
+        raise mem.AccessError(self.base + off)
+
+    def store(self, off, size, val):
+        if size != 8:
+            raise mem.AccessError(self.base + off)          # E3
+        if off == self.OFF_CTRL:
+            if val & ~3:
+                raise mem.AccessError(self.base + off)      # E5
+            self.ctrl = val
+            return
+        if off == self.OFF_SEED:
+            self.prng_state = val & MASK64  # stream restarts (rng.md 5.1)
+            return
+        raise mem.AccessError(self.base + off)              # E2 / E1
+
+    def pending(self):
+        # IE-qualified level (rng.md 6): reset-off keeps the device
+        # invisible to type-7-unaware kernels.
+        return bool(self.ctrl & self.CTRL_IE) and bool(self.queue)
+
+    def event(self, payload):
+        """rng.md 4.2, trace.md 4.6: N LE u64 words, 1 <= N <= 128.
+        Truncate-to-fit against the 256 cap, recomputed here on every
+        apply (live and replay alike, SPEC-ISSUES 40); the returned
+        bytes are the ACCEPTED prefix — what the caller records, and
+        b\"\" means record nothing at all."""
+        if (len(payload) == 0 or len(payload) % 8 != 0
+                or len(payload) > 8 * 128):
+            raise ValueError(
+                f"RNG EVENT payload length {len(payload)}, want 8*N "
+                f"with 1 <= N <= 128 (trace.md 4.6)")
+        space = self.QUEUE_DEPTH - len(self.queue)
+        take = min(len(payload) // 8, space)
+        for i in range(take):
+            self.queue.append(
+                int.from_bytes(payload[8 * i:8 * i + 8], "little"))
+        return payload[:8 * take]
 
 
 class Nic(mem.Device):

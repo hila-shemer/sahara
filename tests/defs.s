@@ -88,6 +88,9 @@
         # NIC window sub-regions (PLATFORM-SPEC section 7)
         .equ DEV_NIC_TXBUF, 0x0F040000   # nic base + 0x1_0000
         .equ DEV_NIC_RXBUF, 0x0F050000   # nic base + 0x2_0000
+        # RNG window (devspec/rng.md 1: type 7 at 0x0F08_0000;
+        # 0x0F07 stays a DEVERR hole for the wave's dma)
+        .equ DEV_RNG_BASE, 0x0F080000
         # devorder RAM slots (c7_dev; tests/README.md)
         .equ ORDQ_SLOTS, 0x790
         # event-fed tests' handler slots (c7_kbd / c7_resize /
@@ -95,6 +98,9 @@
         .equ EVT_FLAG, 0x7C8    # handler-done flag
         .equ EVT_COUNT, 0x7D0   # handler drain count
         .equ EVT_SLOTS, 0x7D8   # popped words / geometry (3 slots)
+        # rng drain-count slot (c7_rng_overflow; tests/README.md;
+        # aliases TMR_TICK_SLOT — the groups never share a run)
+        .equ RNG_SCRATCH, 0x7C0
         # timer tests' scratch slots (c7_timer_*; tests/README.md;
         # TIMER_COUNT_SLOT doubles as their delivery counter)
         .equ TMR_TICK_SLOT, 0x7C0  # handler COUNT store / 1st cause

@@ -94,17 +94,20 @@ def main(argv):
                             0x10000)
     nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac, nic_rx)
     timer = devices.Timer()
-    for dev in (display, kbd, mouse, nic, timer, pixbuf, nic_tx, nic_rx):
+    rng = devices.Rng()
+    for dev in (display, kbd, mouse, nic, timer, rng, pixbuf, nic_tx,
+                nic_rx):
         phys.add_device(dev)
 
     # trace.md 4/boot.md V1: EVENT device indices are 0-based positions
     # among the device-table *entries*, not phys.devices (which also
     # carries the pixel/TX/RX buffer routing windows) — PROBLEMS.md P12.
-    # The timer (table index 4) is deliberately absent: type 5 defines
-    # no EVENT payload, so an index-4 EVENT must hit the
+    # rng is position 4 (the wave's settled order; dma takes 6 when its
+    # branch lands). The timer (table index 5) is deliberately absent:
+    # type 5 defines no EVENT payload, so an index-5 EVENT must hit the
     # nonexistent-device fatal in Machine.process_events (timer.md 5,
     # trace.md 4.5) — matching emu-c's malformed-trace rejection.
-    event_devices = [display, kbd, mouse, nic]
+    event_devices = [display, kbd, mouse, nic, rng]
 
     # PLATFORM-SPEC 2 device table: table entries advertise the
     # register-window base/size the table type owns (params per type),
@@ -115,6 +118,11 @@ def main(argv):
         (2, devices.KBD_BASE, devices.KBD_SIZE, (0, 0, 0, 0)),
         (3, devices.MOUSE_BASE, devices.MOUSE_SIZE, (0, 0, 0, 0)),
         (4, devices.NIC_BASE, devices.NIC_WINDOW_SIZE, (mac, 0, 0, 0)),
+        # type 7 rng, params all zero ("0 = v1 behavior", rng.md 1),
+        # then the type-5 timer: byte-for-byte the timer.md V1-T ==
+        # rng.md V-T table together with the rows above
+        # (device_count = 6).
+        (7, devices.RNG_BASE, devices.RNG_SIZE, (0, 0, 0, 0)),
         (5, devices.TIMER_BASE, devices.TIMER_SIZE, (0, 0, 0, 0)),
     ]
     # P8: the table's RAM region must match what PhysMap actually

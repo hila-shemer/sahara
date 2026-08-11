@@ -149,7 +149,8 @@ static SeEvRec *ev_grow(SeEvRec *evs, uint64_t *cap, uint64_t count)
 
 /* An EVENT record's device index and inner payload, validated per
  * devspec/trace.md 4 against the reference device table (index 0
- * display, 1 kbd, 2 mouse, 3 nic -- the boot.md V1 order): unknown
+ * display, 1 kbd, 2 mouse, 3 nic, 4 rng, 5 timer -- the wave's settled
+ * table order, timer.md V1-T == rng.md V-T): unknown
  * index or a payload violating its device's encoding is a malformed
  * trace (4.5 / 2.4 class 2). The drop flag VALUE is not checked --
  * replay recomputes it (5.4) -- but its reserved bits are. inner is
@@ -201,6 +202,15 @@ static void validate_event(uint64_t off, uint64_t device, uint32_t inner,
         if (inner < SE_NIC_FRAME_MIN || inner > SE_NIC_FRAME_MAX)
             malformed(off, "NIC frame payload outside [60, 1514] "
                            "(nic.md 3.1)");
+        return;
+    case SE_DEVIDX_RNG:
+        /* N whole u64 words, 1..128 (trace.md 4.6). Content is
+         * entropy -- nothing to validate; acceptance is recomputed at
+         * apply time, never trusted from the feed. */
+        if (inner == 0u || inner % 8u != 0u ||
+            inner > 8u * SE_RNG_EV_WORDS_MAX)
+            malformed(off, "RNG payload not 1..128 whole u64 words "
+                           "(trace.md 4.6)");
         return;
     case SE_DEVIDX_TIMER:
         /* The timer is a pure function of guest DEVW writes and the
