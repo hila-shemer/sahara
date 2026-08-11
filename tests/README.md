@@ -35,7 +35,15 @@ committed generator scripts — never by running an emulator under test).
   - `0x790`-`0x7b8` devorder store-queue slots (c7_dev, ORDQ_SLOTS)
   - `0x7c8`-`0x7e8` event-fed tests' handler slots (EVT_FLAG /
     EVT_COUNT / EVT_SLOTS; c7_kbd, c7_resize)
-  - `0x7c0`, `0x7f0`-`0x7f8` free for later groups
+  - `0x7c0` DMA handler-entry cycle (DMA_CYCLE_SLOT; dma_irq_wfi)
+  - `0x7f0` DMA EXTINT delivery count (DMA_COUNT_SLOT; dma_err,
+    dma_irq_wfi)
+  - `0x7f8` free for later groups
+
+  The dma_* tests additionally use plain RAM well above the images for
+  descriptors and transfer buffers (0x10_0000 for descriptors,
+  0x20_0000+ sources, 0x30_0000+ destinations — fresh RAM reads zero,
+  so no image segments are needed there).
 
   Device window base addresses (PLATFORM-SPEC 1) are also in defs.s
   as `DEV_*_BASE`; everything at 0x0F00_0000 and up is device space.

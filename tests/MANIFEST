@@ -31,3 +31,13 @@ c7_dev_ordq c7_dev.s level=2 --check-devorder 4
 c7_kbd c7_kbd.s level=2 events=c7_kbd.py
 c7_kbd_ovf c7_kbd_ovf.s level=2 events=c7_kbd_ovf.py
 c7_resize c7_resize.s level=2 events=c7_resize.py
+# Wave-4 DMA engine (devspec/dma.md). All cycle-driven — no events=
+# line — so every dma_* test runs under difftest today (no REPLAY
+# gate): completion is pure arithmetic on the doorbell DEVW's cycle.
+dma_regs dma_regs.s level=2
+dma_copy dma_copy.s
+dma_fill dma_fill.s
+dma_err dma_err.s
+dma_boundary dma_boundary.s
+dma_irq_wfi dma_irq_wfi.s
+dma_boot dma_boot.s

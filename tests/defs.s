@@ -87,6 +87,10 @@
         # NIC window sub-regions (PLATFORM-SPEC section 7)
         .equ DEV_NIC_TXBUF, 0x0F040000   # nic base + 0x1_0000
         .equ DEV_NIC_RXBUF, 0x0F050000   # nic base + 0x2_0000
+        # DMA engine window (devspec/dma.md section 1; the base
+        # is spec-pinned -- only the device-table INDEX is
+        # merge-variant, which is why dma_* tests scan by type)
+        .equ DEV_DMA_BASE, 0x0F070000
         # devorder RAM slots (c7_dev; tests/README.md)
         .equ ORDQ_SLOTS, 0x790
         # event-fed tests' handler slots (c7_kbd / c7_resize /
@@ -94,6 +98,10 @@
         .equ EVT_FLAG, 0x7C8    # handler-done flag
         .equ EVT_COUNT, 0x7D0   # handler drain count
         .equ EVT_SLOTS, 0x7D8   # popped words / geometry (3 slots)
+        # dma tests' handler slots (dma_err / dma_irq_wfi;
+        # tests/README.md)
+        .equ DMA_CYCLE_SLOT, 0x7C0  # handler-entry cycle sreg
+        .equ DMA_COUNT_SLOT, 0x7F0  # EXTINT delivery count
 
         # raw instruction words (built from encoding.py field
         # positions; the assembler refuses to emit these, which
