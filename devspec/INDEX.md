@@ -63,6 +63,16 @@ semantics and what byte-identical quantifies over per level, and trace-q:
 CLI, exit codes, line grammar, .sym resolution, disassembly canonical
 form. T-01..28, vectors TV-1..TV-10 incl. a complete decoded trace.
 
+**dma.md** — The DMA engine (wave-4 accelerator, device type 6): 64-byte
+descriptor format and the opcode registry future descriptor-consuming
+accelerators append to (owner), COPY/FILL with memmove overlap
+semantics, descriptor latch-at-doorbell vs source-sample-at-completion,
+the spec-pinned cycle-cost model C_done = C_doorbell + 8 + LEN/8
+mirrored in CAPS, two-class errors (access DEVERR E1–E9 vs descriptor
+STATUS codes BAD_OP/BAD_FORMAT/BAD_ALIGN/BAD_RANGE), zero trace records
+for transfers (replay reproduces them from the doorbell DEVW alone),
+WFI wake at exactly C_done. DMA-C-01..24, vectors V1–V6.
+
 **asm.md** — The assembler: CLI and determinism contract, lexical rules
 and reserved names, full EBNF, 128-bit expression semantics with
 CONST/ADDR kinds and label-arithmetic legality, per-family assembly rules
@@ -83,6 +93,7 @@ through T5.
 | HID usage subset | input.md | reference |
 | device table layout | boot.md | reference |
 | virtual-time/cycle assignment rules | frozen in ISA-SPEC 4 + PLATFORM 8 | nic.md and trace.md elaborate within it |
+| accelerator descriptor format + opcode registry | dma.md | reference, never define; future accelerator specs append registry rows |
 
 ## Cross-document dependencies (all resolved at integration)
 
