@@ -93,13 +93,16 @@ def main(argv):
     nic_rx = devices.Buffer(devices.NIC_BASE + devices.NIC_RX_OFFSET,
                             0x10000)
     nic = devices.Nic(devices.NIC_BASE, devices.NIC_REG_SIZE, mac, nic_rx)
-    for dev in (display, kbd, mouse, nic, pixbuf, nic_tx, nic_rx):
+    rng = devices.Rng()
+    for dev in (display, kbd, mouse, nic, rng, pixbuf, nic_tx, nic_rx):
         phys.add_device(dev)
 
     # trace.md 4/boot.md V1: EVENT device indices are 0-based positions
     # among the device-table *entries*, not phys.devices (which also
     # carries the pixel/TX/RX buffer routing windows) — PROBLEMS.md P12.
-    event_devices = [display, kbd, mouse, nic]
+    # rng is position 4. WAVE-RENUMBER: becomes 6 when timer/dma records
+    # land ahead of this one.
+    event_devices = [display, kbd, mouse, nic, rng]
 
     # PLATFORM-SPEC 2 device table: table entries advertise the
     # register-window base/size the table type owns (params per type),
@@ -110,6 +113,10 @@ def main(argv):
         (2, devices.KBD_BASE, devices.KBD_SIZE, (0, 0, 0, 0)),
         (3, devices.MOUSE_BASE, devices.MOUSE_SIZE, (0, 0, 0, 0)),
         (4, devices.NIC_BASE, devices.NIC_WINDOW_SIZE, (mac, 0, 0, 0)),
+        # type 7 rng, params all zero ("0 = v1 behavior", rng.md 1);
+        # byte-for-byte the rng.md V-T table together with the rows
+        # above (device_count = 5 on this branch).
+        (7, devices.RNG_BASE, devices.RNG_SIZE, (0, 0, 0, 0)),
     ]
     # P8: the table's RAM region must match what PhysMap actually
     # routes as RAM — the dev_base-clamped length, not the raw --ram
