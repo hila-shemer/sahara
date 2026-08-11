@@ -36,6 +36,16 @@ start:
         li r21, STATUS_S + STATUS_IE
         mtsr status, r21          # interrupts on
 
+        # -- 0: TMR-02 equivalence: COUNT is the same counter MFSR
+        # sreg-8 reads — adjacent reads differ by exactly the 1-cycle
+        # delta between the two instructions (timer.md 4.1)
+        li r27, 0
+        mfsr r19, cycle           # x (= this insn's cycle)
+        lds.64 r22, [r25]         # COUNT at x+1
+        sub.64 r22, r22, r19
+        cmpeq p1, r22, 1
+        (!p1) b fail
+
         # -- 1: arm N=100; W = COUNT + 1 (arming store is the very
         # next instruction after the COUNT load); PERIOD reads back
         li r27, 1
