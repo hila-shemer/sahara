@@ -662,8 +662,20 @@ aggregate work out of m2 to make room, which this order recommends
 against (both are DOOM-critical and libc-critical respectively).
 Owner picks; the amendment text records the pick.
 
+**RESOLVED at owner review (2026-08-15): varargs moves to cc-m3, still
+gating DOOM's printf family; the libc v0.2 amendment names the
+capability (varargs), not a milestone number, as printf's trigger.
+Implementation sketch ratified for m3: callers never change (variadic
+and normal calls are indistinguishable — SABI's uniform 16-byte slots
+at [sp+0] for args 8+); a varargs callee gains one new prologue shape
+that unconditionally spills incoming r0-r7 into frame slots contiguous
+with the caller's stack-arg slots, making all arguments one memory
+run; va_list is a pointer, va_arg is load-and-advance-16. abicheck
+learns the third prologue shape then, not now.**
+
 Sizing expectation: cc.py grows ~1,200–1,800 lines (to ~2,500–3,000);
 spec delta ~450–600 lines; tests ~60–70 new cases plus the generator
 (~250 lines) and ~150 lines of harness/abicheck growth. One branch,
 one milestone. If you find yourself far outside this envelope, stop
-and reread decision 12 and risk 5 before writing more code.
+and reread decision 12 and risk 5 before writing more code. (Sizing
+envelope approved at owner review, 2026-08-15.)
