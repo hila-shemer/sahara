@@ -39,6 +39,13 @@ EVENTs plus one EXEC per polled instruction. Cheap at fake-clock
 pacing; a multi-MB image at `--hz 0` live writes a big trace.
 Accepted — never hack the trace format around it.
 
+*Untethered note:* `--untethered` (SPEC-ISSUES 44) composes with
+netboot — the embedded ROM still materializes and boots, but with no
+trace for the file to sit next to it falls back to
+`untethered-<epoch>.rom.img`. The trace-contains-the-image property
+above is forfeited with the rest of replayability; that is the
+opt-out working as ruled, not a netboot special case.
+
 ## 2. Packet formats
 
 Every SBP packet is one UDP datagram beginning:

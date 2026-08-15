@@ -5,14 +5,15 @@
  *   sahara-gui [IMAGE] [--rom PATH] [--serve-image PATH]
  *              [--trace OUT.trc] [--trace-level {0,1,2}]
  *              [--hz N] [--ram BYTES] [--maxcycles N] [--script FILE]
- *              [--nic host|off|fake]
+ *              [--nic host|off|fake] [--untethered]
  *
  * No IMAGE boots the embedded netboot ROM (rom/netboot/), which
  * fetches a boot image over SBP/1 from the local plane's 10.0.2.2:69
  * - the file --serve-image names. Mechanism is materialize-then-load:
  * the ROM bytes are written next to the trace as
- * <trace-basename>.rom.img and loaded through the ordinary image
- * loader, so META image_sha256, --replay validation and the printed
+ * <trace-basename>.rom.img (untethered-<epoch>.rom.img under
+ * --untethered, which has no trace) and loaded through the ordinary
+ * image loader, so META image_sha256, --replay validation and the printed
  * replay command work unchanged and the (trace, rom) pair is
  * self-contained on disk. --rom PATH substitutes a ROM file; IMAGE
  * plus --rom together is a usage error. The frozen headless CLI is
@@ -32,7 +33,13 @@
  * by construction.
  * Recording is mandatory (default session-<timestamp>.trc, level 0);
  * on exit the exact reproducing `sahara-emu --replay` command is
- * printed. This binary is the only component that reads real time,
+ * printed. --untethered is the one owner-sanctioned opt-out
+ * (untethered-mode-prompt.md, SPEC-ISSUES 44): the recorder is never
+ * attached (g.tr.f stays NULL, the same off switch headless uses
+ * without --trace), so no trace, no META, no replay command - the
+ * session is announced as unreproducible at startup AND exit, and
+ * combining it with --trace/--trace-level is a startup error.
+ * This binary is the only component that reads real time,
  * and only to timestamp events into virtual cycles: the wall<->cycle
  * map is a pacing heuristic, never semantics.
  *
@@ -494,12 +501,21 @@ static void meta_record(SeTrace *tr, const char *image_arg,
     SeTrace_meta(tr, buf, (uint32_t)n);
 }
 
+/* Decision 3 of the untethered work order: loud, twice. The banner is
+ * one fixed line on stderr at startup and again at exit, so nobody
+ * discovers after the fact that a session left no artifact. */
+static void untethered_banner(void)
+{
+    fprintf(stderr, "untethered session: not recorded, not replayable\n");
+}
+
 int main(int argc, char **argv)
 {
     const char *image = NULL, *trace_path = NULL, *script_path = NULL;
     const char *nic_arg = NULL, *rom_path = NULL, *serve_path = NULL;
     uint64_t maxcycles = 0, ram = DEFAULT_RAM, hz = DEFAULT_HZ;
     int level = 0; /* the cheapest legal level (SPEC-ISSUES 39) */
+    bool untethered = false, level_arg = false;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -510,6 +526,9 @@ int main(int argc, char **argv)
             if (v > 2u)
                 die("--trace-level must be 0..2");
             level = (int)v;
+            level_arg = true;
+        } else if (strcmp(a, "--untethered") == 0) {
+            untethered = true;
         } else if (strcmp(a, "--hz") == 0 && i + 1 < argc) {
             hz = parse_u64(argv[++i], "--hz");
         } else if (strcmp(a, "--maxcycles") == 0 && i + 1 < argc) {
@@ -537,6 +556,12 @@ int main(int argc, char **argv)
         die("usage: IMAGE and --rom are mutually exclusive (no IMAGE "
             "boots the embedded netboot ROM; --rom substitutes a ROM "
             "file)");
+    /* Not a silent override in either direction (work-order decision
+     * 2): asking to record and to not-record is a contradiction the
+     * user resolves, not us. */
+    if (untethered && (trace_path || level_arg))
+        die("--untethered never records: it cannot be combined with "
+            "--trace/--trace-level (drop them, or drop --untethered)");
     /* Mode-dependent default: bridging is the point of a live
      * session; the scripted gate is socket-free by construction, so
      * host is not even accepted there. */
@@ -570,9 +595,11 @@ int main(int argc, char **argv)
 
     /* Recording is mandatory: it is the session's source of truth.
      * Resolved before the image because the materialized ROM's name
-     * derives from the trace path. */
+     * derives from the trace path. --untethered never records: the
+     * path stays NULL (the recorder below never attaches) and the
+     * materialized ROM falls back to its own timestamp name. */
     char default_trace[64];
-    if (!trace_path) {
+    if (!untethered && !trace_path) {
         snprintf(default_trace, sizeof default_trace,
                  "session-%llu.trc",
                  (unsigned long long)time(NULL));
@@ -589,11 +616,24 @@ int main(int argc, char **argv)
     if (!image && rom_path) {
         image = rom_path;
     } else if (!image) {
-        size_t tl = strlen(trace_path);
-        if (tl >= 4u && strcmp(trace_path + tl - 4u, ".trc") == 0)
+        /* Under --untethered there is no trace for the ROM to sit
+         * next to; fall back to the same timestamp convention
+         * (untethered-<epoch>.rom.img) so the one artifact the
+         * session must leave - the bytes the loader hashed - is
+         * still findable and its provenance is in the name. */
+        char untethered_base[64];
+        const char *rom_base = trace_path;
+        if (!rom_base) {
+            snprintf(untethered_base, sizeof untethered_base,
+                     "untethered-%llu",
+                     (unsigned long long)time(NULL));
+            rom_base = untethered_base;
+        }
+        size_t tl = strlen(rom_base);
+        if (tl >= 4u && strcmp(rom_base + tl - 4u, ".trc") == 0)
             tl -= 4u;
         int n = snprintf(rom_file, sizeof rom_file, "%.*s.rom.img",
-                         (int)tl, trace_path);
+                         (int)tl, rom_base);
         if (n < 0 || (size_t)n >= sizeof rom_file)
             die("trace path too long for the materialized ROM name");
         FILE *rf = fopen(rom_file, "wb");
@@ -620,14 +660,24 @@ int main(int argc, char **argv)
     char sha_hex[65];
     for (unsigned i = 0; i < 32u; i++)
         snprintf(sha_hex + 2u * i, 3u, "%02x", sha[i]);
-    g.tr.level = level;
-    g.tr.f = fopen(trace_path, "wb");
-    if (!g.tr.f)
-        die("cannot open trace output file");
-    /* Level 0 at 2 MHz is still one EXEC per instruction: give stdio a
-     * real buffer so fwrite-per-record never gates throughput. */
-    setvbuf(g.tr.f, NULL, _IOFBF, 1u << 20);
-    meta_record(&g.tr, image, sha_hex, level);
+    /* --untethered is the sanctioned opt-out of mandatory recording:
+     * g.tr.f stays NULL, which is the recorder's existing off switch
+     * (every SeTrace_* call no-ops on it, exactly
+     * headless-without---trace), so nothing is attached and nothing is
+     * emitted on the hot path. */
+    if (untethered) {
+        untethered_banner();
+    } else {
+        g.tr.level = level;
+        g.tr.f = fopen(trace_path, "wb");
+        if (!g.tr.f)
+            die("cannot open trace output file");
+        /* Level 0 at 2 MHz is still one EXEC per instruction: give
+         * stdio a real buffer so fwrite-per-record never gates
+         * throughput. */
+        setvbuf(g.tr.f, NULL, _IOFBF, 1u << 20);
+        meta_record(&g.tr, image, sha_hex, level);
+    }
 
     if (script_path) {
         g.script_mode = true;
@@ -776,15 +826,22 @@ int main(int argc, char **argv)
 
     /* Finalize: flush the trace, then print the exact replaying
      * invocation -- --maxcycles pins the endpoint so a session ended
-     * by window close terminates under replay too. */
-    if (fclose(g.tr.f) != 0)
-        die("error closing trace file");
-    uint64_t end_cycle = se_lo64(g.cpu->cycle);
-    if (end_cycle == 0u)
-        end_cycle = 1u; /* --maxcycles 0 means unlimited */
-    printf("sahara-emu %s --replay %s --trace %s.replay.trc "
-           "--trace-level %d --ram %" PRIu64 " --maxcycles %" PRIu64 "\n",
-           image, trace_path, trace_path, level, ram, end_cycle);
+     * by window close terminates under replay too. Untethered has
+     * nothing to finalize and nothing that could replay: it repeats
+     * the banner instead, the second half of the loud-twice rule. */
+    if (untethered) {
+        untethered_banner();
+    } else {
+        if (fclose(g.tr.f) != 0)
+            die("error closing trace file");
+        uint64_t end_cycle = se_lo64(g.cpu->cycle);
+        if (end_cycle == 0u)
+            end_cycle = 1u; /* --maxcycles 0 means unlimited */
+        printf("sahara-emu %s --replay %s --trace %s.replay.trc "
+               "--trace-level %d --ram %" PRIu64 " --maxcycles %" PRIu64
+               "\n",
+               image, trace_path, trace_path, level, ram, end_cycle);
+    }
 
     SDL_DestroyTexture(g.tex);
     SDL_DestroyRenderer(g.ren);

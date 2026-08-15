@@ -104,6 +104,65 @@ if SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui "$OUT/t_nic.img" \
     echo "ERROR: --script --nic host was accepted"; exit 1
 fi
 
+echo "untethered session gate (--untethered)"
+# untethered-mode-prompt.md decisions 2/3: the recorder is never
+# attached, so a fresh cwd stays empty (not even the session-*.trc
+# default), stderr carries the banner exactly twice (startup + exit),
+# and stdout has the guest result but no replay command - there is
+# nothing to replay.
+ROOT="$PWD"
+UDIR="$OUT/untethered.d"
+rm -rf "$UDIR"
+mkdir "$UDIR"
+(cd "$UDIR" && SDL_VIDEODRIVER=dummy "$ROOT/bazel-bin/sahara-gui" \
+    "$ROOT/$OUT/demo.img" --script "$ROOT/gui/session.script" \
+    --untethered > untethered.out 2> untethered.err)
+grep -qx "$PASS_LINE" "$UDIR/untethered.out"
+test "$(grep -cx 'untethered session: not recorded, not replayable' \
+    "$UDIR/untethered.err")" = 2
+if grep -q '^sahara-emu ' "$UDIR/untethered.out"; then
+    echo "ERROR: untethered session printed a replay command"; exit 1
+fi
+if ls "$UDIR"/*.trc >/dev/null 2>&1; then
+    echo "ERROR: untethered session left a trace file"; exit 1
+fi
+
+# Recording and not-recording at once is a contradiction the user
+# resolves: loud startup error, never a silent override (decision 2).
+for extra in "--trace $OUT/conflict.trc" "--trace-level 1"; do
+    if SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui "$OUT/demo.img" \
+        --script gui/session.script --untethered $extra \
+        > /dev/null 2> "$OUT/conflict.err"; then
+        echo "ERROR: --untethered $extra was accepted"; exit 1
+    fi
+    grep -q 'untethered never records' "$OUT/conflict.err"
+done
+if [ -e "$OUT/conflict.trc" ]; then
+    echo "ERROR: the conflict error still opened a trace file"; exit 1
+fi
+
+echo "recorded-mode regression vs merge base"
+# The untethered wiring must leave recorded mode untouched: the same
+# scripted session through the merge-base sahara-gui produces a
+# byte-identical trace, whole file - --script owns the clock, so two
+# binaries with identical behavior cannot drift by a byte.
+BASE_SHA="$(git merge-base main HEAD)"
+if [ "$BASE_SHA" = "$(git rev-parse HEAD)" ]; then
+    echo "  HEAD is the merge base: nothing to compare"
+else
+    # The throwaway worktree must sit beside this checkout, not in
+    # /tmp: the build resolves rightwayc as ../../rightwayc, and only
+    # our parent directory has that sibling (checkout or worktree
+    # layout alike).
+    BASE_WT="$(cd ../.. && pwd)/sahara-gui-base-$BASE_SHA"
+    [ -d "$BASE_WT" ] || git worktree add --detach "$BASE_WT" "$BASE_SHA"
+    (cd "$BASE_WT/emu-c" && bazel build //:sahara-gui)
+    SDL_VIDEODRIVER=dummy "$BASE_WT/emu-c/bazel-bin/sahara-gui" \
+        "$OUT/demo.img" --script gui/session.script \
+        --trace "$OUT/session-base.trc" > /dev/null
+    cmp "$OUT/session.trc" "$OUT/session-base.trc"
+fi
+
 echo "netboot ROM reproducibility gate"
 # Committed netboot.img, the generated netboot_rom.c TU, and VERSION's
 # sha256 must all reproduce from a fresh asm.py rebuild - the two

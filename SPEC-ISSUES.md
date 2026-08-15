@@ -553,7 +553,28 @@ Both emulator implementations must match the readings marked
     exist. Both emulators implement the same gate, so difftest cannot
     catch a shared misreading - flagged here for the owner instead.
 
-44. **netboot — UDP to 10.0.2.2:69 now reaches a local-plane service
+44. **Untethered mode — the owner-sanctioned opt-out of PLATFORM-SPEC
+    §8's always-record rule** (untethered agent, owner ruling
+    2026-08-15). §8 makes every interactive session a trace; the GUI
+    work order's decision 9 made that mandatory with no off switch.
+    The ruling adds one: `sahara-gui --untethered`, strictly opt-in,
+    for sessions that retire instructions in bulk (DOOM-class now,
+    the GPU later). Semantics: the recorder is never attached — no
+    trace file, no META, no record emission on the hot path, no
+    replay command at exit; correctness is judged by results, the
+    replay guarantee is explicitly forfeited. Banner contract: one
+    fixed line, `untethered session: not recorded, not replayable`,
+    on stderr at startup AND at exit — nobody discovers afterward
+    that a session left no artifact. `--trace`/`--trace-level`
+    together with `--untethered` is a loud startup error, never a
+    silent override. Recorded mode remains the default and the only
+    mode any gate runs; the headless CLI is untouched (it was
+    already untethered without `--trace`). Companion test policy for
+    FUTURE high-instruction-volume suites: outcomes (exit contract,
+    memory, framebuffer state) may stand in for byte-identity —
+    documented convention only, no existing gate converts.
+
+45. **netboot — UDP to 10.0.2.2:69 now reaches a local-plane service
     instead of the 6.2 subnet drop** (netboot agent). nic.md 6.2
     classifies UDP to "anything else in 10.0.2.0/24" as a silent
     drop; the netboot work order adds the SBP/1 boot-image server on
@@ -565,18 +586,20 @@ Both emulator implementations must match the readings marked
     nic.md 6.2 amendment ("UDP to 10.0.2.2:69 -> boot service, see
     rom/netboot/sbp.md"); devspec is not edited here.
 
-45. **netboot — sahara-gui CLI grows optional IMAGE, --rom,
+46. **netboot — sahara-gui CLI grows optional IMAGE, --rom,
     --serve-image** (netboot agent). The GUI front end's CLI is not
     frozen anywhere, but recording the reading: no IMAGE boots the
     embedded netboot ROM via materialize-then-load (the bytes land
     next to the trace as <trace-basename>.rom.img and go through the
-    ordinary loader, so META/replay semantics are unchanged); --rom
-    substitutes a ROM file; IMAGE plus --rom is a usage error. The
+    ordinary loader, so META/replay semantics are unchanged; under
+    --untethered there is no trace to sit next to, so the file falls
+    back to untethered-<epoch>.rom.img); --rom substitutes a ROM
+    file; IMAGE plus --rom is a usage error. The
     frozen headless sahara-emu CLI is untouched byte-for-byte - a
     netboot session replays as `sahara-emu <rom.img> --replay` with
     the path explicit, deliberately.
 
-46. **netboot — SBP server answers ERR 1 when unconfigured rather
+47. **netboot — SBP server answers ERR 1 when unconfigured rather
     than dropping** (netboot agent). Nothing specifies the behavior
     of the boot service when no --serve-image blob exists. Reading
     chosen (sbp.md S2, per the loud-failure policy): the service
@@ -586,7 +609,7 @@ Both emulator implementations must match the readings marked
     timeout. The alternative (drop, indistinguishable from --nic off)
     would hide a configuration error behind a 20-second retry budget.
 
-47. **netboot — the in-guest SAHIMG01 validation subset** (netboot
+48. **netboot — the in-guest SAHIMG01 validation subset** (netboot
     agent). TOOLING-SPEC 1 defines the format; host loaders
     (image.c) additionally reject overlapping segments and segments
     intersecting the device table window. The ROM checks: magic;
