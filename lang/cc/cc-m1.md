@@ -905,6 +905,35 @@ must land as table entries and new productions:
 - Optimization of any kind — with the determinism gate (compile-twice
   byte-compare) already in place to keep it honest.
 
+**M2 amendment (2026-08-15): the m2 rung is climbed** — everything in
+the first bullet above except varargs landed (see the amendment
+summary). **The named cc-m3 scope** (work-order decision 12; nothing
+is silently dropped):
+
+- **varargs + the `va_*` surface** — m3's first item, the printf
+  enabler, over SABI's uniform 16-byte slots. Ratified sketch
+  (owner review 2026-08-15): callers never change — variadic and
+  normal calls are indistinguishable; a varargs callee gains one new
+  prologue shape that unconditionally spills incoming r0–r7 into
+  frame slots contiguous with the caller's stack-arg slots, making
+  all arguments one memory run; `va_list` is a pointer, `va_arg` is
+  load-and-advance-16. abicheck learns the third prologue shape
+  then, not now. libc's printf follows it (the v0.2 amendment names
+  the capability — varargs — as printf's trigger, not a milestone
+  number).
+- **The port-compat layer**: the C89-names header (`typedef`s + cpp
+  defines mapping char/short/int/long, `register`-away, etc.) —
+  property of the DOOM-shim stream, enabled by m2's typedef.
+- **bitfields** — still no measured consumer; if the port surfaces
+  one, it arrives with the measurement.
+- **Designated initializers / other C99-isms** — doomgeneric is C89;
+  only measured need admits them.
+- **Jump-table switch and all optimization** — optimizer-stream work
+  over the determinism gate.
+- **Object format + linker** — unchanged ladder position: after
+  multi-input stops scaling, behind a SABI amendment.
+- **FP** — with SABI §7, off the critical path.
+
 ---
 
 ## M2 — amendment summary
