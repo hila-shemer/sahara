@@ -628,6 +628,50 @@ aligned by construction — SABI §2.3, never by luck):
 - **Predicates**: the compiler writes only `p1`, never live across a
   call or between statements (caller-saved per SABI §1).
 
+### 8.2a Aggregates by value — cc's mapping onto SABI v0 (M2, 2026-08-15)
+
+Struct and union values assign, initialize, pass, and return by value.
+This is a **cc-level convention layered on SABI v0**: every actual
+register and 16-byte stack slot still carries a scalar or a pointer,
+so SABI itself is untouched and abicheck's frame rules hold unchanged.
+It is interop surface — hand-written `.s` can call and be called with
+aggregates by following it — and is frozen here like the rest of the
+SABI mapping (a SPEC-ISSUES entry records that a future SABI revision
+may bless it platform-wide):
+
+- **Copies are inline and compiler-emitted — never a call.** No
+  `memcpy`, no hidden runtime contract: compiled output references
+  only symbols the source declared (the m1 property, kept). Copy
+  shape: through a temp-stack address pair in units of the
+  aggregate's alignment (16 → `ld128`/`st128`, 8 → `lds.64`/`st.64`,
+  4/2/1 likewise — aligned by construction); straight-line up to 4
+  units, an emitted counter loop above (the threshold is tier-2
+  codegen). Copies run forward: overlap and self-assignment are
+  defined.
+- **Assignment/initialization**: `a = b` on same-type aggregates;
+  evaluation order lvalue-address then rvalue-address, then the copy;
+  the assignment expression's value is the lvalue.
+- **Parameters**: at each call site the caller copies the aggregate
+  argument into a fresh staging slot in its own frame and passes the
+  ADDRESS in the ordinary argument position (register or 16-byte
+  stack slot). The callee uses the staging copy directly as the
+  parameter object — no second copy; it may write it (the copy is
+  call-lifetime, caller-dead). C semantics hold because every call
+  makes a fresh copy; `&param` is legal and points at the staging
+  copy.
+- **Returns**: a function returning an aggregate takes a hidden
+  result pointer as argument 0 (r0); explicit arguments shift right
+  by one (stack-slot positions included). The callee copies the
+  return value through that pointer at each `return` and returns the
+  pointer in r0; the caller allocates the result slot in its own
+  frame. Falling off the end of an aggregate-returning function
+  returns the pointer with the result object unmodified (the
+  uninitialized-local stance).
+- Staging and result slots are bump-allocated per call site in a
+  dedicated frame region (never reused — nested calls cannot collide
+  by construction); member access on a call's aggregate rvalue
+  (`f().x`) is not in (assign it first) — a documented limit.
+
 ### 8.3 Sections and symbols
 
 - Output order: text, rodata, data, bss; each seam is
@@ -839,6 +883,12 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **aggregates by value** (work-order decision 7): §8.2a
+  the full convention — inline compiler-emitted copies (never
+  memcpy), caller-staged by-address parameters, the hidden-r0 return
+  pointer with argument shift; §6/§7 assignment, copy-initialization,
+  parameters, returns for structs and unions. SPEC-ISSUES carries the
+  SABI-blessing note.
 - 2026-08-15 — **`typedef`, `static`, `const`, `volatile`**
   (work-order decision 8): §2 keywords; §7 declaration specifiers.
   `typedef` is block-scoped name→type aliasing and the port-compat

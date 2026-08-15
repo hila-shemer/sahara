@@ -552,3 +552,17 @@ Both emulator implementations must match the readings marked
     job deadlocks loudly per 7.6, exactly as if the job did not
     exist. Both emulators implement the same gate, so difftest cannot
     catch a shared misreading - flagged here for the owner instead.
+
+44. **cc-m2 aggregate-by-value convention - a future SABI blessing**
+    (cc agent, 2026-08-15). cc-m1.md 8.2a fixes how aggregates pass
+    and return: caller-staged copies passed by address in ordinary
+    argument positions, and a hidden result pointer in r0 shifting
+    explicit arguments right by one. Deliberately a cc-LEVEL layer:
+    every register/stack slot still carries a scalar or pointer, so
+    SABI v0 is untouched and abicheck's rules hold unchanged. But it
+    is interop surface - hand-written .s that wants to exchange
+    aggregates with compiled code must follow it, and .s authors must
+    know arguments shift when a struct is returned - so a future SABI
+    revision may want to bless it platform-wide instead of leaving it
+    compiler-private. Until then cc-m1.md 8.2a is the normative text
+    and this entry keeps the question alive.

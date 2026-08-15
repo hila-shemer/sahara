@@ -724,9 +724,13 @@ class Parser:
                 raise Cc(pl, "void parameter")
             if pt[0] == "func":
                 pt = ("ptr", pt)     # C: function parameter adjusts
-            if not is_scalar(pt):
-                raise Cc(pl, "parameters must be scalars or "
-                             "pointers in m1 (structs/arrays: "
+            if is_aggr(pt):
+                if not self.u.complete(pt):
+                    raise Cc(pl, f"parameter of incomplete type "
+                                 f"{type_str(pt)}")
+            elif not is_scalar(pt):
+                raise Cc(pl, "parameters must be scalars, pointers, "
+                             "or structs/unions by value (arrays: "
                              "pass a pointer)")
             if pn is not None and any(pn == q[0] for q in named):
                 raise Cc(pl, f"duplicate parameter '{pn}'")
@@ -963,9 +967,10 @@ class Parser:
                 else:
                     init = None
                     if self.accept("p", "="):
-                        if not is_scalar(t):
-                            raise Cc(line, "arrays and structs cannot "
-                                           "be initialized in m1")
+                        if not (is_scalar(t) or is_aggr(t)):
+                            raise Cc(line, "arrays cannot be "
+                                           "initialized (initializer "
+                                           "lists are file-scope only)")
                         init = self.parse_assign()
                     decls.append(("decl", line, t, name, init))
                 if self.accept("p", ";"):
@@ -1480,13 +1485,29 @@ class Func:
         self.slot_of = {}        # id(decl node) -> frame offset
         self.calls = False
         self.maxargs = 0
-        # params first (one 16-byte home each), then decls in source
-        # order - prescan continues the running offset.
-        self.locals_size = 16 * len(self.params)
+        # Aggregate return (M2): hidden result pointer arrives in r0,
+        # explicit arguments shift right by one; the pointer gets a
+        # frame home right after the parameter homes.
+        self.sret = is_aggr(self.ret)
+        # params first (one 16-byte home each; an aggregate parameter's
+        # home holds the ADDRESS of the caller's staging copy), then
+        # the hidden-pointer home, then decls in source order.
+        self.locals_size = 16 * (len(self.params) + (1 if self.sret
+                                                     else 0))
+        self.stg_size = 0        # aggregate staging region (patched in)
         self.prescan(self.body)
         self.out_size = 16 * max(0, self.maxargs - 8)
         self.locals_base = self.out_size
         self.spill_base = self.out_size + self.locals_size
+
+    def alloc_staging(self, size):
+        """A fresh call-lifetime staging slot (aggregate arguments and
+        results). Bump allocation, never reused - deterministic, and
+        nested calls cannot collide by construction. The region sits
+        above the spill area; offsets are patched at render time."""
+        off = self.stg_size
+        self.stg_size += (size + 15) & ~15
+        return off
 
     # ---- prescan: every decl gets a frame slot; calls/maxargs found.
     # Slot order = source order, so offsets are deterministic.
@@ -1515,7 +1536,14 @@ class Func:
                 self.locals_size += size
             elif n[0] == "call":
                 self.calls = True
-                self.maxargs = max(self.maxargs, len(n[3]))
+                nargs = len(n[3])
+                callee = n[2]
+                if callee[0] == "var" and callee[2] in self.u.funcs:
+                    if is_aggr(self.u.funcs[callee[2]][0]):
+                        nargs += 1       # hidden result pointer
+                else:
+                    nargs += 1           # indirect: reserve for sret
+                self.maxargs = max(self.maxargs, nargs)
 
     # ---- emit helpers
 
@@ -1636,6 +1664,11 @@ class Func:
             if kind[0] == "local":
                 self.emit(f"add {r}, sp, {kind[1]}")
                 return kind[2]
+            if kind[0] == "pbyref":
+                # aggregate parameter: the home slot holds the ADDRESS
+                # of the caller's staging copy (M2 decision 7)
+                self.emit(f"ld128 {r}, [sp + {kind[1]}]")
+                return kind[2]
             self.emit(f"la {r}, {kind[1]}")
             return kind[2]
         if op == "deref":
@@ -1741,8 +1774,7 @@ class Func:
             if t[0] == "func":
                 return ("ptr", t)             # designator decay (M2)
             if is_aggr(t):
-                raise Cc(e[1], "struct values are not usable directly "
-                               "in m1 (no struct assignment/copy)")
+                return t          # aggregate value = address (M2)
             self.load(r, t)
             return promote(t)
         if op == "addr":
@@ -2021,6 +2053,16 @@ class Func:
         if t[0] == "const":
             raise Cc(line, f"assignment to const lvalue "
                            f"({type_str(t)})")
+        if is_aggr(t):
+            vt = self.rvalue(rhs)
+            if sdeep(vt) != sdeep(t):
+                raise Cc(line, f"cannot assign {type_str(vt)} to "
+                               f"{type_str(t)}")
+            rd, rs = self.reg(self.depth - 2), self.top()
+            self.copy_units(rd, rs, self.u.t_size(t),
+                            self.u.t_align(t))
+            self.pop()
+            return uq(t)          # the value is the lvalue (address)
         if not is_scalar(t):
             raise Cc(line, f"cannot assign to {type_str(t)}")
         vt = self.rvalue(rhs)
@@ -2230,6 +2272,50 @@ class Func:
             raise Cc(line, f"sizeof of incomplete {type_str(t)}")
         return t
 
+    # ---- aggregate copies (M2, work-order decision 7): inline,
+    # compiler-emitted, NEVER a memcpy call - compiled output stays
+    # dependency-free. Unit = the aggregate's alignment (capped 16),
+    # so every access is aligned by construction; straight-line up to
+    # 4 units, an emitted loop above that (the threshold is tier-2
+    # codegen and may be re-blessed).
+
+    COPY_UNITS = {16: ("ld128", "st128"), 8: ("lds.64", "st.64"),
+                  4: ("lds.32", "st.32"), 2: ("lds.16", "st.16"),
+                  1: ("lds.8", "st.8")}
+
+    def copy_units(self, rd, rs, size, align):
+        """Emit *rd <- *rs, size bytes. Uses two scratch temp-stack
+        slots at most; rd/rs are left unchanged (forward copy -
+        overlap and self-assignment are defined by it)."""
+        u = min(align, 16)
+        ldm, stm = self.COPY_UNITS[u]
+        n = size // u
+        if n <= 4:
+            rv = self.push()
+            for i in range(n):
+                self.emit(f"{ldm} {rv}, [{rs} + {i * u}]")
+                self.emit(f"{stm} [{rd} + {i * u}], {rv}")
+            self.pop()
+            return
+        rv = self.push()
+        rc = self.push()
+        top = self.label()
+        self.emit(f"li {rc}, 0")
+        self.emit_label(top)
+        self.emit(f"{ldm} {rv}, [{rs} + {rc}]")
+        self.emit(f"{stm} [{rd} + {rc}], {rv}")
+        self.emit(f"add {rc}, {rc}, {u}")
+        if size < 1 << 21:
+            self.emit(f"cmpeq p1, {rc}, {size}")
+        else:
+            rb = self.push()
+            self.emit(f"li {rb}, {size}")
+            self.emit(f"cmpeq p1, {rc}, {rb}")
+            self.pop()
+        self.emit(f"(!p1) b {top}")
+        self.pop()
+        self.pop()
+
     def load_from(self, rd, raddr, t):
         """Typed load of *raddr into rd (rd != raddr variant of load)."""
         t = uq(t)
@@ -2271,22 +2357,58 @@ class Func:
         if len(args) != len(ptypes):
             raise Cc(line, f"{what} takes {len(ptypes)} arguments, "
                            f"got {len(args)}")
+        # Aggregate return (M2): the caller allocates the result slot
+        # and passes its address as hidden argument 0; explicit
+        # arguments shift right by one.
+        sret = is_aggr(ret)
+        shift = 1 if sret else 0
+        rstg = self.alloc_staging(self.u.t_size(ret)) if sret else None
         for i, a in enumerate(args):
             at = self.rvalue(a)
-            self.implicit(self.top(), at, ptypes[i], line,
-                          f"argument {i + 1} of {what}")
+            if is_aggr(ptypes[i]):
+                # by-value aggregate: copy into a fresh caller-frame
+                # staging slot; the ADDRESS rides the argument position
+                if sdeep(at) != sdeep(ptypes[i]):
+                    raise Cc(line, f"argument {i + 1} of {what}: "
+                                   f"cannot pass {type_str(at)} as "
+                                   f"{type_str(ptypes[i])}")
+                stg = self.alloc_staging(self.u.t_size(ptypes[i]))
+                rd = self.push()
+                self.emit(f"add {rd}, sp, %%STG{stg}%%")
+                self.copy_units(rd, self.reg(self.depth - 2),
+                                self.u.t_size(ptypes[i]),
+                                self.u.t_align(ptypes[i]))
+                self.emit(f"mov {self.reg(self.depth - 2)}, {rd}")
+                self.pop()
+            else:
+                self.implicit(self.top(), at, ptypes[i], line,
+                              f"argument {i + 1} of {what}")
+        if len(args) + shift > 8 and self.out_size < \
+                16 * (len(args) + shift - 8):
+            raise Cc(line, "call needs more outgoing argument slots "
+                           "than were reserved (an aggregate-returning "
+                           "function pointer shadowing a function "
+                           "name) - rename the local pointer")
         # Spill every live register slot to its home (r8-r15 are
         # caller-saved; homes double as the argument staging area).
         lo = max(0, self.depth - 8)
         for s in range(lo, self.depth):
             self.emit(f"st128 [sp + {self.home(s)}], {self.reg(s)}")
-        # Stack-slot arguments (SABI/ISA 12: [sp + 0], 16 bytes each).
-        for i in range(8, len(args)):
+        # Stack-slot arguments (SABI/ISA 12: [sp + 0], 16 bytes each);
+        # with sret every position is one to the right.
+        for i in range(len(args)):
+            if i + shift < 8:
+                continue
             self.emit(f"ld128 r8, [sp + {self.home(astart + i)}]")
-            self.emit(f"st128 [sp + {16 * (i - 8)}], r8")
+            self.emit(f"st128 [sp + {16 * (i + shift - 8)}], r8")
         # Register arguments.
-        for i in range(min(8, len(args))):
-            self.emit(f"ld128 r{i}, [sp + {self.home(astart + i)}]")
+        for i in range(len(args)):
+            if i + shift >= 8:
+                break
+            self.emit(f"ld128 r{i + shift}, "
+                      f"[sp + {self.home(astart + i)}]")
+        if sret:
+            self.emit(f"add r0, sp, %%STG{rstg}%%")
         if direct is not None:
             self.emit(f"jal {self.u.func_label(direct)}")
         else:
@@ -2301,6 +2423,8 @@ class Func:
             self.emit(f"ld128 {self.reg(s)}, [sp + {self.home(s)}]")
         if ret == ("void",):
             return ("void",)
+        if is_aggr(ret):
+            return uq(ret)        # r0 = pointer to the result copy
         return promote(ret) if is_int(ret) else ret
 
     # ---- conditions: set p1, return the polarity that means "true"
@@ -2369,7 +2493,18 @@ class Func:
                 raise Cc(line, f"'{name}' redeclared in the same block")
             off = self.locals_base + self.slot_of[id(s)]
             self.scopes[-1][name] = ("local", off, t)
-            if init is not None:
+            if init is not None and is_aggr(t):
+                vt = self.rvalue(init)
+                if sdeep(vt) != sdeep(t):
+                    raise Cc(line, f"cannot initialize {type_str(t)} "
+                                   f"from {type_str(vt)}")
+                rd = self.push()
+                self.emit(f"add {rd}, sp, {off}")
+                self.copy_units(rd, self.reg(self.depth - 2),
+                                self.u.t_size(t), self.u.t_align(t))
+                self.pop()
+                self.pop()
+            elif init is not None:
                 vt = self.rvalue(init)
                 rv = self.top()
                 self.implicit(rv, vt, t, line, "initializer")
@@ -2386,6 +2521,20 @@ class Func:
                 if self.ret != ("void",):
                     raise Cc(line, "return without a value in a "
                                    "non-void function")
+            elif self.sret:
+                t = self.rvalue(e)
+                if sdeep(t) != sdeep(self.ret):
+                    raise Cc(line, f"cannot return {type_str(t)} as "
+                                   f"{type_str(self.ret)}")
+                hidden = self.locals_base + 16 * len(self.params)
+                rp = self.push()
+                self.emit(f"ld128 {rp}, [sp + {hidden}]")
+                self.copy_units(rp, self.reg(self.depth - 2),
+                                self.u.t_size(self.ret),
+                                self.u.t_align(self.ret))
+                self.emit(f"mov r0, {rp}")
+                self.pop()
+                self.pop()
             else:
                 if self.ret == ("void",):
                     raise Cc(line, "return with a value in a void "
@@ -2573,17 +2722,29 @@ class Func:
         # entry: bind parameters, spill r0-r7 / copy stack args
         self.scopes.append({})
         entry = []
+        shift = 1 if self.sret else 0
+        if self.sret:
+            hidden = self.locals_base + 16 * len(self.params)
+            entry.append(f"        st128 [sp + {hidden}], r0")
         for i, (pn, pt) in enumerate(self.params):
             off = self.locals_base + 16 * i
-            self.scopes[0][pn] = ("local", off, pt)
-            bits = pt[1] if is_int(pt) else 128
-            stmn = "st128" if bits == 128 else STORES[bits]
-            if i < 8:
-                entry.append(f"        {stmn} [sp + {off}], r{i}")
+            if is_aggr(pt):
+                # by-value aggregate: the incoming value IS the address
+                # of the caller's staging copy; the callee uses that
+                # copy directly as the parameter object (M2)
+                self.scopes[0][pn] = ("pbyref", off, pt)
+                stmn = "st128"
             else:
-                # incoming stack slot i-8 lives above the frame
-                # (ISA 12: [sp + framesize + 16*(i-8)])
-                entry.append(f"        ld128 r8, [sp + %%ARG{16 * (i - 8)}%%]")
+                self.scopes[0][pn] = ("local", off, pt)
+                bits = pt[1] if is_int(pt) else 128
+                stmn = "st128" if bits == 128 else STORES[bits]
+            j = i + shift
+            if j < 8:
+                entry.append(f"        {stmn} [sp + {off}], r{j}")
+            else:
+                # incoming stack slot j-8 lives above the frame
+                # (ISA 12: [sp + framesize + 16*(j-8)])
+                entry.append(f"        ld128 r8, [sp + %%ARG{16 * (j - 8)}%%]")
                 entry.append(f"        {stmn} [sp + {off}], r8")
         self.gen_stmt(self.body)
         if self.depth != 0:
@@ -2598,7 +2759,8 @@ class Func:
             spill_size = 16 * self.peak
         else:
             spill_size = 16 * max(0, self.peak - 8)
-        frame = self.out_size + self.locals_size + spill_size
+        stg_base = self.out_size + self.locals_size + spill_size
+        frame = stg_base + self.stg_size
         if self.calls:
             frame += 16                     # ra slot on top
         if frame > 1 << 20:
@@ -2611,6 +2773,10 @@ class Func:
                 pre, rest = line.split("%%ARG", 1)
                 extra, post = rest.split("%%", 1)
                 return pre + str(frame + int(extra)) + post
+            if "%%STG" in line:
+                pre, rest = line.split("%%STG", 1)
+                extra, post = rest.split("%%", 1)
+                return pre + str(stg_base + int(extra)) + post
             return line
 
         out = [f"# cc: func {self.sym} frame={frame} "
@@ -2622,7 +2788,13 @@ class Func:
             out.append(f"        st128 [sp + {frame - 16}], ra")
         out.extend(patch(x) for x in entry)
         out.extend(patch(x) for x in self.lines)
-        if self.ret != ("void",):
+        if self.sret:
+            # fall off the end: the result object is returned as-is
+            # (unmodified staging bytes - the uninitialized-local
+            # stance), pointer in r0 per the convention
+            hidden = self.locals_base + 16 * len(self.params)
+            out.append(f"        ld128 r0, [sp + {hidden}]")
+        elif self.ret != ("void",):
             out.append("        li r0, 0")   # end of a non-void body:
         out.append(f"{self.sym}.Lret:")       # defined return 0
         if self.calls:
