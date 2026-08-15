@@ -552,3 +552,24 @@ Both emulator implementations must match the readings marked
     job deadlocks loudly per 7.6, exactly as if the job did not
     exist. Both emulators implement the same gate, so difftest cannot
     catch a shared misreading - flagged here for the owner instead.
+
+44. **Untethered mode — the owner-sanctioned opt-out of PLATFORM-SPEC
+    §8's always-record rule** (untethered agent, owner ruling
+    2026-08-15). §8 makes every interactive session a trace; the GUI
+    work order's decision 9 made that mandatory with no off switch.
+    The ruling adds one: `sahara-gui --untethered`, strictly opt-in,
+    for sessions that retire instructions in bulk (DOOM-class now,
+    the GPU later). Semantics: the recorder is never attached — no
+    trace file, no META, no record emission on the hot path, no
+    replay command at exit; correctness is judged by results, the
+    replay guarantee is explicitly forfeited. Banner contract: one
+    fixed line, `untethered session: not recorded, not replayable`,
+    on stderr at startup AND at exit — nobody discovers afterward
+    that a session left no artifact. `--trace`/`--trace-level`
+    together with `--untethered` is a loud startup error, never a
+    silent override. Recorded mode remains the default and the only
+    mode any gate runs; the headless CLI is untouched (it was
+    already untethered without `--trace`). Companion test policy for
+    FUTURE high-instruction-volume suites: outcomes (exit contract,
+    memory, framebuffer state) may stand in for byte-identity —
+    documented convention only, no existing gate converts.
