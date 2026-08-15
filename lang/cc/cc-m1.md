@@ -363,6 +363,12 @@ would be, and why it is absent).
     statement:  block | declaration | expression ;
               | if (expr) statement [else statement]
               | while (expr) statement
+              | for ( [expr] ; [expr] ; [expr] ) statement      # M2
+              | do statement while ( expr ) ;                   # M2
+              | switch ( expr ) statement                       # M2
+              | case const-expr : statement                     # M2
+              | default : statement                             # M2
+              | goto NAME ;  |  NAME : statement                # M2
               | break ;  | continue ;
               | return [expr] ;  |  ;
 
@@ -370,8 +376,29 @@ would be, and why it is absent).
   documented convenience deviation from C89). Scope is from the
   declaration to the end of the block; shadowing outer names is legal.
 - `if`/`while` conditions are any scalar, tested ≠ 0 at their width.
-- `break`/`continue` bind to the nearest enclosing `while`; outside
-  one they are errors.
+- `break` binds to the nearest enclosing loop **or switch** (M2);
+  `continue` to the nearest enclosing loop only; outside one they are
+  errors.
+- **`switch` (M2, 2026-08-15)** lowers to a linear compare chain:
+  the controlling expression (any integer type, promoted) is
+  evaluated once; one `cmpeq` + predicated branch per `case` in
+  source order; the fall-back branch goes to `default` (or past the
+  statement). No jump table — an optimization, and the no-optimizer
+  stance stands; the chain is deterministic and abicheck-transparent.
+  Case labels are constant expressions, converted to the promoted
+  controlling type; duplicates after conversion are a loud error; at
+  most one `default`. Fallthrough is C's. Case constants outside
+  imm22 are materialized with `li`.
+- **`for`/`do` (M2)** are productions over the loop machinery: all
+  three `for` clauses may be empty (the init clause is an expression,
+  not a declaration — C89's rule); `continue` in a `for` branches to
+  the step clause, in a `do` to the trailing test.
+- **`goto`/labels (M2)**: labels are function-scoped identifiers,
+  defined once, resolved at function end (forward `goto` legal); a
+  `goto` into a scope is legal C89 and legal here — locals have frame
+  slots for the whole function, so there is no lifetime machinery to
+  violate. Labels render as `NAME.L.<label>`, inside the function's
+  internal-label namespace.
 - `return e` converts `e` to the function's return type; plain
   `return` is only legal in `void` functions. Control reaching the end
   of a non-`void` function returns 0 (defined; documented deviation
@@ -431,8 +458,15 @@ declarator lists, unnamed prototype parameters.)*
     link errors (concatenation IS linkage).
   - String-literal and address initializers are out (m1 has no
     relocation story for data); pointer globals are bss-only.
-  - Constant expressions: integer/char literals, `sizeof`, and the
-    foldable operators of 5.5 over them.
+  - Constant expressions (M2, 2026-08-15 — grown to the C89
+    constant-expression grammar): integer/char literals, `sizeof`,
+    enum constants, casts among integer types, `?:`, comparisons,
+    `&& || !`, `~`, unary `+ -`, and all binary arithmetic including
+    `/` and `%`. **The / % distinction**: in *constant expressions*
+    division and remainder ARE evaluated at compile time, with the
+    ISA's division semantics (array sizes and case labels need
+    values); at *runtime* they are still never folded (the 5.5 rule —
+    the machine stays the only implementation of runtime division).
 - Duplicate definitions within the unit are compile errors; duplicates
   across units on the assembler command line are asm.py E031.
 
@@ -726,6 +760,11 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **control flow** (work-order decision 5): §6 grammar
+  and semantics for `switch` (linear compare-chain lowering, binding),
+  `for`, `do`-`while`, `goto`/labels; break/continue binding rules;
+  §7 the constant-expression grammar grown to C89's (with the
+  compile-time-vs-runtime `/ %` distinction stated).
 - 2026-08-15 — **the full integer model** (work-order decision 4):
   §2 keywords + §3 type-table rows for `i8 i16 u16 i32 u32` with the
   two-tier width model (sub-32 promotes to 64, 32-bit first-class at

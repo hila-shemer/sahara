@@ -77,9 +77,10 @@ RESERVED = build_reserved()
 KEYWORDS = {"u8", "i8", "u16", "i16", "u32", "i32", "i64", "u64",
             "i128", "u128", "void", "struct",
             "extern", "if", "else", "while", "break", "continue",
-            "return", "sizeof"}
+            "return", "sizeof",
+            "switch", "case", "default", "for", "do", "goto"}
 PUNCT2 = ("==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||")
-PUNCT1 = "()[]{};,.=<>+-*/%&|^!"
+PUNCT1 = "()[]{};,.=<>+-*/%&|^!:?"
 
 ESCAPES = {"n": 0x0A, "t": 0x09, "r": 0x0D, "b": 0x08, "f": 0x0C,
            "0": 0x00, "\\": 0x5C, '"': 0x22, "'": 0x27}
@@ -608,10 +609,10 @@ class Parser:
 
     def const_expr(self, what):
         line = self.line()
-        e = fold(self.parse_expr(), self.u)
-        if e[0] != "num":
+        v = const_eval(self.parse_expr(), self.u)
+        if v is None:
             raise Cc(line, f"{what} must be a constant expression")
-        return to_signed(e[2])
+        return to_signed(v[2])
 
     # ---- statements
 
@@ -659,6 +660,47 @@ class Parser:
             cond = self.parse_expr()
             self.expect("p", ")")
             return ("while", line, cond, self.parse_stmt())
+        if self.accept("kw", "for"):
+            self.expect("p", "(")
+            init = cond = step = None
+            if self.peek()[:2] != ("p", ";"):
+                init = self.parse_expr()
+            self.expect("p", ";")
+            if self.peek()[:2] != ("p", ";"):
+                cond = self.parse_expr()
+            self.expect("p", ";")
+            if self.peek()[:2] != ("p", ")"):
+                step = self.parse_expr()
+            self.expect("p", ")")
+            return ("for", line, init, cond, step, self.parse_stmt())
+        if self.accept("kw", "do"):
+            body = self.parse_stmt()
+            self.expect("kw", "while")
+            self.expect("p", "(")
+            cond = self.parse_expr()
+            self.expect("p", ")")
+            self.expect("p", ";")
+            return ("do", line, body, cond)
+        if self.accept("kw", "switch"):
+            self.expect("p", "(")
+            e = self.parse_expr()
+            self.expect("p", ")")
+            return ("switch", line, e, self.parse_stmt())
+        if self.accept("kw", "case"):
+            v = self.parse_expr()
+            self.expect("p", ":")
+            return ("case", line, v, self.parse_stmt())
+        if self.accept("kw", "default"):
+            self.expect("p", ":")
+            return ("default", line, self.parse_stmt())
+        if self.accept("kw", "goto"):
+            name = self.expect("id", what="a label name")
+            self.expect("p", ";")
+            return ("goto", line, name)
+        if self.peek()[0] == "id" and self.peek(1)[:2] == ("p", ":"):
+            name = self.next()[1]
+            self.next()
+            return ("label", line, name, self.parse_stmt())
         if self.accept("kw", "break"):
             self.expect("p", ";")
             return ("break", line)
@@ -861,6 +903,119 @@ def fold_bin(op, l, r):
     return ("num", l[1], sext(v, t[1]), t)
 
 
+# ------------------------------------------------- constant expressions
+# (M2) The C89 constant-expression grammar for case labels, array
+# sizes, enum values, and global initializers: comparisons, && || !,
+# ?: , ~, casts among integer types - and / % ARE evaluated here, with
+# the ISA's division semantics, because .space and case labels need
+# values. At RUNTIME / % are still never folded (the m1 rule, 5.5):
+# fold() above is the optimizer, this is front-end necessity.
+
+
+def ce_div(a, b, signed, bits):
+    """ISA 5.1 division: /0 -> all-ones at width; MIN/-1 -> MIN; else
+    truncation toward zero."""
+    if b == 0:
+        return -1 if signed else (1 << bits) - 1
+    if signed and a == -(1 << (bits - 1)) and b == -1:
+        return a
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+
+def ce_rem(a, b, signed, bits):
+    if b == 0:
+        return a
+    if signed and a == -(1 << (bits - 1)) and b == -1:
+        return 0
+    return a - ce_div(a, b, signed, bits) * b
+
+
+def const_eval(e, unit):
+    """-> ("num", line, image128, type) or None if not constant."""
+    op = e[0]
+    if op == "num":
+        return e
+    if op == "cast":
+        t = e[2]
+        if not is_int(t):
+            return None
+        v = const_eval(e[3], unit)
+        if v is None:
+            return None
+        return ("num", e[1], sext(to_val(v[2], v[3]), t[1]), t)
+    if op in ("neg", "bitnot", "uplus"):
+        v = const_eval(e[2], unit)
+        if v is None or not is_int(v[3]):
+            return None
+        t = promote(v[3])
+        val = to_val(v[2], t)
+        if op == "neg":
+            val = -val
+        elif op == "bitnot":
+            val = ~val
+        return ("num", e[1], sext(val, t[1]), t)
+    if op == "not":
+        v = const_eval(e[2], unit)
+        if v is None or not is_int(v[3]):
+            return None
+        return ("num", e[1], 0 if to_val(v[2], v[3]) else 1, T_I64)
+    if op == "logic":
+        l = const_eval(e[3], unit)
+        r = const_eval(e[4], unit)
+        if l is None or r is None:
+            return None
+        lv = to_val(l[2], l[3]) != 0
+        rv = to_val(r[2], r[3]) != 0
+        res = (lv and rv) if e[2] == "&&" else (lv or rv)
+        return ("num", e[1], 1 if res else 0, T_I64)
+    if op == "ternary":
+        c = const_eval(e[2], unit)
+        a = const_eval(e[3], unit)
+        b = const_eval(e[4], unit)
+        if c is None or a is None or b is None:
+            return None
+        if not (is_int(a[3]) and is_int(b[3])):
+            return None
+        pick = a if to_val(c[2], c[3]) else b
+        t = common_type(promote(a[3]), promote(b[3]))
+        return ("num", e[1], sext(to_val(pick[2], pick[3]), t[1]), t)
+    if op == "bin":
+        l = const_eval(e[3], unit)
+        r = const_eval(e[4], unit)
+        if l is None or r is None:
+            return None
+        if not (is_int(l[3]) and is_int(r[3])):
+            return None
+        lt, rt = promote(l[3]), promote(r[3])
+        o = e[2]
+        if o in ("<<", ">>"):
+            t = lt
+            sh = r[2] & (t[1] - 1)          # count mod width (low bits)
+            a = to_val(l[2], t)
+            if o == "<<":
+                return ("num", e[1], sext(a << sh, t[1]), t)
+            if t[2]:
+                return ("num", e[1], sext(a >> sh, t[1]), t)
+            return ("num", e[1],
+                    sext((a & ((1 << t[1]) - 1)) >> sh, t[1]), t)
+        t = common_type(lt, rt)
+        a, b = to_val(l[2], t), to_val(r[2], t)
+        if o in ("<", "<=", ">", ">=", "==", "!="):
+            res = {"<": a < b, "<=": a <= b, ">": a > b,
+                   ">=": a >= b, "==": a == b, "!=": a != b}[o]
+            return ("num", e[1], 1 if res else 0, T_I64)
+        if o == "/":
+            v = ce_div(a, b, t[2], t[1])
+        elif o == "%":
+            v = ce_rem(a, b, t[2], t[1])
+        else:
+            v = {"+": a + b, "-": a - b, "*": a * b, "&": a & b,
+                 "|": a | b, "^": a ^ b}[o]
+        return ("num", e[1], sext(v, t[1]), t)
+    return None
+
+
 # ---------------------------------------------------------------- codegen
 
 # Loads keyed by (bits, signed): the extension IS the promoted image -
@@ -896,7 +1051,10 @@ class Func:
         self.peak = 0
         self.nlabel = 0
         self.scopes = []
-        self.loopstack = []      # (continue_label, break_label)
+        self.loopstack = []      # ("loop", cont, brk) | ("switch", None, brk)
+        self.golabels = {}       # goto label name -> asm label
+        self.gotos = []          # (name, line) for end-of-function check
+        self.case_labels = {}    # id(case/default node) -> asm label
         self.slot_of = {}        # id(decl node) -> frame offset
         self.calls = False
         self.maxargs = 0
@@ -1563,21 +1721,155 @@ class Func:
             end = self.label()
             self.emit_label(top)
             self.branch_unless(cond, end)
-            self.loopstack.append((top, end))
+            self.loopstack.append(("loop", top, end))
             self.gen_stmt(body)
             self.loopstack.pop()
             self.emit(f"b {top}")
             self.emit_label(end)
+        elif op == "for":
+            _, line, init, cond, step, body = s
+            if init is not None:
+                self.rvalue(init)
+                self.pop()
+            top = self.label()
+            cont = self.label()
+            end = self.label()
+            self.emit_label(top)
+            if cond is not None:
+                self.branch_unless(cond, end)
+            self.loopstack.append(("loop", cont, end))
+            self.gen_stmt(body)
+            self.loopstack.pop()
+            self.emit_label(cont)
+            if step is not None:
+                self.rvalue(step)
+                self.pop()
+            self.emit(f"b {top}")
+            self.emit_label(end)
+        elif op == "do":
+            _, line, body, cond = s
+            top = self.label()
+            cont = self.label()
+            end = self.label()
+            self.emit_label(top)
+            self.loopstack.append(("loop", cont, end))
+            self.gen_stmt(body)
+            self.loopstack.pop()
+            self.emit_label(cont)
+            pol = self.cond(cond)
+            self.emit(f"({'p1' if pol else '!p1'}) b {top}")
+            self.emit_label(end)
+        elif op == "switch":
+            self.gen_switch(s)
+        elif op == "case":
+            lab = self.case_labels.get(id(s))
+            if lab is None:
+                raise Cc(s[1], "case label outside a switch")
+            self.emit_label(lab)
+            self.gen_stmt(s[3])
+        elif op == "default":
+            lab = self.case_labels.get(id(s))
+            if lab is None:
+                raise Cc(s[1], "default label outside a switch")
+            self.emit_label(lab)
+            self.gen_stmt(s[2])
+        elif op == "label":
+            _, line, name, stmt = s
+            if name in self.golabels:
+                raise Cc(line, f"label '{name}' redefined")
+            lab = f"{self.name}.L.{name}"
+            self.golabels[name] = lab
+            self.emit_label(lab)
+            self.gen_stmt(stmt)
+        elif op == "goto":
+            _, line, name = s
+            self.gotos.append((name, line))
+            self.emit(f"b {self.name}.L.{name}")
         elif op == "break":
             if not self.loopstack:
-                raise Cc(s[1], "break outside a loop")
-            self.emit(f"b {self.loopstack[-1][1]}")
+                raise Cc(s[1], "break outside a loop or switch")
+            self.emit(f"b {self.loopstack[-1][2]}")
         elif op == "continue":
-            if not self.loopstack:
+            for ent in reversed(self.loopstack):
+                if ent[0] == "loop":
+                    self.emit(f"b {ent[1]}")
+                    break
+            else:
                 raise Cc(s[1], "continue outside a loop")
-            self.emit(f"b {self.loopstack[-1][0]}")
         else:
             raise AssertionError(op)
+
+    def gen_switch(self, s):
+        """Linear compare chain (work-order decision 5, binding): one
+        cmpeq + branch per case in source order, default last - no
+        jump table (that is optimizer-stream work, and the chain is
+        abicheck-transparent and deterministic)."""
+        _, line, e, body = s
+        t = self.rvalue(e)
+        if not is_int(t):
+            raise Cc(line, "switch controlling expression must be an "
+                           "integer")
+        cases = []               # (image-at-t, label, line), source order
+        defaults = []
+
+        def collect(n):
+            if isinstance(n, list):
+                for x in n:
+                    collect(x)
+                return
+            if not isinstance(n, tuple):
+                return
+            if n[0] == "switch":
+                return           # a nested switch owns its own cases
+            if n[0] == "case":
+                v = const_eval(n[2], self.u)
+                if v is None or not is_int(v[3]):
+                    raise Cc(n[1], "case label must be an integer "
+                                   "constant expression")
+                image = sext(to_val(v[2], v[3]), t[1])
+                lab = self.label()
+                self.case_labels[id(n)] = lab
+                cases.append((image, lab, n[1]))
+                collect(n[3])
+                return
+            if n[0] == "default":
+                lab = self.label()
+                self.case_labels[id(n)] = lab
+                defaults.append((lab, n[1]))
+                collect(n[2])
+                return
+            for x in n:
+                collect(x)
+
+        collect(body)
+        if len(defaults) > 1:
+            raise Cc(defaults[1][1], "duplicate default label")
+        seen = {}
+        for image, lab, cline in cases:
+            if image in seen:
+                raise Cc(cline, f"duplicate case value "
+                               f"{to_signed(image)} (first at line "
+                               f"{seen[image]})")
+            seen[image] = cline
+        rx = self.top()
+        sfx = suffix(t)
+        for image, lab, cline in cases:
+            sval = to_signed(image)
+            if -(1 << 21) <= sval < (1 << 21):
+                self.emit(f"cmpeq{sfx} p1, {rx}, {sval}")
+            else:
+                ry = self.push()
+                self.emit(f"li {ry}, {sval}")
+                self.emit(f"cmpeq{sfx} p1, {rx}, {ry}")
+                self.pop()
+            self.emit(f"(p1) b {lab}")
+        self.pop()
+        end = self.label()
+        self.emit(f"b {defaults[0][0] if defaults else end}")
+        self.loopstack.append(("switch", None, end))
+        self.gen_stmt(body)
+        self.loopstack.pop()
+        self.emit_label(end)
 
     # ---- whole function
 
@@ -1601,6 +1893,9 @@ class Func:
         if self.depth != 0:
             raise AssertionError(f"{self.name}: temp stack leak "
                                  f"({self.depth})")
+        for gname, gline in self.gotos:
+            if gname not in self.golabels:
+                raise Cc(gline, f"goto to undefined label '{gname}'")
         self.scopes.pop()
 
         if self.calls:
