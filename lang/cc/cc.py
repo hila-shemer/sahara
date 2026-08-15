@@ -74,7 +74,8 @@ RESERVED = build_reserved()
 
 # ----------------------------------------------------------------- lexer
 
-KEYWORDS = {"u8", "i64", "u64", "i128", "u128", "void", "struct",
+KEYWORDS = {"u8", "i8", "u16", "i16", "u32", "i32", "i64", "u64",
+            "i128", "u128", "void", "struct",
             "extern", "if", "else", "while", "break", "continue",
             "return", "sizeof"}
 PUNCT2 = ("==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||")
@@ -194,9 +195,12 @@ def lex(src):
 # ('arr', T, n), ('struct', name). The (size, signedness) pair is the
 # whole scalar model - m2's i8..u32 are new rows, not new machinery.
 
-TYPE_KW = {"u8": ("int", 8, False), "i64": ("int", 64, True),
-           "u64": ("int", 64, False), "i128": ("int", 128, True),
-           "u128": ("int", 128, False), "void": ("void",)}
+TYPE_KW = {"u8": ("int", 8, False), "i8": ("int", 8, True),
+           "u16": ("int", 16, False), "i16": ("int", 16, True),
+           "u32": ("int", 32, False), "i32": ("int", 32, True),
+           "i64": ("int", 64, True), "u64": ("int", 64, False),
+           "i128": ("int", 128, True), "u128": ("int", 128, False),
+           "void": ("void",)}
 
 T_I64 = ("int", 64, True)
 T_U64 = ("int", 64, False)
@@ -797,7 +801,12 @@ def common_type(a, b):
 
 
 def promote(t):
-    return T_U64 if t == ("int", 8, False) else t
+    """Sub-32 types promote to their 64-bit signedness twin (the ALU
+    has no 8/16-bit form, ISA 3.4); 32-bit types are first-class at
+    width 32. The u8 row is frozen m1 surface; the new rows follow it."""
+    if t[0] == "int" and t[1] < 32:
+        return ("int", 64, t[2])
+    return t
 
 
 FOLDABLE = ("+", "-", "*", "&", "|", "^", "<<", ">>")
@@ -854,8 +863,15 @@ def fold_bin(op, l, r):
 
 # ---------------------------------------------------------------- codegen
 
-LOADS = {8: "ldz.8", 64: "lds.64"}       # lds.64 keeps u64 canonical too
-STORES = {8: "st.8", 64: "st.64"}
+# Loads keyed by (bits, signed): the extension IS the promoted image -
+# lds for signed (and for 32-bit unsigned too: canonical-32 is the
+# sign-extension from bit 31, the u64/lds.64 argument one octave down),
+# ldz for u8/u16 (bit 15 < 63, so zero-extension is canonical).
+LOADS = {(8, True): "lds.8", (8, False): "ldz.8",
+         (16, True): "lds.16", (16, False): "ldz.16",
+         (32, True): "lds.32", (32, False): "lds.32",
+         (64, True): "lds.64", (64, False): "lds.64"}
+STORES = {8: "st.8", 16: "st.16", 32: "st.32", 64: "st.64"}
 ALU = {"+": "add", "-": "sub", "*": "mul", "&": "and", "|": "or",
        "^": "xor", "<<": "shl"}
 
@@ -865,6 +881,8 @@ def suffix(t):
     if is_ptr(t):
         return ""
     bits = promote(t)[1]
+    if bits == 32:
+        return ".32"
     return ".64" if bits == 64 else ""
 
 
@@ -968,22 +986,42 @@ class Func:
     # ---- conversions (cc-m1.md section 4); operate on register r
 
     def convert(self, r, src, dst, line):
+        # src is always a promoted (or pointer/128) type: 32/64/128
+        # bits. dst may be any scalar type; a sub-width dst leaves the
+        # promoted image of the narrowed value in r (cc-m1.md 4).
         if src == dst:
             return
         if is_ptr(src) and is_ptr(dst):
             return
         sbits = src[1] if is_int(src) else 128
-        if is_int(dst) and dst[1] == 8:
-            self.emit(f"and.64 {r}, {r}, 0xff")
+        if is_int(dst) and dst[1] < 32:
+            if dst == ("int", 8, False):
+                self.emit(f"and.64 {r}, {r}, 0xff")   # frozen m1 row
+            elif dst[2]:
+                self.emit(f"or.64 {r}, zero, {r} sxt {dst[1]}")
+            else:
+                self.emit(f"or.64 {r}, zero, {r} zxt 16")
             return
         dbits = dst[1] if is_int(dst) else 128
+        if dbits == 32:
+            if sbits != 32:
+                self.emit(f"or.32 {r}, {r}, 0")   # re-canonicalize at 32
+            return                # i32<->u32: same canonical image
         if dbits == 64:
+            if sbits == 32:
+                if not src[2]:    # u32: canonical-32 image reads negative
+                    self.emit(f"or.64 {r}, zero, {r} zxt 32")
+                return            # i32: the image already is the sext
             if sbits != 64:
-                self.emit(f"or.64 {r}, {r}, 0")
+                self.emit(f"or.64 {r}, {r}, 0")   # 128 -> 64 truncate
             return
         # dbits == 128 (or pointer)
         if sbits == 128:
             return
+        if sbits == 32:
+            if not src[2]:
+                self.emit(f"or.64 {r}, zero, {r} zxt 32")
+            return                # i32 image is the correct 128-bit value
         if is_int(src) and src == T_U64:
             self.emit(f"shl {r}, {r}, 64")   # zxt mod caps at 63:
             self.emit(f"shr {r}, {r}, 64")   # the pinned pair lowering
@@ -1046,12 +1084,15 @@ class Func:
         raise Cc(e[1], "not an lvalue")
 
     def index_to_128(self, r, t):
-        """Pointer arithmetic runs at width 128: a u64 offset must be
-        zero-extended first (its canonical image is the sign-extension,
-        cc-m1.md section 4)."""
+        """Pointer arithmetic runs at width 128: an unsigned offset
+        must be zero-extended from its own width first (its canonical
+        image is the sign-extension, cc-m1.md section 4). i32/i64
+        indexes need nothing - the canonical image IS the value."""
         if t == T_U64:
             self.emit(f"shl {r}, {r}, 64")
             self.emit(f"shr {r}, {r}, 64")
+        elif t == ("int", 32, False):
+            self.emit(f"or.64 {r}, zero, {r} zxt 32")
 
     def scale_index(self, elem):
         """Top of stack: index value. Scale by sizeof(elem), width 128."""
@@ -1086,7 +1127,8 @@ class Func:
                 if bits == 128:
                     self.emit(f"ld128 {r}, [sp + {kind[1]}]")
                 else:
-                    self.emit(f"{LOADS[bits]} {r}, [sp + {kind[1]}]")
+                    self.emit(f"{LOADS[(bits, t[2])]} {r}, "
+                              f"[sp + {kind[1]}]")
                 return promote(t)
         if op in ("var", "deref", "index", "field"):
             t = self.lvalue(e)
@@ -1143,7 +1185,7 @@ class Func:
         if bits == 128:
             self.emit(f"ld128 {r}, [{r} + 0]")
         else:
-            self.emit(f"{LOADS[bits]} {r}, [{r} + 0]")
+            self.emit(f"{LOADS[(bits, t[2])]} {r}, [{r} + 0]")
 
     def store_to(self, addr_reg, val_reg, t):
         bits = t[1] if is_int(t) else 128
@@ -1602,7 +1644,8 @@ class Func:
 
 # ----------------------------------------------------------------- output
 
-DATA_DIRECTIVE = {1: ".byte", 8: ".quad", 16: ".oct"}
+DATA_DIRECTIVE = {1: ".byte", 2: ".half", 4: ".word", 8: ".quad",
+                  16: ".oct"}
 
 
 def escape_string(data):

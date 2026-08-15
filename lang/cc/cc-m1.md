@@ -68,7 +68,7 @@ line and `/* ... */` (non-nesting); both are whitespace.
 | token | rule |
 |-------|------|
 | identifier | `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive; keywords excluded |
-| keyword | `u8 i64 u64 i128 u128 void struct extern if else while break continue return sizeof` |
+| keyword | `u8 i8 u16 i16 u32 i32 i64 u64 i128 u128 void struct extern if else while break continue return sizeof` (M2, 2026-08-15: `i8 u16 i16 u32 i32` join) |
 | integer literal | decimal `[0-9]+` or hex `0x[0-9A-Fa-f]+`; value < 2^128, else error. No suffixes, no octal (a leading 0 is decimal). |
 | char literal | `'c'` or `'\e'`, value 0–255; one byte exactly |
 | string literal | `"..."`; operand of nothing but expressions |
@@ -98,11 +98,23 @@ u32` are new table rows, not a redesign:
 | type | size (bits) | signedness | in registers |
 |------|------------:|------------|--------------|
 | `u8`   | 8   | unsigned | promoted to `u64` in every expression (section 5.1) |
+| `i8`   | 8   | signed   | promoted to `i64` in every expression (M2, 2026-08-15) |
+| `i16`  | 16  | signed   | promoted to `i64` (M2) |
+| `u16`  | 16  | unsigned | promoted to `u64` (M2) |
+| `i32`  | 32  | signed   | first-class at width 32: canonical-32 (sign-extended from bit 31) (M2) |
+| `u32`  | 32  | unsigned | first-class at width 32: canonical-32 (sign-extended from bit 31 — unsigned too, ISA §3.4) (M2) |
 | `i64`  | 64  | signed   | canonical (sign-extended from bit 63) |
 | `u64`  | 64  | unsigned | canonical (sign-extended from bit 63 — unsigned too, ISA §3.4) |
 | `i128` | 128 | signed   | native |
 | `u128` | 128 | unsigned | native |
 | `T*`   | 128 | unsigned | native; typed, multi-level |
+
+*(M2 note: the two-tier width model follows the ISA — the ALU has no
+8/16-bit form (ISA §3.4 narrow widths are {32, 64}), so 8- and 16-bit
+types promote in every expression exactly as m1's `u8` does; 32-bit
+types are real ALU citizens with the `.32` suffix and wrap at 32 bits
+like C. `u32 op u32` therefore wraps; `i32` overflow wraps too —
+defined, the ISA's semantics, the m1 deviation family.)*
 
 Derived types: pointers to any type, fixed-size one-dimensional arrays
 `T name[N]` (N a constant expression > 0; element scalar, pointer, or
@@ -144,9 +156,17 @@ Loads and stores per type:
 | type | load | store |
 |------|------|-------|
 | `u8` | `ldz.8` (zero-extend = canonical, bit 7 < 63) | `st.8` |
+| `i8` | `lds.8` (sign-extension IS the promoted i64 image) (M2) | `st.8` |
+| `i16` | `lds.16` (M2) | `st.16` |
+| `u16` | `ldz.16` (zero-extension is the promoted u64 image, bit 15 < 63) (M2) | `st.16` |
+| `i32`, `u32` | `lds.32` (sign-extension from bit 31 IS canonical-32 — for u32 too, the u64/`lds.64` argument one octave down) (M2) | `st.32` |
 | `i64` | `lds.64` | `st.64` |
 | `u64` | `lds.64` (sign-extension from bit 63 IS the canonical form) | `st.64` |
 | `i128`, `u128`, `T*` | `ld128` | `st128` |
+
+Stores truncate from any wider canonical image; sub-width global data
+emits with `.half`/`.word` in the same chunked style as m1's
+`.byte`/`.quad` rows.
 
 **Struct layout, frozen now so future ports never re-layout.**
 C-style: fields in declaration order, each at its natural alignment
@@ -166,9 +186,28 @@ shapes (modulo register names).
 | 64-bit → 64-bit (any signedness mix) | none (same canonical image) |
 | 128-bit or pointer → 64-bit | `or.64 rd, rs, 0` (truncate + re-canonicalize) |
 | anything → `u8` | `and.64 rd, rs, 0xff` (result is the promoted `u64` value) |
+| anything → `i8` (M2) | `or.64 rd, zero, rs sxt 8` (result is the promoted `i64` value) |
+| anything → `i16` (M2) | `or.64 rd, zero, rs sxt 16` |
+| anything → `u16` (M2) | `or.64 rd, zero, rs zxt 16` |
+| anything wider → `i32`/`u32` (M2) | `or.32 rd, rs, 0` (re-canonicalize at 32) |
+| `i32` ↔ `u32` (M2) | none (same canonical-32 image) |
+| `i32` → 64/128-bit or pointer (M2) | none (canonical-32 already IS the sign-extension, value-correct) |
+| `u32` → 64/128-bit or pointer (M2) | `or.64 rd, zero, rs zxt 32` (the mod amount fits; only 64→128 needs the shl/shr pair) |
 | `i64` → 128-bit or pointer | none (the canonical image already is the sign-extension) |
 | `u64` → 128-bit or pointer | `shl rd, rs, 64` then `shr rd, rd, 64` |
 | 128-bit ↔ 128-bit / pointer ↔ pointer | none (bit-identical) |
+
+**The zero-extension discipline (M2, 2026-08-15).** Everywhere a value
+participates at a *wider* width than its type, an unsigned sub-width
+value must be zero-extended from its own width first — its canonical
+image is sign-extended and reads negative whenever bit (w−1) is set.
+The audited list of widening sites, each with the pinned lowering
+above and a test: pointer indexing and arithmetic (a `u32` index takes
+`zxt 32`, `u64` the shl/shr pair; an `i32` index needs NOTHING — its
+canonical image is the correct 128-bit value; promoted u8/u16 are
+non-negative already), balancing to a larger common type, explicit
+widening casts, `return` widening, argument widening, and shift
+counts. Nothing else in the compiler may widen a value.
 
 *Note: the `u64` → 128 zero-extension cannot use the `zxt` mod (its
 amount field caps at 63, ISA §3.3); the `shl 64; shr 64` pair at width
@@ -207,6 +246,14 @@ qualification games exist — there are no qualifiers).
   **Documented deviation from C**, which promotes to signed `int`:
   `(u8)1 - (u8)2` is a huge positive `u64` here, `-1` in C. (The
   binding subset decision; it keeps exactly one promotion row.)
+- (M2, 2026-08-15) The new sub-32 rows follow the frozen u8 pattern:
+  `i8, i16 → i64`; `u16 → u64`. 32-bit types do not promote — they
+  are first-class at width 32. **Documented deviation from C**, which
+  promotes all sub-`int` types to 32-bit `int`: cc promotes to 64-bit;
+  where C would overflow `int` (UB), cc computes the defined 64-bit
+  result. The oracle-matrix generator (tests/gen-matrix.py) emits gcc
+  cases only for forms where the two provably coincide; the deviation
+  corners are generator-computed expect-value cases.
 - Binary arithmetic, bitwise, and comparison operands are balanced to
   the **common type**: the larger-size operand's type wins; at equal
   size, unsigned wins. (This coincides with C's usual arithmetic
@@ -486,8 +533,10 @@ aligned by construction — SABI §2.3, never by luck):
 ### 8.4 Width discipline in emitted code
 
 For 64-bit types every ALU/compare instruction carries `.64`; for
-128-bit types and pointers the bare (128) form; `u8` participates as
-`u64` (5.1). Literal operands are materialized with `li` into a temp
+32-bit types `.32` (M2 — with the unsigned variants `cmpltu.32`,
+`udiv.32`, `urem.32`, `shr.32` selected by signedness exactly as at
+64); for 128-bit types and pointers the bare (128) form; sub-32 types
+participate at their promoted 64-bit type (5.1). Literal operands are materialized with `li` into a temp
 slot (the assembler picks the minimal `LDI`/`SHORI` chain); constants
 are emitted as **signed** values of their canonical 128-bit image, so
 e.g. `u64` 0xFFFFFFFFFFFFFFFF emits `li rX, -1` (one instruction).
@@ -677,6 +726,16 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **the full integer model** (work-order decision 4):
+  §2 keywords + §3 type-table rows for `i8 i16 u16 i32 u32` with the
+  two-tier width model (sub-32 promotes to 64, 32-bit first-class at
+  `.32`); §3 load/store rows (`lds.8/16/32`, `ldz.16`, `st.16/32`);
+  §4 the new pinned conversion lowerings (`sxt`/`zxt` mods,
+  `or.32 rd, rs, 0` re-canonicalization) and the zero-extension
+  discipline with its audited widening-site list; §5.1 the sub-32
+  promotion deviation (64-bit, not C's `int`); §8.4 the `.32` width
+  discipline. Test instrument: `tests/gen-matrix.py` and the
+  checked-in `matrix-oracle-*` / `matrix-corners-*` case families.
 
 ---
 
