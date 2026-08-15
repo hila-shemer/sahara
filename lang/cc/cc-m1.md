@@ -119,7 +119,43 @@ defined, the ISA's semantics, the m1 deviation family.)*
 Derived types: pointers to any type, fixed-size one-dimensional arrays
 `T name[N]` (N a constant expression > 0; element scalar, pointer, or
 struct), and named structs. `void` is a function-return type and the
-target of no pointer (`void*` is m2).
+target of no pointer in m1.
+
+**M2 additions (2026-08-15) to the derived types:**
+
+- **`void*`** is a legal pointer type: it converts implicitly to and
+  from any *object* pointer type in both directions (assignment,
+  argument, return, comparison — no code, same representation);
+  function pointers stay explicit-cast only (section 4). `void*`
+  cannot be dereferenced or indexed and has no arithmetic (no object
+  size); `sizeof(void*)` is 16 like every pointer.
+- **Unions**: `union U { members };` — every member at offset 0;
+  size = the largest member size rounded up to the alignment;
+  alignment = the largest member alignment. Reading a member other
+  than the one last written is DEFINED: the stored bytes reinterpret
+  little-endian at the reading member's type (the no-UB culture —
+  fixed/angle punning just works). Unions follow structs everywhere
+  grammatically; struct and union tags share one namespace.
+- **Enums**: `enum E { A, B = k, C };` — a named or anonymous enum
+  type IS `i32` (it matches C89 `int` layout, so structs with enum
+  members keep their expected shapes, and enum values ride the whole
+  i32 row: loads, compares, `switch`). Enumerators are compile-time
+  `i32` constants in the ordinary identifier namespace (value =
+  previous + 1; `= const-expr` resets; a value that does not fit
+  `i32` is a loud error, never a wrap), usable in constant
+  expressions and case labels, shadowable by locals like any name.
+  `sizeof(enum E)` = 4. A trailing comma in the enumerator list is
+  tolerated.
+- **Incomplete tags and self-reference**: `struct S;` (and any
+  reference to an undefined tag) declares an *incomplete* type;
+  pointers to it are fully usable, and the tag is visible incomplete
+  inside its own definition body — `struct S *next;` inside `S`, and
+  mutually recursive structs through a forward tag, are the intended
+  uses (thinker lists). Sizing, member access, or declaring an
+  object of an incomplete type is an error at that use. struct,
+  union, and enum *definitions* live at file scope only (references
+  are fine anywhere); an anonymous struct/union/enum definition gets
+  a compiler-internal tag.
 
 **Function types (M2, 2026-08-15).** A function type `T (P1, …, Pn)` —
 return type plus parameter-type list — exists only as a pointer
@@ -372,7 +408,21 @@ Operator notes:
   first-occurrence order). Modifying one is self-sabotage, not an
   error the platform detects (MMU off).
 - `sizeof(type-name)` is a `u64` constant; type-name is any scalar,
-  pointer, or `struct` type.
+  pointer, array, struct, union, or enum type (M2 extends the list —
+  function and void types and incomplete tags are errors).
+- **`sizeof expr` (M2, 2026-08-15)**: the operand is NOT evaluated
+  (side effects do not happen — C's static semantics); its type is
+  the operand's unpromoted object type for lvalues (`sizeof` of a
+  `u8` variable is 1, of an array its full size), the expression's
+  own type otherwise (`sizeof(a + b)` reports the promoted width —
+  8 for sub-32 operands, a documented consequence of the 64-bit
+  promotion deviation). A string literal sizes as `u8*` (16): string
+  literals are pointers here, never arrays — documented deviation.
+  `sizeof expr` participates in constant expressions when the
+  operand's type is computable from file-scope declarations (the
+  `sizeof(table) / sizeof(table[0])` idiom).
+- **`(void)expr` (M2)** evaluates and discards — the
+  ignore-the-result idiom compiles.
 
 ### 5.5 Constant folding
 
@@ -788,6 +838,14 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **enums, unions, `void*`, `sizeof expr`, incomplete
+  tags** (work-order decisions 1.6/6): §3 the four M2 derived-type
+  additions (union offset-0/defined-punning representation, enum =
+  `i32`, `void*` implicit-with-object-pointers, incomplete tags with
+  in-body self-reference); §5.4 `sizeof expr` (unevaluated operand,
+  unpromoted lvalue typing, constant-expression participation) and
+  `(void)expr`; struct/union/enum definitions inline in declarations
+  (`typedef struct {...}` shape ready for the typedef change).
 - 2026-08-15 — **operator sugar** (work-order decision 1.5): §2
   punctuation; §5.2 precedence rows for postfix/prefix `++ --`, `~`,
   unary `+`, `?:`, the ten compound assignments, and the comma

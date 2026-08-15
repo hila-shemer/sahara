@@ -75,7 +75,7 @@ RESERVED = build_reserved()
 # ----------------------------------------------------------------- lexer
 
 KEYWORDS = {"u8", "i8", "u16", "i16", "u32", "i32", "i64", "u64",
-            "i128", "u128", "void", "struct",
+            "i128", "u128", "void", "struct", "union", "enum",
             "extern", "if", "else", "while", "break", "continue",
             "return", "sizeof",
             "switch", "case", "default", "for", "do", "goto"}
@@ -210,6 +210,7 @@ TYPE_KW = {"u8": ("int", 8, False), "i8": ("int", 8, True),
            "i128": ("int", 128, True), "u128": ("int", 128, False),
            "void": ("void",)}
 
+T_I32 = ("int", 32, True)
 T_I64 = ("int", 64, True)
 T_U64 = ("int", 64, False)
 T_I128 = ("int", 128, True)
@@ -228,6 +229,10 @@ def is_scalar(t):
     return t[0] in ("int", "ptr")
 
 
+def is_aggr(t):
+    return t[0] in ("struct", "union")
+
+
 def type_str(t):
     if t[0] == "int":
         return ("i" if t[2] else "u") + str(t[1])
@@ -244,19 +249,30 @@ def type_str(t):
     if t[0] == "func":
         args = ", ".join(type_str(p) for p in t[2]) or "void"
         return f"{type_str(t[1])} ({args})"
-    return "struct " + t[1]
+    return t[0] + " " + t[1]
 
 
 class Unit:
     """One translation unit: struct/function/global tables + the AST."""
 
     def __init__(self):
-        self.structs = {}    # name -> (fields:[(name, type, off)], size, align)
+        # tag table: name -> (fields | None-if-incomplete, size, align,
+        # kind) with kind "struct" | "union"; fields [(name, type, off)]
+        self.structs = {}
+        self.enumtags = set()
+        self.nanon = 0
         self.funcs = {}      # name -> (ret, params, body|None, line)
         self.globals = {}    # name -> dict(type, init, extern, line)
         self.gorder = []     # global names, declaration order
         self.forder = []     # function-definition names, source order
         self.strings = {}    # bytes -> label, first-use order
+
+    def complete(self, t):
+        """False only for a declared-but-undefined struct/union."""
+        if is_aggr(t):
+            ent = self.structs.get(t[1])
+            return ent is not None and ent[0] is not None
+        return True
 
     def t_align(self, t):
         if t[0] == "int":
@@ -265,8 +281,11 @@ class Unit:
             return 16
         if t[0] == "arr":
             return self.t_align(t[1])
-        if t[0] == "struct":
-            return self.structs[t[1]][2]
+        if is_aggr(t):
+            ent = self.structs.get(t[1])
+            if ent is None or ent[0] is None:
+                raise Cc(0, f"incomplete type {type_str(t)}")
+            return ent[2]
         raise AssertionError(t)
 
     def t_size(self, t):
@@ -276,8 +295,11 @@ class Unit:
             return 16
         if t[0] == "arr":
             return self.t_size(t[1]) * t[2]
-        if t[0] == "struct":
-            return self.structs[t[1]][1]
+        if is_aggr(t):
+            ent = self.structs.get(t[1])
+            if ent is None or ent[0] is None:
+                raise Cc(0, f"incomplete type {type_str(t)}")
+            return ent[1]
         raise AssertionError(t)
 
     def field(self, sname, fname, line):
@@ -299,6 +321,26 @@ class Parser:
         self.t = toks
         self.i = 0
         self.u = unit
+        # parse-time scope stack: name -> ("econst", image) | ("name",)
+        # - enum constants live in the ordinary identifier namespace
+        # and locals/params shadow them, so the parser tracks blocks.
+        self.pscopes = [{}]
+        self.in_body = 0
+
+    def plookup(self, name):
+        for sc in reversed(self.pscopes):
+            if name in sc:
+                return sc[name]
+        return None
+
+    def declare_name(self, name, line):
+        """An ordinary declaration shadows/collides in the parser's
+        namespace (enum constants are parse-time values)."""
+        sc = self.pscopes[-1]
+        ent = sc.get(name)
+        if ent is not None and ent[0] == "econst":
+            raise Cc(line, f"'{name}' is already an enum constant")
+        sc[name] = ("name",)
 
     def peek(self, ahead=0):
         return self.t[min(self.i + ahead, len(self.t) - 1)]
@@ -329,21 +371,140 @@ class Parser:
 
     def at_type(self):
         k, v, _ = self.peek()
-        return k == "kw" and (v in TYPE_KW or v == "struct")
+        return k == "kw" and (v in TYPE_KW
+                              or v in ("struct", "union", "enum"))
 
     def parse_base_type(self):
-        """Base type specifier only - no declarator parts."""
+        """Base type specifier only - no declarator parts. Handles
+        inline struct/union/enum definitions (file scope only)."""
         line = self.line()
-        if self.accept("kw", "struct"):
-            name = self.expect("id", what="struct name")
-            if name not in self.u.structs:
-                raise Cc(line, f"struct {name} not declared")
-            return ("struct", name)
         k, v, _ = self.peek()
+        if k == "kw" and v in ("struct", "union"):
+            kind = self.next()[1]
+            name = None
+            if self.peek()[0] == "id":
+                name = self.next()[1]
+            if self.peek()[:2] == ("p", "{"):
+                name = self.define_aggr(kind, name, line)
+            elif name is None:
+                raise Cc(line, f"expected a {kind} tag")
+            else:
+                ex = self.u.structs.get(name)
+                if ex is None:
+                    if name in self.u.enumtags:
+                        raise Cc(line, f"'{name}' is an enum tag")
+                    # reference declares an incomplete tag (M2):
+                    # pointers to it are usable, sizing is not
+                    self.u.structs[name] = (None, 0, 0, kind)
+                elif ex[3] != kind:
+                    raise Cc(line, f"'{name}' is a {ex[3]}, not a "
+                                   f"{kind}")
+            return (kind, name)
+        if k == "kw" and v == "enum":
+            self.next()
+            name = None
+            if self.peek()[0] == "id":
+                name = self.next()[1]
+            if self.peek()[:2] == ("p", "{"):
+                self.define_enum(name, line)
+            elif name is None:
+                raise Cc(line, "expected an enum tag")
+            elif name not in self.u.enumtags:
+                raise Cc(line, f"enum {name} not defined")
+            return T_I32                 # every enum type is i32 (M2)
         if not (k == "kw" and v in TYPE_KW):
             raise Cc(line, "expected a type")
         self.next()
         return TYPE_KW[v]
+
+    def define_aggr(self, kind, name, line):
+        """struct/union definition body. Registers the (possibly
+        anonymous) tag; the tag is visible - incomplete - inside its
+        own body, so 'struct S *next' self-reference works."""
+        if self.in_body:
+            raise Cc(line, f"{kind} definitions live at file scope")
+        if name is None:
+            name = f".anon{self.u.nanon}"
+            self.u.nanon += 1
+        if name in self.u.enumtags:
+            raise Cc(line, f"'{name}' is an enum tag")
+        ex = self.u.structs.get(name)
+        if ex is not None:
+            if ex[0] is not None:
+                raise Cc(line, f"{kind} {name} redefined")
+            if ex[3] != kind:
+                raise Cc(line, f"'{name}' is a {ex[3]}, not a {kind}")
+        self.u.structs[name] = (None, 0, 0, kind)
+        self.next()                      # {
+        fields, off, maxal = [], 0, 1
+        while not self.accept("p", "}"):
+            fl = self.line()
+            base = self.parse_base_type()
+            while True:
+                ft, fn, _ = self.parse_declarator(base)
+                if ft == ("void",):
+                    raise Cc(fl, "void member")
+                if ft[0] == "func":
+                    raise Cc(fl, f"member '{fn}' is a function (use a "
+                                 f"function pointer)")
+                if not self.u.complete(ft if ft[0] != "arr" else ft[1]):
+                    raise Cc(fl, f"member '{fn}' has incomplete type")
+                if any(fn == f[0] for f in fields):
+                    raise Cc(fl, f"duplicate member '{fn}'")
+                al = self.u.t_align(ft)
+                if kind == "union":
+                    fields.append((fn, ft, 0))
+                    off = max(off, self.u.t_size(ft))
+                else:
+                    off = (off + al - 1) & ~(al - 1)
+                    fields.append((fn, ft, off))
+                    off += self.u.t_size(ft)
+                maxal = max(maxal, al)
+                if self.accept("p", ";"):
+                    break
+                self.expect("p", ",")
+        size = (off + maxal - 1) & ~(maxal - 1)
+        if not fields:
+            raise Cc(line, f"{kind} {name} is empty")
+        self.u.structs[name] = (fields, size, maxal, kind)
+        return name
+
+    def define_enum(self, name, line):
+        """enum definition: enumerators are compile-time i32 constants
+        in the ordinary identifier namespace (value = previous + 1;
+        '= const-expr' resets; must fit i32 - loud error, no wrap)."""
+        if self.in_body:
+            raise Cc(line, "enum definitions live at file scope")
+        if name is not None:
+            if name in self.u.enumtags:
+                raise Cc(line, f"enum {name} redefined")
+            if name in self.u.structs:
+                raise Cc(line, f"'{name}' is a "
+                               f"{self.u.structs[name][3]} tag")
+        self.next()                      # {
+        prev = -1
+        while True:
+            el = self.line()
+            ename = self.expect("id", what="an enumerator name")
+            if self.accept("p", "="):
+                v = self.const_expr("enumerator value")
+                prev = v
+            else:
+                prev = prev + 1
+            if not (-(1 << 31) <= prev <= (1 << 31) - 1):
+                raise Cc(el, f"enumerator {ename} = {prev} does not "
+                             f"fit i32")
+            sc = self.pscopes[0]
+            if ename in sc:
+                raise Cc(el, f"'{ename}' redeclared as an enumerator")
+            sc[ename] = ("econst", sext(prev, 32))
+            if self.accept("p", "}"):
+                break
+            self.expect("p", ",")
+            if self.accept("p", "}"):
+                break                    # trailing comma tolerated
+        if name is not None:
+            self.u.enumtags.add(name)
 
     # ---- declarators: the standard two-stage C parser. A declarator
     # is parsed structurally first (tokens are consumed left to right),
@@ -363,7 +524,7 @@ class Parser:
         line = self.line()
         stars = 0
         while self.accept("p", "*"):
-            stars += 1
+            stars += 1                   # void* is legal from M2 on
         name, innerb = None, None
         if self.peek()[0] == "id":
             name = self.next()[1]
@@ -397,8 +558,6 @@ class Parser:
         def build(t):
             fparams = None
             for _ in range(stars):
-                if t == ("void",):
-                    raise Cc(line, "void* is not in m1 (see the roadmap)")
                 t = ("ptr", t)
             for p in reversed(posts):
                 if p[0] == "arr":
@@ -476,14 +635,11 @@ class Parser:
 
     def parse_unit(self):
         while self.peek()[0] != "eof":
-            if (self.peek() == ("kw", "struct", self.peek()[2])
-                    and self.peek(1)[0] == "id"
-                    and self.peek(2)[:2] == ("p", "{")):
-                self.parse_struct()
-                continue
             line = self.line()
             is_extern = bool(self.accept("kw", "extern"))
             base = self.parse_base_type()
+            if self.accept("p", ";"):
+                continue                 # tag-only declaration
             while True:
                 t, name, fparams = self.parse_declarator(base)
                 if t[0] == "func":
@@ -494,40 +650,6 @@ class Parser:
                 if self.accept("p", ";"):
                     break
                 self.expect("p", ",")
-
-    def parse_struct(self):
-        line = self.line()
-        self.next()                      # struct
-        name = self.expect("id")
-        if name in self.u.structs:
-            raise Cc(line, f"struct {name} redefined")
-        self.expect("p", "{")
-        fields, off, maxal = [], 0, 1
-        while not self.accept("p", "}"):
-            fl = self.line()
-            base = self.parse_base_type()
-            while True:
-                ft, fn, _ = self.parse_declarator(base)
-                if ft == ("void",):
-                    raise Cc(fl, "void member")
-                if ft[0] == "func":
-                    raise Cc(fl, f"member '{fn}' is a function (use a "
-                                 f"function pointer)")
-                if any(fn == f[0] for f in fields):
-                    raise Cc(fl, f"duplicate member '{fn}'")
-                al = self.u.t_align(ft)
-                off = (off + al - 1) & ~(al - 1)
-                fields.append((fn, ft, off))
-                off += self.u.t_size(ft)
-                maxal = max(maxal, al)
-                if self.accept("p", ";"):
-                    break
-                self.expect("p", ",")
-        self.expect("p", ";")
-        size = (off + maxal - 1) & ~(maxal - 1)
-        if not fields:
-            raise Cc(line, f"struct {name} is empty")
-        self.u.structs[name] = (fields, size, maxal)
 
     def check_label_name(self, name, line):
         if name.lower() in RESERVED:
@@ -552,6 +674,7 @@ class Parser:
             if old is None:
                 params = [(p[0], p[1]) for p in fparams]
                 self.u.funcs[name] = (ret, params, None, line)
+                self.declare_name(name, line)
             return False
         if old is not None and old[2] is not None:
             raise Cc(line, f"{name}() redefined")
@@ -560,7 +683,14 @@ class Parser:
                 raise Cc(pl, f"parameter of {name}() needs a name in a "
                              f"definition")
         params = [(p[0], p[1]) for p in fparams]
+        self.declare_name(name, line)
+        self.pscopes.append({})
+        for pn, pt, pl in fparams:
+            self.declare_name(pn, pl)
+        self.in_body += 1
         body = self.parse_block()
+        self.in_body -= 1
+        self.pscopes.pop()
         self.u.funcs[name] = (ret, params, body, line)
         self.u.forder.append(name)
         return True
@@ -608,6 +738,7 @@ class Parser:
             return
         if name in self.u.funcs:
             raise Cc(line, f"'{name}' already declared as a function")
+        self.declare_name(name, line)
         self.u.globals[name] = {"type": t, "init": init,
                                 "extern": is_extern, "line": line}
         self.u.gorder.append(name)
@@ -625,9 +756,11 @@ class Parser:
 
     def parse_block(self):
         self.expect("p", "{")
+        self.pscopes.append({})
         stmts = []
         while not self.accept("p", "}"):
             stmts.append(self.parse_stmt())
+        self.pscopes.pop()
         return ("block", stmts)
 
     def parse_stmt(self):
@@ -644,6 +777,7 @@ class Parser:
                 if t[0] == "func":
                     raise Cc(line, "no function declarations at block "
                                    "scope (declare it at file scope)")
+                self.pscopes[-1][name] = ("name",)
                 init = None
                 if self.accept("p", "="):
                     if not is_scalar(t):
@@ -786,12 +920,14 @@ class Parser:
         if (k, v) == ("p", "("):
             # cast?  '(' type ... ')'
             nk, nv, _ = self.peek(1)
-            if nk == "kw" and (nv in TYPE_KW or nv == "struct"):
+            if nk == "kw" and (nv in TYPE_KW
+                               or nv in ("struct", "union", "enum")):
                 self.next()
                 t = self.parse_typename()
                 self.expect("p", ")")
-                if not is_scalar(t):
-                    raise Cc(line, "casts are scalar-to-scalar only")
+                if t != ("void",) and not is_scalar(t):
+                    raise Cc(line, "casts are scalar-to-scalar only "
+                                   "(or to void)")
                 return ("cast", line, t, self.parse_unary())
         if self.accept("p", "++"):
             return ("preinc", line, self.parse_unary(), 1)
@@ -810,13 +946,20 @@ class Parser:
         if self.accept("p", "&"):
             return ("addr", line, self.parse_unary())
         if self.accept("kw", "sizeof"):
-            self.expect("p", "(")
-            t = self.parse_typename()
-            self.expect("p", ")")
-            if not is_scalar(t) and t[0] != "struct":
-                raise Cc(line, "sizeof takes a scalar, pointer, or "
-                               "struct type")
-            return ("num", line, self.u.t_size(t) & MASK128, T_U64)
+            nk, nv, _ = self.peek(1)
+            if self.peek()[:2] == ("p", "(")                     and nk == "kw" and (nv in TYPE_KW
+                                        or nv in ("struct", "union",
+                                                  "enum")):
+                self.next()
+                t = self.parse_typename()
+                self.expect("p", ")")
+                if t[0] == "func" or t == ("void",):
+                    raise Cc(line, f"sizeof cannot size {type_str(t)}")
+                if not self.u.complete(t):
+                    raise Cc(line, f"sizeof of incomplete "
+                                   f"{type_str(t)}")
+                return ("num", line, self.u.t_size(t) & MASK128, T_U64)
+            return ("sizeofe", line, self.parse_unary())
         return self.parse_postfix()
 
     def parse_postfix(self):
@@ -826,7 +969,11 @@ class Parser:
         elif k == "str":
             e = ("strlit", line, v)
         elif k == "id":
-            e = ("var", line, v)
+            ent = self.plookup(v)
+            if ent is not None and ent[0] == "econst":
+                e = ("num", line, ent[1], T_I32)
+            else:
+                e = ("var", line, v)
         elif (k, v) == ("p", "("):
             e = self.parse_expr()
             self.expect("p", ")")
@@ -981,11 +1128,55 @@ def ce_rem(a, b, signed, bits):
     return a - ce_div(a, b, signed, bits) * b
 
 
+def static_type(e, unit):
+    """Type of an expression computable without function scopes
+    (file-scope names only) - lets sizeof(expr) participate in
+    constant expressions for the arrlen-on-a-global idiom."""
+    op = e[0]
+    if op == "num":
+        return e[3]
+    if op == "strlit":
+        return ("ptr", ("int", 8, False))
+    if op == "var":
+        g = unit.globals.get(e[2])
+        return g["type"] if g else None
+    if op in ("deref", "index"):
+        t = static_type(e[2], unit)
+        return t[1] if t and t[0] in ("ptr", "arr") else None
+    if op == "field":
+        t = static_type(e[2], unit)
+        if t is None:
+            return None
+        if e[4]:
+            if not (is_ptr(t) and is_aggr(t[1])):
+                return None
+            t = t[1]
+        if not is_aggr(t):
+            return None
+        try:
+            ft, _ = unit.field(t[1], e[3], e[1])
+        except Cc:
+            return None
+        return ft
+    if op == "addr":
+        t = static_type(e[2], unit)
+        return ("ptr", t) if t else None
+    if op == "cast":
+        return e[2]
+    return None
+
+
 def const_eval(e, unit):
     """-> ("num", line, image128, type) or None if not constant."""
     op = e[0]
     if op == "num":
         return e
+    if op == "sizeofe":
+        t = static_type(e[2], unit)
+        if t is None or t[0] == "func" or t == ("void",) \
+                or not unit.complete(t):
+            return None
+        return ("num", e[1], unit.t_size(t) & MASK128, T_U64)
     if op == "cast":
         t = e[2]
         if not is_int(t):
@@ -1129,6 +1320,8 @@ class Func:
                     stack.extend(reversed(n))
                 continue
             order.append(n)
+            if n[0] == "sizeofe":
+                continue        # unevaluated operand: nothing to count
             stack.extend(reversed([x for x in n
                                    if isinstance(x, (tuple, list))]))
         for n in order:
@@ -1240,6 +1433,10 @@ class Func:
         if src == dst or (is_int(src) and is_int(dst)):
             self.convert(r, promote(src) if is_int(src) else src, dst, line)
             return
+        if is_ptr(src) and is_ptr(dst) \
+                and (src[1] == ("void",) or dst[1] == ("void",)) \
+                and src[1][0] != "func" and dst[1][0] != "func":
+            return          # T* <-> void*, both directions, no code (M2)
         raise Cc(line, f"{what}: cannot convert {type_str(src)} to "
                        f"{type_str(dst)} implicitly (cast needed?)")
 
@@ -1259,11 +1456,16 @@ class Func:
             t = self.rvalue(e[2])
             if not is_ptr(t):
                 raise Cc(e[1], f"cannot dereference {type_str(t)}")
+            if t[1] == ("void",):
+                raise Cc(e[1], "cannot dereference void* (cast first)")
             return t[1]
         if op == "index":
             bt = self.rvalue(e[2])
             if not is_ptr(bt):
                 raise Cc(e[1], f"cannot index {type_str(bt)}")
+            if bt[1][0] in ("void", "func"):
+                raise Cc(e[1], f"cannot index {type_str(bt)} (no "
+                               f"object size)")
             it = self.rvalue(e[3])
             if not is_int(it):
                 raise Cc(e[1], "index must be an integer")
@@ -1277,14 +1479,17 @@ class Func:
             _, line, base, fname, arrow = e
             if arrow:
                 bt = self.rvalue(base)
-                if not (is_ptr(bt) and bt[1][0] == "struct"):
-                    raise Cc(line, f"-> needs a struct pointer, got "
-                                   f"{type_str(bt)}")
+                if not (is_ptr(bt) and is_aggr(bt[1])):
+                    raise Cc(line, f"-> needs a struct/union pointer, "
+                                   f"got {type_str(bt)}")
                 st = bt[1]
             else:
                 st = self.lvalue(base)
-                if st[0] != "struct":
-                    raise Cc(line, f". needs a struct, got {type_str(st)}")
+                if not is_aggr(st):
+                    raise Cc(line, f". needs a struct/union, got "
+                                   f"{type_str(st)}")
+            if not self.u.complete(st):
+                raise Cc(line, f"{type_str(st)} is incomplete here")
             ft, off = self.u.field(st[1], fname, line)
             if off:
                 self.emit(f"add {self.top()}, {self.top()}, {off}")
@@ -1345,7 +1550,7 @@ class Func:
                 return ("ptr", t[1])          # decay: address already up
             if t[0] == "func":
                 return ("ptr", t)             # designator decay (M2)
-            if t[0] == "struct":
+            if is_aggr(t):
                 raise Cc(e[1], "struct values are not usable directly "
                                "in m1 (no struct assignment/copy)")
             self.load(r, t)
@@ -1373,11 +1578,19 @@ class Func:
             self.emit(f"(!p1) li {r}, 0")
             return T_I64
         if op == "cast":
+            if e[2] == ("void",):
+                self.rvalue(e[3])         # (void)e: value discarded
+                return ("void",)
             t = self.rvalue(e[3])
             src = t if is_ptr(t) else promote(t)
             dst = e[2]
             self.convert(self.top(), src, dst, e[1])
             return promote(dst) if is_int(dst) else dst
+        if op == "sizeofe":
+            t = self.typeof_operand(e[2], e[1])
+            r = self.push()
+            self.emit(f"li {r}, {self.u.t_size(t)}")
+            return T_U64
         if op == "bitnot":
             t = self.rvalue(e[2])
             if not is_int(t):
@@ -1441,6 +1654,10 @@ class Func:
 
         # pointer arithmetic (cc-m1.md 5.3)
         if opname in ("+", "-") and (is_ptr(lt) or is_ptr(rt)):
+            for pt_ in (lt, rt):
+                if is_ptr(pt_) and pt_[1][0] in ("void", "func"):
+                    raise Cc(line, f"pointer arithmetic on "
+                                   f"{type_str(pt_)} (no object size)")
             if is_ptr(lt) and is_ptr(rt):
                 if opname != "-" or lt != rt:
                     raise Cc(line, "pointer +/- pointer: only p - q of "
@@ -1524,7 +1741,10 @@ class Func:
         if is_ptr(lt) or is_ptr(rt):
             ok = (lt == rt) \
                 or (is_ptr(lt) and r[0] == "num" and r[2] == 0) \
-                or (is_ptr(rt) and l[0] == "num" and l[2] == 0)
+                or (is_ptr(rt) and l[0] == "num" and l[2] == 0) \
+                or (is_ptr(lt) and is_ptr(rt)
+                    and (lt[1] == ("void",) or rt[1] == ("void",))
+                    and lt[1][0] != "func" and rt[1][0] != "func")
             if not ok:
                 raise Cc(line, f"cannot compare {type_str(lt)} with "
                                f"{type_str(rt)}")
@@ -1777,6 +1997,35 @@ class Func:
         self.emit(f"mov {ra}, {rv}")
         self.pop()
         return promote(t) if is_int(t) else t
+
+    def typeof_operand(self, e, line):
+        """The type of a sizeof operand, WITHOUT evaluating it (C
+        static semantics): generate into a discard buffer and roll
+        every counter back. lvalue-shaped operands report their
+        unpromoted object type; rvalue expressions their (promoted)
+        expression type - which IS their type."""
+        saved_lines, saved_depth = self.lines, self.depth
+        saved_peak, saved_nlabel = self.peak, self.nlabel
+        saved_nstr = len(self.u.strings)
+        self.lines = []
+        try:
+            try:
+                t = self.lvalue(e)
+            except Cc:
+                self.depth = saved_depth
+                t = self.rvalue(e)
+        finally:
+            self.lines = saved_lines
+            self.depth = saved_depth
+            self.peak = saved_peak
+            self.nlabel = saved_nlabel
+            for k in list(self.u.strings)[saved_nstr:]:
+                del self.u.strings[k]
+        if t[0] == "func" or t == ("void",):
+            raise Cc(line, f"sizeof cannot size {type_str(t)}")
+        if not self.u.complete(t):
+            raise Cc(line, f"sizeof of incomplete {type_str(t)}")
+        return t
 
     def load_from(self, rd, raddr, t):
         """Typed load of *raddr into rd (rd != raddr variant of load)."""
