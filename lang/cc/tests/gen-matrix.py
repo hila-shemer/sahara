@@ -234,6 +234,12 @@ class Case:
         rv = as_type(-as_type(v, bits, signed), bits, signed)
         self.fold(f"-{a}", to_u64(rv, (bits, signed)))
 
+    def bitnot(self, tn, v):
+        a = self.var(tn, v)
+        bits, signed = promote(*TYPES[tn])
+        rv = as_type(~as_type(v, bits, signed), bits, signed)
+        self.fold(f"~{a}", to_u64(rv, (bits, signed)))
+
     def cast(self, to, tn, v):
         a = self.var(tn, v)
         tb, ts = TYPES[to]
@@ -275,6 +281,7 @@ def gen_oracle_pair_file(name, tnames, comment):
         for v in corners(b, s):
             if not (s and b >= 32 and v == -(1 << (b - 1))):
                 c.neg(tn, v)
+            c.bitnot(tn, v)   # ~ commutes with sign-extension: always
     return c
 
 

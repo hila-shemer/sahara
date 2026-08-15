@@ -79,8 +79,10 @@ KEYWORDS = {"u8", "i8", "u16", "i16", "u32", "i32", "i64", "u64",
             "extern", "if", "else", "while", "break", "continue",
             "return", "sizeof",
             "switch", "case", "default", "for", "do", "goto"}
-PUNCT2 = ("==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||")
-PUNCT1 = "()[]{};,.=<>+-*/%&|^!:?"
+PUNCT3 = ("<<=", ">>=")
+PUNCT2 = ("==", "!=", "<=", ">=", "->", "<<", ">>", "&&", "||",
+          "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=")
+PUNCT1 = "()[]{};,.=<>+-*/%&|^!:?~"
 
 ESCAPES = {"n": 0x0A, "t": 0x09, "r": 0x0D, "b": 0x08, "f": 0x0C,
            "0": 0x00, "\\": 0x5C, '"': 0x22, "'": 0x27}
@@ -176,6 +178,11 @@ def lex(src):
                     j += 1
             toks.append(("str", bytes(data), line))
             i = j + 1
+            continue
+        three = src[i:i + 3]
+        if three in PUNCT3:
+            toks.append(("p", three, line))
+            i += 3
             continue
         two = src[i:i + 2]
         if two in PUNCT2:
@@ -609,7 +616,7 @@ class Parser:
 
     def const_expr(self, what):
         line = self.line()
-        v = const_eval(self.parse_expr(), self.u)
+        v = const_eval(self.parse_assign(), self.u)
         if v is None:
             raise Cc(line, f"{what} must be a constant expression")
         return to_signed(v[2])
@@ -642,7 +649,7 @@ class Parser:
                     if not is_scalar(t):
                         raise Cc(line, "arrays and structs cannot be "
                                        "initialized in m1")
-                    init = self.parse_expr()
+                    init = self.parse_assign()
                 decls.append(("decl", line, t, name, init))
                 if self.accept("p", ";"):
                     break
@@ -687,7 +694,7 @@ class Parser:
             self.expect("p", ")")
             return ("switch", line, e, self.parse_stmt())
         if self.accept("kw", "case"):
-            v = self.parse_expr()
+            v = self.parse_assign()
             self.expect("p", ":")
             return ("case", line, v, self.parse_stmt())
         if self.accept("kw", "default"):
@@ -719,16 +726,39 @@ class Parser:
 
     # ---- expressions (C precedence, cc-m1.md 5.2)
 
-    def parse_expr(self):
-        return self.parse_assign()
+    ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/",
+                  "%=": "%", "&=": "&", "|=": "|", "^=": "^",
+                  "<<=": "<<", ">>=": ">>"}
 
-    def parse_assign(self):
-        lhs = self.parse_or()
-        if self.peek()[:2] == ("p", "="):
+    def parse_expr(self):
+        e = self.parse_assign()
+        while self.peek()[:2] == ("p", ","):
             line = self.line()
             self.next()
+            e = ("comma", line, e, self.parse_assign())
+        return e
+
+    def parse_assign(self):
+        lhs = self.parse_ternary()
+        k, v, line = self.peek()
+        if (k, v) == ("p", "="):
+            self.next()
             return ("assign", line, lhs, self.parse_assign())
+        if k == "p" and v in self.ASSIGN_OPS:
+            self.next()
+            return ("opassign", line, self.ASSIGN_OPS[v], lhs,
+                    self.parse_assign())
         return lhs
+
+    def parse_ternary(self):
+        e = self.parse_or()
+        if self.peek()[:2] == ("p", "?"):
+            line = self.line()
+            self.next()
+            a = self.parse_expr()
+            self.expect("p", ":")
+            return ("ternary", line, e, a, self.parse_assign())
+        return e
 
     BINLEVELS = [("||",), ("&&",), ("|",), ("^",), ("&",),
                  ("==", "!="), ("<", ">", "<=", ">="), ("<<", ">>"),
@@ -763,8 +793,16 @@ class Parser:
                 if not is_scalar(t):
                     raise Cc(line, "casts are scalar-to-scalar only")
                 return ("cast", line, t, self.parse_unary())
+        if self.accept("p", "++"):
+            return ("preinc", line, self.parse_unary(), 1)
+        if self.accept("p", "--"):
+            return ("preinc", line, self.parse_unary(), -1)
         if self.accept("p", "-"):
             return ("neg", line, self.parse_unary())
+        if self.accept("p", "+"):
+            return ("uplus", line, self.parse_unary())
+        if self.accept("p", "~"):
+            return ("bitnot", line, self.parse_unary())
         if self.accept("p", "!"):
             return ("not", line, self.parse_unary())
         if self.accept("p", "*"):
@@ -804,13 +842,17 @@ class Parser:
                 e = ("field", line, e, self.expect("id"), False)
             elif self.accept("p", "->"):
                 e = ("field", line, e, self.expect("id"), True)
+            elif self.accept("p", "++"):
+                e = ("postinc", line, e, 1)
+            elif self.accept("p", "--"):
+                e = ("postinc", line, e, -1)
             elif self.peek()[:2] == ("p", "("):
                 # call: the callee is whatever postfix expression is up
                 self.next()
                 args = []
                 if not self.accept("p", ")"):
                     while True:
-                        args.append(self.parse_expr())
+                        args.append(self.parse_assign())
                         if self.accept("p", ")"):
                             break
                         self.expect("p", ",")
@@ -867,6 +909,14 @@ def fold(e, unit):
         _, line, pat, t = e[2]
         t = promote(t)
         return ("num", line, sext(-to_val(pat, t), t[1]), t)
+    if e[0] == "bitnot" and e[2][0] == "num":
+        _, line, pat, t = e[2]
+        t = promote(t)
+        return ("num", line, sext(~to_val(pat, t), t[1]), t)
+    if e[0] == "uplus" and e[2][0] == "num":
+        _, line, pat, t = e[2]
+        t = promote(t)
+        return ("num", line, sext(to_val(pat, t), t[1]), t)
     if e[0] == "bin" and e[2] in FOLDABLE \
             and e[3][0] == "num" and e[4][0] == "num":
         v = fold_bin(e[2], e[3], e[4])
@@ -1328,6 +1378,29 @@ class Func:
             dst = e[2]
             self.convert(self.top(), src, dst, e[1])
             return promote(dst) if is_int(dst) else dst
+        if op == "bitnot":
+            t = self.rvalue(e[2])
+            if not is_int(t):
+                raise Cc(e[1], f"~ needs an integer, got {type_str(t)}")
+            r = self.top()
+            self.emit(f"xor{suffix(t)} {r}, {r}, -1")
+            return t
+        if op == "uplus":
+            t = self.rvalue(e[2])
+            if not is_int(t):
+                raise Cc(e[1], f"unary + needs an integer, got "
+                               f"{type_str(t)}")
+            return t
+        if op == "comma":
+            self.rvalue(e[2])
+            self.pop()                    # value discarded, effects kept
+            return self.rvalue(e[3])
+        if op == "ternary":
+            return self.gen_ternary(e)
+        if op in ("preinc", "postinc"):
+            return self.gen_incdec(e)
+        if op == "opassign":
+            return self.gen_opassign(e)
         if op == "bin":
             return self.gen_bin(e)
         if op == "logic":
@@ -1547,6 +1620,171 @@ class Func:
             self.emit(f"st128 [sp + {off}], {val_reg}")
         else:
             self.emit(f"{STORES[bits]} [sp + {off}], {val_reg}")
+
+    def gen_ternary(self, e):
+        """?: branch-lowered like && (no if-conversion): both arms
+        target the same temp-stack slot; the then-arm's conversion to
+        the common type is inserted after the fact (the common type is
+        only known once both arm types are)."""
+        _, line, c, a, b = e
+        pol = self.cond(c)
+        base = self.depth
+        lelse = self.label()
+        lend = self.label()
+        self.emit(f"({'!' if pol else ''}p1) b {lelse}")
+        t1 = self.rvalue(a)
+        m1 = len(self.lines)              # then-arm convert goes here
+        self.emit(f"b {lend}")
+        self.depth = base                 # else arm refills the slot
+        self.emit_label(lelse)
+        t2 = self.rvalue(b)
+        if t1 == ("void",) and t2 == ("void",):
+            t = ("void",)
+        elif is_int(t1) and is_int(t2):
+            t = common_type(t1, t2)
+            if t2 != t:
+                self.convert(self.top(), t2, t, line)
+            if t1 != t:
+                saved = self.lines
+                self.lines = []
+                self.convert(self.reg(base), t1, t, line)
+                ins = self.lines
+                self.lines = saved
+                self.lines[m1:m1] = ins
+        elif is_ptr(t1) and is_ptr(t2) and t1 == t2:
+            t = t1
+        elif is_ptr(t1) and b[0] == "num" and b[2] == 0:
+            t = t1                        # null arm: image already 0
+        elif is_ptr(t2) and a[0] == "num" and a[2] == 0:
+            t = t2
+        else:
+            raise Cc(line, f"?: arms disagree: {type_str(t1)} vs "
+                           f"{type_str(t2)}")
+        self.emit_label(lend)
+        return t
+
+    def gen_incdec(self, e):
+        op, line, target, delta = e
+        post = op == "postinc"
+        t = self.lvalue(target)
+        if not is_scalar(t):
+            raise Cc(line, f"++/-- needs a scalar lvalue, got "
+                           f"{type_str(t)}")
+        ra = self.top()
+        rv = self.push()
+        self.load_from(rv, ra, t)
+        if post:
+            rn = self.push()
+            self.emit(f"mov {rn}, {rv}")
+            work = rn
+        else:
+            work = rv
+        if is_ptr(t):
+            if t[1][0] in ("func", "void"):
+                raise Cc(line, f"++/-- on {type_str(t)} (no object "
+                               f"size)")
+            step = self.u.t_size(t[1]) * delta
+            if -(1 << 21) <= step < (1 << 21):
+                self.emit(f"add {work}, {work}, {step}")
+            else:
+                rt_ = self.push()
+                self.emit(f"li {rt_}, {step}")
+                self.emit(f"add {work}, {work}, {rt_}")
+                self.pop()
+            wt = t
+        else:
+            pt = promote(t)
+            self.emit(f"add{suffix(t)} {work}, {work}, {delta}")
+            wt = pt
+        # assignment conversion: canonicalize back to t's stored form
+        self.convert(work, wt, t, line)
+        self.store_to(ra, work, t)
+        if post:
+            self.pop()                    # drop the new value
+        self.emit(f"mov {ra}, {rv}")      # result into the addr slot
+        self.pop()
+        return promote(t) if is_int(t) else t
+
+    def gen_opassign(self, e):
+        """Compound assignment: lvalue address once (left-to-right),
+        load, evaluate rhs, operate, convert back, store. The
+        expression value is the stored value, promoted."""
+        _, line, opname, lhs, rhs = e
+        t = self.lvalue(lhs)
+        if not is_scalar(t):
+            raise Cc(line, f"cannot assign to {type_str(t)}")
+        ra = self.top()
+        rc = self.push()
+        self.load_from(rc, ra, t)
+        ct = promote(t) if is_int(t) else t
+        rt_ = self.rvalue(rhs)
+        rr = self.top()
+        if is_ptr(t):
+            if opname not in ("+", "-"):
+                raise Cc(line, f"{opname}= is not pointer arithmetic")
+            if not is_int(rt_):
+                raise Cc(line, "pointer arithmetic needs an integer")
+            if t[1][0] in ("func", "void"):
+                raise Cc(line, f"{opname}= on {type_str(t)} (no "
+                               f"object size)")
+            self.index_to_128(rr, rt_)
+            size = self.u.t_size(t[1])
+            mnem = "add" if opname == "+" else "sub"
+            if size > 1:
+                if size & (size - 1) == 0:
+                    self.emit(f"{mnem} {rc}, {rc}, {rr} shl "
+                              f"{size.bit_length() - 1}")
+                    self.pop()
+                    res_t = t
+                else:
+                    self.emit(f"mul {rr}, {rr}, {size}")
+                    self.emit(f"{mnem} {rc}, {rc}, {rr}")
+                    self.pop()
+                    res_t = t
+            else:
+                self.emit(f"{mnem} {rc}, {rc}, {rr}")
+                self.pop()
+                res_t = t
+        elif not (is_int(ct) and is_int(rt_)):
+            raise Cc(line, f"operator {opname}= needs integers, got "
+                           f"{type_str(t)} and {type_str(rt_)}")
+        elif opname in ("<<", ">>"):
+            if opname == "<<":
+                mnem = "shl"
+            else:
+                mnem = "sar" if ct[2] else "shr"
+            self.emit(f"{mnem}{suffix(ct)} {rc}, {rc}, {rr}")
+            self.pop()
+            res_t = ct
+        else:
+            c = common_type(ct, rt_)
+            if ct != c:
+                self.convert(rc, ct, c, line)
+            if rt_ != c:
+                self.convert(rr, rt_, c, line)
+            if opname in ("/", "%"):
+                table = {("/", True): "sdiv", ("/", False): "udiv",
+                         ("%", True): "srem", ("%", False): "urem"}
+                mnem = table[(opname, c[2])]
+            else:
+                mnem = ALU[opname]
+            self.emit(f"{mnem}{suffix(c)} {rc}, {rc}, {rr}")
+            self.pop()
+            res_t = c
+        rv = self.top()
+        self.implicit(rv, res_t, t, line, "assignment")
+        self.store_to(ra, rv, t)
+        self.emit(f"mov {ra}, {rv}")
+        self.pop()
+        return promote(t) if is_int(t) else t
+
+    def load_from(self, rd, raddr, t):
+        """Typed load of *raddr into rd (rd != raddr variant of load)."""
+        bits = t[1] if is_int(t) else 128
+        if bits == 128:
+            self.emit(f"ld128 {rd}, [{raddr} + 0]")
+        else:
+            self.emit(f"{LOADS[(bits, t[2])]} {rd}, [{raddr} + 0]")
 
     def gen_call(self, e):
         _, line, callee, args = e
@@ -2030,7 +2268,9 @@ def fold_body(node, unit):
         return node
     if node and isinstance(node[0], str) and node[0] in (
             "bin", "logic", "neg", "not", "cast", "addr", "deref",
-            "index", "field", "call", "assign", "strlit"):
+            "index", "field", "call", "assign", "strlit", "bitnot",
+            "uplus", "ternary", "comma", "opassign", "preinc",
+            "postinc"):
         return fold(tuple(fold_body(x, unit) for x in node), unit)
     return tuple(fold_body(x, unit) for x in node)
 

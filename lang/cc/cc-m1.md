@@ -72,7 +72,7 @@ line and `/* ... */` (non-nesting); both are whitespace.
 | integer literal | decimal `[0-9]+` or hex `0x[0-9A-Fa-f]+`; value < 2^128, else error. No suffixes, no octal (a leading 0 is decimal). |
 | char literal | `'c'` or `'\e'`, value 0–255; one byte exactly |
 | string literal | `"..."`; operand of nothing but expressions |
-| punctuation | `( ) [ ] { } ; , . -> = == != < > <= >= + - * / % & \| ^ << >> && \|\| !` |
+| punctuation | `( ) [ ] { } ; , . -> = == != < > <= >= + - * / % & \| ^ << >> && \|\| !` — M2 (2026-08-15) adds `++ -- ~ ? : += -= *= /= %= &= \|= ^= <<= >>=` |
 
 Escapes in char and string literals, exactly the asm.md 2.2 set:
 `\n \t \r \b \f \0 \\ \" \'` and `\xHH` (exactly two hex digits).
@@ -267,8 +267,8 @@ qualification games exist — there are no qualifiers).
 
 | level | operators | associativity |
 |------:|-----------|---------------|
-| 1 | calls `f(...)`, indexing `a[i]`, `.`, `->` | left |
-| 2 | unary `- ! * &`, cast `(type)e`, `sizeof(type)` | right |
+| 1 | calls `f(...)`, indexing `a[i]`, `.`, `->`, postfix `++ --` (M2) | left |
+| 2 | unary `- + ! ~ * &`, prefix `++ --`, cast `(type)e`, `sizeof(type)` (M2 adds `+ ~ ++ --`) | right |
 | 3 | `* / %` | left |
 | 4 | `+ -` | left |
 | 5 | `<< >>` | left |
@@ -279,7 +279,13 @@ qualification games exist — there are no qualifiers).
 | 10 | `\|` | left |
 | 11 | `&&` | left |
 | 12 | `\|\|` | left |
-| 13 | `=` | right |
+| 13 | `?:` (M2) | right |
+| 14 | `= += -= *= /= %= &= \|= ^= <<= >>=` (M2 adds the compound forms) | right |
+| 15 | `,` (M2) | left |
+
+M2 (2026-08-15) additions keep this C's exact precedence. The comma
+operator exists only where C has it: call arguments and initializers
+bind at assignment level, constant expressions at `?:` level.
 
 This is C's precedence exactly (with C's relational-below-shift,
 bitwise-below-equality ordering), so a host C compiler is a valid
@@ -332,6 +338,28 @@ Operator notes:
   first, then the arguments left to right. Function pointers compare
   with `== !=` against pointers of the identical type or the literal
   `0`.
+- **`++ --` (M2)**: any scalar lvalue; pointer steps scale by the
+  pointee size. The stored value is the incremented value converted
+  to the lvalue's type (a `u8` at 255 stores 0); prefix yields the
+  new value, postfix the old, both promoted. Lowering: address once,
+  typed load, `add` at the promoted width, assignment conversion,
+  typed store.
+- **Compound assignment (M2)**: all ten `op=` forms. Evaluation
+  order: the lvalue address is computed once, first; then the load;
+  then the right-hand side (strict left-to-right, an *answer* where
+  C89 leaves it open). The operation follows the binary-operator
+  rules (balancing, signedness selection, shift typing); the result
+  then takes the ordinary assignment conversion to the lvalue's type
+  and the expression's value is that stored value, promoted.
+  `p += n` / `p -= n` are pointer arithmetic.
+- **`?:` (M2)**: branch-lowered like `&&` — the unevaluated arm's
+  side effects do not happen. Integer arms balance to the common
+  type; pointer arms must agree exactly (or one arm is the literal
+  `0`); two `void` arms give a `void` result.
+- **`~` (M2)**: promoted operand, `xor` with −1 at the operand's
+  width. Unary `+` (M2) is a no-op on a promoted integer. The comma
+  operator (M2) evaluates left, discards, evaluates right; its value
+  and type are the right operand's.
 
 ### 5.4 Literals
 
@@ -760,6 +788,12 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **operator sugar** (work-order decision 1.5): §2
+  punctuation; §5.2 precedence rows for postfix/prefix `++ --`, `~`,
+  unary `+`, `?:`, the ten compound assignments, and the comma
+  operator; §5.3 semantics for each (compound-assignment evaluation
+  order pinned: address, load, rhs). The oracle matrix gains `~`
+  rows.
 - 2026-08-15 — **control flow** (work-order decision 5): §6 grammar
   and semantics for `switch` (linear compare-chain lowering, binding),
   `for`, `do`-`while`, `goto`/labels; break/continue binding rules;
