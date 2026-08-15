@@ -647,9 +647,11 @@ only external needs.
 
 No printf, no sprintf, and **no varargs emulation in the meantime** —
 arg-array pseudo-printf hacks are banned; fixed arity is the m1
-shape. The committed path: cc-m2 delivers varargs (cc-m1.md roadmap,
-over SABI's uniform 16-byte stack slots), then libc m2 adds printf
-over them as a v0.x amendment to this document.
+shape. The committed path is keyed to the CAPABILITY, not a milestone
+number: printf arrives when the cc compiler delivers varargs (cc-m3
+as currently cut; over SABI's uniform 16-byte stack slots, per the cc
+roadmap), followed by the libc printf milestone as a v0.x amendment
+to this document.
 
 ### B.7 Linkage model and namespace
 
