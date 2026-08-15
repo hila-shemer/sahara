@@ -13,5 +13,6 @@
 #include "libc.h"
 #include "src/mem.c"
 #include "src/str.c"
+#include "src/alloc.c"
 
 #endif
