@@ -1,0 +1,5 @@
+# netboot.script - drives every scripted netboot leg. The ROM (and
+# then the payload) is fully autonomous and the legs run at --hz 0,
+# so the session ends at the guest's own HALT before any script
+# command is consumed; close is the backstop if it ever does not.
+close
