@@ -75,6 +75,7 @@ rwc_library(
     srcs = [
         "gui/blit.c",
         "gui/hid_map.c",
+        "gui/netboot_rom.c",  # generated: rom/netboot/build.sh --check
         "gui/nic.c",
         "gui/nic_fake.c",
         "gui/translate.c",
@@ -82,6 +83,7 @@ rwc_library(
     hdrs = [
         "gui/blit.h",
         "gui/hid_map.h",
+        "gui/netboot_rom.h",
         "gui/nic.h",
         "gui/nic_fake.h",
         "gui/translate.h",
