@@ -109,6 +109,24 @@ Derived types: pointers to any type, fixed-size one-dimensional arrays
 struct), and named structs. `void` is a function-return type and the
 target of no pointer (`void*` is m2).
 
+**Function types (M2, 2026-08-15).** A function type `T (P1, …, Pn)` —
+return type plus parameter-type list — exists only as a pointer
+target: `T (*p)(P1, …)` declares a pointer to function, a 128-bit
+scalar like every pointer. A function type itself is not an object
+type: it has no size (`sizeof` of one is an error) and cannot be a
+member, an array element, a parameter, or a variable's type; a
+parameter declared with function type adjusts to pointer-to-function
+(C89's rule). A function *designator* — a name of declared function
+type in expression position — immediately decays to a pointer to the
+function, exactly as an array name decays: `&f` and plain `f` yield
+the same value, `(*p)` is again a designator, so `(*p)(x)` and `p(x)`
+are the same call. Arrays of function pointers, function-pointer
+struct members, and function pointers as parameters and return types
+are all ordinary uses of the pointer type. Multi-dimensional arrays
+(`T a[N][M]`, arrays of arrays with element-major layout) and
+declarator lists (`i64 a, *b;`) arrive with the same general
+declarator grammar (section 7); prototype parameters may omit names.
+
 **Canonical form (the width-discipline firewall).** Every value in a
 register is kept in the ISA §3.4 canonical form of its type's width:
 sign-extended from bit (width−1) to 128 bits, for signed AND unsigned
@@ -163,6 +181,18 @@ pointer zero-extends (addresses are unsigned); `i64` → pointer takes
 the canonical 128-bit image as the address (defined, if rarely
 useful). Integer ↔ pointer without a cast is a compile error — a
 deliberate tightening of C.
+
+**Function pointers (M2, 2026-08-15)** follow the pointer rows above:
+explicit casts to and from any other function-pointer type and
+`u64/i64/u128/i128` are defined value-preserving conversions (no-UB
+culture; *calling* through a wrong-typed or garbage pointer is
+self-sabotage the platform may or may not trap — the rodata-write
+stance). Implicit use (assignment, argument, return, comparison)
+requires the exact function-pointer type; `== !=` against the literal
+`0` is the null test (a null function pointer is *made* with an
+explicit cast, `(T (*)(…))0`, exactly like object pointers). `void*`
+↔ function pointer is explicit-cast only — a documented deviation,
+recorded because C89 gives the conversion no portable meaning either.
 
 Implicit conversions (assignment, initialization, argument passing,
 `return`) are permitted among integer scalar types only, with the
@@ -248,6 +278,13 @@ Operator notes:
   the stored value, of the lvalue's type (promoted if `u8`). Arrays
   and structs are not assignable.
 - An array rvalue decays to a pointer to its first element.
+- **Calls (M2, 2026-08-15)**: the callee of `e(...)` is any postfix
+  expression of function-pointer type (a bare declared-function name
+  keeps the direct-call lowering). Evaluation order extends the
+  strict left-to-right rule: the callee expression is evaluated
+  first, then the arguments left to right. Function pointers compare
+  with `== !=` against pointers of the identical type or the literal
+  `0`.
 
 ### 5.4 Literals
 
@@ -302,12 +339,24 @@ would be, and why it is absent).
 
 ## 7. Declarations and program structure
 
-    program:    (struct-def | function-def | function-proto | global-decl)*
-    struct-def: struct NAME { (type name ([N])? ;)* } ;
-    function:   type NAME ( params? ) (block | ;)
-    params:     void | type name (, type name)*
-    global:     [extern] type NAME ([N])? [= ginit] ;
+    program:    (struct-def | declaration)*
+    struct-def: struct NAME { (base-type declarator (, declarator)* ;)* } ;
+    declaration:[extern] base-type init-decl (, init-decl)* ;
+              | [extern] base-type declarator block          # function def
+    init-decl:  declarator [= ginit]
+    declarator: STAR* direct                        # STAR is '*'
+    direct:     NAME | ( declarator ) | direct [ const-expr ]
+              | direct ( params? )
+    params:     void | param (, param)*
+    param:      base-type declarator                # name optional
     ginit:      const-expr | { const-expr (, const-expr)* }
+
+*(M2, 2026-08-15: the declarator grammar above replaces m1's
+`type * name [N]` form — it is the standard C two-stage declarator,
+and for every m1-legal program it derives exactly the m1 types. New
+derivations it adds: function declarators (pointer-to-function types,
+section 3), parenthesized declarators, multi-dimensional arrays,
+declarator lists, unnamed prototype parameters.)*
 
 - **Structs** are declared at file scope, before first use; members
   may be scalars, pointers, arrays, and previously declared structs
@@ -402,6 +451,17 @@ aligned by construction — SABI §2.3, never by luck):
   the surviving register-resident slots are reloaded. Return value in
   r0 only (every m1 type fits one register; the r0:r1 pair form stays
   unused).
+- **Indirect calls (M2, 2026-08-15)**: the callee expression is
+  evaluated onto the temp stack before the arguments (left-to-right
+  rule, section 5.3); the call site reloads the callee value into r8
+  (`ld128 r8, [sp + home]`, after the r0–r7 argument loads) and emits
+  `jalr ra, r8, 0` exactly where the direct sequence emits
+  `jal NAME`. Everything else — spill-all-live, argument staging, r0
+  capture, reload — is identical to the direct path; JALR writes ra
+  like JAL (SABI §1), so the frame shape, the `calls=1` marker, and
+  the ra save/restore rules apply unchanged. abicheck accepts `jalr`
+  only in exactly the `jalr ra, rX, 0` form and counts it as a call
+  site.
 - **The compiler never touches r16–r27** (no callee-saved code to get
   wrong; r27's kernel-gp role costs user code nothing and not
   allocating it is free insurance), **never r30/k0**. `sp` is written
@@ -598,7 +658,30 @@ must land as table entries and new productions:
 
 ---
 
-**Sign-off status: FLAGGED FOR OWNER SIGN-OFF** (not yet signed).
+## M2 — amendment summary
+
+**M2 AMENDMENT — FLAGGED FOR OWNER SIGN-OFF** (DRAFT — the `cc-m2`
+branch does not merge to main until the owner signs). Every entry
+below is an *addition* under the header change policy: tier-1 table
+rows and productions land in the live sections above with the dated
+markers `(M2, DATE)`, and nothing frozen in m1 changed meaning — the
+u8→u64 promotion row, the pinned m1 lowerings, the m1 deviations list,
+and the m1 goldens' shapes all stand. This section is the audit trail:
+one entry per change, with its date and the sections it grew.
+
+- 2026-08-15 — **function pointers** (work-order decision 3): §3
+  function types + designator decay; §4 function-pointer conversion
+  rules (`void*` ↔ fnptr explicit-only deviation recorded); §5.3
+  callee-expression calls and callee-before-arguments evaluation
+  order; §7 the general declarator grammar (also: multi-dimensional
+  arrays, declarator lists, parenthesized declarators, unnamed
+  prototype parameters); §8.2 the indirect-call lowering and the
+  `jalr ra, rX, 0` abicheck rule.
+
+---
+
+**Sign-off status: m1 SIGNED OFF (2026-08-12); the M2 amendment above
+is FLAGGED FOR OWNER SIGN-OFF** (not yet signed).
 Consumers: `lang/cc/cc.py` (reference implementation, this branch).
 Amendments follow the tiered change policy in the header (owner-set
 at sign-off): tier 1 SABI-style, tier 2 free, tier 3 by dated
@@ -612,3 +695,6 @@ change-log entry.
   item; frame-limit rationale and escape hatch; the no-linker ladder
   (multi-input cc, then object format + linker, then runtime
   linking).
+- 2026-08-15 onward — the M2 amendment (see `## M2 — amendment
+  summary` above for the dated per-change entries; DRAFT until owner
+  sign-off).

@@ -222,9 +222,16 @@ def type_str(t):
     if t[0] == "void":
         return "void"
     if t[0] == "ptr":
+        if t[1][0] == "func":
+            f = t[1]
+            args = ", ".join(type_str(p) for p in f[2]) or "void"
+            return f"{type_str(f[1])} (*)({args})"
         return type_str(t[1]) + "*"
     if t[0] == "arr":
         return f"{type_str(t[1])}[{t[2]}]"
+    if t[0] == "func":
+        args = ", ".join(type_str(p) for p in t[2]) or "void"
+        return f"{type_str(t[1])} ({args})"
     return "struct " + t[1]
 
 
@@ -453,16 +460,6 @@ class Parser:
             raise Cc(line, f"unexpected name '{name}' in a type name")
         return t
 
-    def reject_func_type(self, t, line):
-        """m1 surface guard: no function-pointer types yet (they are
-        the next m2 phase); walked recursively so nothing slips in
-        through arrays or multiple indirection."""
-        if t[0] == "func":
-            raise Cc(line, "calls apply to function names only "
-                           "(no function pointers in m1)")
-        if t[0] in ("ptr", "arr"):
-            self.reject_func_type(t[1], line)
-
     # ---- file scope
 
     def parse_unit(self):
@@ -478,13 +475,9 @@ class Parser:
             while True:
                 t, name, fparams = self.parse_declarator(base)
                 if t[0] == "func":
-                    self.reject_func_type(t[1], line)
-                    for pt in t[2]:
-                        self.reject_func_type(pt, line)
                     if self.parse_func(t, name, fparams, is_extern, line):
                         break                # a definition ends the list
                 else:
-                    self.reject_func_type(t, line)
                     self.parse_global(t, name, is_extern, line)
                 if self.accept("p", ";"):
                     break
@@ -508,7 +501,6 @@ class Parser:
                 if ft[0] == "func":
                     raise Cc(fl, f"member '{fn}' is a function (use a "
                                  f"function pointer)")
-                self.reject_func_type(ft, fl)
                 if any(fn == f[0] for f in fields):
                     raise Cc(fl, f"duplicate member '{fn}'")
                 al = self.u.t_align(ft)
@@ -640,7 +632,6 @@ class Parser:
                 if t[0] == "func":
                     raise Cc(line, "no function declarations at block "
                                    "scope (declare it at file scope)")
-                self.reject_func_type(t, line)
                 init = None
                 if self.accept("p", "="):
                     if not is_scalar(t):
@@ -723,7 +714,6 @@ class Parser:
                 self.next()
                 t = self.parse_typename()
                 self.expect("p", ")")
-                self.reject_func_type(t, line)
                 if not is_scalar(t):
                     raise Cc(line, "casts are scalar-to-scalar only")
                 return ("cast", line, t, self.parse_unary())
@@ -739,7 +729,6 @@ class Parser:
             self.expect("p", "(")
             t = self.parse_typename()
             self.expect("p", ")")
-            self.reject_func_type(t, line)
             if not is_scalar(t) and t[0] != "struct":
                 raise Cc(line, "sizeof takes a scalar, pointer, or "
                                "struct type")
@@ -753,18 +742,7 @@ class Parser:
         elif k == "str":
             e = ("strlit", line, v)
         elif k == "id":
-            if self.peek()[:2] == ("p", "("):
-                self.next()
-                args = []
-                if not self.accept("p", ")"):
-                    while True:
-                        args.append(self.parse_expr())
-                        if self.accept("p", ")"):
-                            break
-                        self.expect("p", ",")
-                e = ("call", line, v, args)
-            else:
-                e = ("var", line, v)
+            e = ("var", line, v)
         elif (k, v) == ("p", "("):
             e = self.parse_expr()
             self.expect("p", ")")
@@ -781,8 +759,16 @@ class Parser:
             elif self.accept("p", "->"):
                 e = ("field", line, e, self.expect("id"), True)
             elif self.peek()[:2] == ("p", "("):
-                raise Cc(line, "calls apply to function names only "
-                               "(no function pointers in m1)")
+                # call: the callee is whatever postfix expression is up
+                self.next()
+                args = []
+                if not self.accept("p", ")"):
+                    while True:
+                        args.append(self.parse_expr())
+                        if self.accept("p", ")"):
+                            break
+                        self.expect("p", ",")
+                e = ("call", line, e, args)
             else:
                 return e
 
@@ -821,7 +807,8 @@ def fold(e, unit):
     op = e[0]
     if op in ("num", "strlit", "var", "call"):
         if op == "call":
-            e = ("call", e[1], e[2], [fold(a, unit) for a in e[3]])
+            e = ("call", e[1], fold(e[2], unit),
+                 [fold(a, unit) for a in e[3]])
         return e
     parts = [fold(x, unit) if isinstance(x, tuple) else x for x in e]
     e = tuple(parts)
@@ -972,6 +959,10 @@ class Func:
         g = self.u.globals.get(name)
         if g is not None:
             return ("global", name, g["type"])
+        f = self.u.funcs.get(name)
+        if f is not None:
+            return ("func", name, ("func", f[0], tuple(p[1]
+                                                       for p in f[1])))
         raise Cc(line, f"'{name}' is not declared")
 
     # ---- conversions (cc-m1.md section 4); operate on register r
@@ -1102,6 +1093,8 @@ class Func:
             r = self.top()
             if t[0] == "arr":
                 return ("ptr", t[1])          # decay: address already up
+            if t[0] == "func":
+                return ("ptr", t)             # designator decay (M2)
             if t[0] == "struct":
                 raise Cc(e[1], "struct values are not usable directly "
                                "in m1 (no struct assignment/copy)")
@@ -1356,18 +1349,41 @@ class Func:
             self.emit(f"{STORES[bits]} [sp + {off}], {val_reg}")
 
     def gen_call(self, e):
-        _, line, name, args = e
-        if name not in self.u.funcs:
-            raise Cc(line, f"call to undeclared function '{name}'")
-        ret, params, _, _ = self.u.funcs[name]
-        if len(args) != len(params):
-            raise Cc(line, f"{name}() takes {len(params)} arguments, "
-                           f"got {len(args)}")
+        _, line, callee, args = e
+        # Direct call: a bare identifier naming a declared function,
+        # not shadowed by any local - keeps the m1 jal path verbatim.
+        direct = None
+        if callee[0] == "var" \
+                and not any(callee[2] in sc for sc in self.scopes):
+            name = callee[2]
+            if name in self.u.funcs:
+                direct = name
+            elif name not in self.u.globals:
+                raise Cc(line, f"call to undeclared function '{name}'")
         base = self.depth
+        if direct is not None:
+            ret, params, _, _ = self.u.funcs[direct]
+            ptypes = [p[1] for p in params]
+            what = f"{direct}()"
+            astart = base
+        else:
+            # Indirect: callee expression first (left-to-right rule),
+            # then the arguments; the callee value rides slot `base`.
+            ct = self.rvalue(callee)
+            if not (is_ptr(ct) and ct[1][0] == "func"):
+                raise Cc(line, f"called object is not a function or "
+                               f"function pointer ({type_str(ct)})")
+            _, ret, ptypes = ct[1]
+            ptypes = list(ptypes)
+            what = "call through a function pointer"
+            astart = base + 1
+        if len(args) != len(ptypes):
+            raise Cc(line, f"{what} takes {len(ptypes)} arguments, "
+                           f"got {len(args)}")
         for i, a in enumerate(args):
             at = self.rvalue(a)
-            self.implicit(self.top(), at, params[i][1], line,
-                          f"argument {i + 1} of {name}()")
+            self.implicit(self.top(), at, ptypes[i], line,
+                          f"argument {i + 1} of {what}")
         # Spill every live register slot to its home (r8-r15 are
         # caller-saved; homes double as the argument staging area).
         lo = max(0, self.depth - 8)
@@ -1375,12 +1391,16 @@ class Func:
             self.emit(f"st128 [sp + {self.home(s)}], {self.reg(s)}")
         # Stack-slot arguments (SABI/ISA 12: [sp + 0], 16 bytes each).
         for i in range(8, len(args)):
-            self.emit(f"ld128 r8, [sp + {self.home(base + i)}]")
+            self.emit(f"ld128 r8, [sp + {self.home(astart + i)}]")
             self.emit(f"st128 [sp + {16 * (i - 8)}], r8")
         # Register arguments.
         for i in range(min(8, len(args))):
-            self.emit(f"ld128 r{i}, [sp + {self.home(base + i)}]")
-        self.emit(f"jal {name}")
+            self.emit(f"ld128 r{i}, [sp + {self.home(astart + i)}]")
+        if direct is not None:
+            self.emit(f"jal {direct}")
+        else:
+            self.emit(f"ld128 r8, [sp + {self.home(base)}]")
+            self.emit("jalr ra, r8, 0")
         # Result: slot `base`; its home already holds the pre-call
         # value of any displaced deeper slot, so no push() spill here.
         self.depth = base + 1

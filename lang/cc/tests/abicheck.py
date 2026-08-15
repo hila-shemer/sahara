@@ -123,6 +123,16 @@ def check_function(fname, name, frame, calls, body, start):
             njal += 1
             if calls == 0:
                 fail(j, "jal present but marker says calls=0")
+        elif base == "jalr":
+            # M2 indirect call site: exactly 'jalr ra, rX, 0' with rX
+            # caller-saved; ra discipline identical to jal.
+            njal += 1
+            if calls == 0:
+                fail(j, "jalr present but marker says calls=0")
+            if len(ops) != 3 or ops[0] != "ra" or ops[2] != "0" \
+                    or ops[1] not in CALLER_SAVED:
+                fail(j, f"jalr must be 'jalr ra, rX, 0' (rX "
+                        f"caller-saved), got {s!r}")
         elif base in DST_OPS:
             dst = ops[0]
             if dst == "sp":
@@ -156,7 +166,8 @@ def check_function(fname, name, frame, calls, body, start):
                 fail(j, f"branch out of function: {s!r}")
 
     if calls and njal == 0:
-        raise Fail(f"{fname}: {name}: marker says calls=1 but no jal")
+        raise Fail(f"{fname}: {name}: marker says calls=1 but no "
+                   f"jal/jalr")
 
 
 def check_file(fname):
