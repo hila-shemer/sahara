@@ -312,26 +312,156 @@ class Parser:
         k, v, _ = self.peek()
         return k == "kw" and (v in TYPE_KW or v == "struct")
 
-    def parse_type(self, need=True):
+    def parse_base_type(self):
+        """Base type specifier only - no declarator parts."""
         line = self.line()
         if self.accept("kw", "struct"):
             name = self.expect("id", what="struct name")
             if name not in self.u.structs:
                 raise Cc(line, f"struct {name} not declared")
-            t = ("struct", name)
-        else:
-            k, v, _ = self.peek()
-            if not (k == "kw" and v in TYPE_KW):
-                if need:
-                    raise Cc(line, "expected a type")
-                return None
-            self.next()
-            t = TYPE_KW[v]
+            return ("struct", name)
+        k, v, _ = self.peek()
+        if not (k == "kw" and v in TYPE_KW):
+            raise Cc(line, "expected a type")
+        self.next()
+        return TYPE_KW[v]
+
+    # ---- declarators: the standard two-stage C parser. A declarator
+    # is parsed structurally first (tokens are consumed left to right),
+    # then the type is built inside-out: pointer stars consume the base,
+    # postfixes wrap right to left, a parenthesized inner declarator
+    # wraps last. This reproduces the m1 types for m1 syntax exactly
+    # and carries multi-dim arrays and function declarators.
+
+    def parse_declarator(self, base, abstract=False):
+        """-> (type, name-or-None, fparams-or-None). fparams is the
+        named parameter list when the declared entity is a function."""
+        name, build, _ = self._declarator(abstract)
+        t, fparams = build(base)
+        return t, name, fparams
+
+    def _declarator(self, abstract):
+        line = self.line()
+        stars = 0
         while self.accept("p", "*"):
-            if t == ("void",):
-                raise Cc(line, "void* is not in m1 (see the roadmap)")
-            t = ("ptr", t)
+            stars += 1
+        name, innerb = None, None
+        if self.peek()[0] == "id":
+            name = self.next()[1]
+        elif self.peek()[:2] == ("p", "(") and self._paren_is_declarator():
+            self.next()
+            name, innerb, trivial = self._declarator(abstract)
+            self.expect("p", ")")
+            if trivial:
+                innerb = None                # (name) == name
+        elif not abstract:
+            raise Cc(self.line(), "expected a declarator name")
+        posts = []
+        while True:
+            pl = self.line()
+            if self.accept("p", "["):
+                cnt = self.const_expr("array size")
+                if cnt <= 0:
+                    raise Cc(pl, "array size must be > 0")
+                self.expect("p", "]")
+                posts.append(("arr", cnt, pl))
+            elif self.peek()[:2] == ("p", "(") and (posts or stars
+                                                    or innerb is not None
+                                                    or name is not None
+                                                    or abstract):
+                self.next()
+                ptypes, pnamed = self.parse_params(pl)
+                posts.append(("fn", ptypes, pnamed, pl))
+            else:
+                break
+
+        def build(t):
+            fparams = None
+            for _ in range(stars):
+                if t == ("void",):
+                    raise Cc(line, "void* is not in m1 (see the roadmap)")
+                t = ("ptr", t)
+            for p in reversed(posts):
+                if p[0] == "arr":
+                    if t[0] == "func":
+                        raise Cc(p[2], "array of functions (array of "
+                                       "function pointers: (*a[N])(...))")
+                    if t == ("void",):
+                        raise Cc(p[2], "array of void")
+                    t = ("arr", t, p[1])
+                    fparams = None
+                else:
+                    if t[0] in ("arr", "func"):
+                        kind = "an array" if t[0] == "arr" else "a function"
+                        raise Cc(p[3], f"a function cannot return {kind}")
+                    t = ("func", t, p[1])
+                    fparams = p[2]
+            if innerb is not None:
+                t, fparams = innerb(t)
+            return t, fparams
+
+        trivial = not stars and not posts and innerb is None
+        return name, build, trivial
+
+    def _paren_is_declarator(self):
+        """At '(' in declarator position: a parenthesized declarator
+        starts with '*', '(' or an identifier; a parameter list starts
+        with a type, 'void', or ')'."""
+        k, v, _ = self.peek(1)
+        if k == "kw":
+            return False                     # type keyword: params
+        if k == "p" and v == ")":
+            return False                     # empty parameter list
+        return k in ("id",) or (k == "p" and v in ("*", "("))
+
+    def parse_params(self, line):
+        """After the '(' of a function declarator.
+        -> (types tuple, [(name-or-None, type, line), ...])"""
+        if self.accept("p", ")"):
+            return (), []
+        if self.peek()[:2] == ("kw", "void") \
+                and self.peek(1)[:2] == ("p", ")"):
+            self.next()
+            self.next()
+            return (), []
+        named = []
+        while True:
+            pl = self.line()
+            base = self.parse_base_type()
+            pt, pn, _ = self.parse_declarator(base, abstract=True)
+            if pt == ("void",):
+                raise Cc(pl, "void parameter")
+            if pt[0] == "func":
+                pt = ("ptr", pt)     # C: function parameter adjusts
+            if not is_scalar(pt):
+                raise Cc(pl, "parameters must be scalars or "
+                             "pointers in m1 (structs/arrays: "
+                             "pass a pointer)")
+            if pn is not None and any(pn == q[0] for q in named):
+                raise Cc(pl, f"duplicate parameter '{pn}'")
+            named.append((pn, pt, pl))
+            if self.accept("p", ")"):
+                return tuple(q[1] for q in named), named
+            self.expect("p", ",")
+
+    def parse_typename(self):
+        """A type-name: base type + abstract declarator (casts, sizeof)."""
+        line = self.line()
+        base = self.parse_base_type()
+        t, name, _ = self.parse_declarator(base, abstract=True)
+        if name is not None:
+            raise Cc(line, f"unexpected name '{name}' in a type name")
         return t
+
+    def reject_func_type(self, t, line):
+        """m1 surface guard: no function-pointer types yet (they are
+        the next m2 phase); walked recursively so nothing slips in
+        through arrays or multiple indirection."""
+        if t[0] == "func":
+            raise Cc(line, "calls apply to function names only "
+                           "(no function pointers in m1)")
+        if t[0] in ("ptr", "arr"):
+            self.reject_func_type(t[1], line)
 
     # ---- file scope
 
@@ -344,12 +474,21 @@ class Parser:
                 continue
             line = self.line()
             is_extern = bool(self.accept("kw", "extern"))
-            t = self.parse_type()
-            name = self.expect("id", what="a declarator name")
-            if self.accept("p", "("):
-                self.parse_func(t, name, is_extern, line)
-            else:
-                self.parse_global(t, name, is_extern, line)
+            base = self.parse_base_type()
+            while True:
+                t, name, fparams = self.parse_declarator(base)
+                if t[0] == "func":
+                    self.reject_func_type(t[1], line)
+                    for pt in t[2]:
+                        self.reject_func_type(pt, line)
+                    if self.parse_func(t, name, fparams, is_extern, line):
+                        break                # a definition ends the list
+                else:
+                    self.reject_func_type(t, line)
+                    self.parse_global(t, name, is_extern, line)
+                if self.accept("p", ";"):
+                    break
+                self.expect("p", ",")
 
     def parse_struct(self):
         line = self.line()
@@ -361,24 +500,25 @@ class Parser:
         fields, off, maxal = [], 0, 1
         while not self.accept("p", "}"):
             fl = self.line()
-            ft = self.parse_type()
-            if ft == ("void",):
-                raise Cc(fl, "void member")
-            fn = self.expect("id", what="member name")
-            if self.accept("p", "["):
-                cnt = self.const_expr("array size")
-                if cnt <= 0:
-                    raise Cc(fl, "array size must be > 0")
-                self.expect("p", "]")
-                ft = ("arr", ft, cnt)
-            self.expect("p", ";")
-            if any(fn == f[0] for f in fields):
-                raise Cc(fl, f"duplicate member '{fn}'")
-            al = self.u.t_align(ft)
-            off = (off + al - 1) & ~(al - 1)
-            fields.append((fn, ft, off))
-            off += self.u.t_size(ft)
-            maxal = max(maxal, al)
+            base = self.parse_base_type()
+            while True:
+                ft, fn, _ = self.parse_declarator(base)
+                if ft == ("void",):
+                    raise Cc(fl, "void member")
+                if ft[0] == "func":
+                    raise Cc(fl, f"member '{fn}' is a function (use a "
+                                 f"function pointer)")
+                self.reject_func_type(ft, fl)
+                if any(fn == f[0] for f in fields):
+                    raise Cc(fl, f"duplicate member '{fn}'")
+                al = self.u.t_align(ft)
+                off = (off + al - 1) & ~(al - 1)
+                fields.append((fn, ft, off))
+                off += self.u.t_size(ft)
+                maxal = max(maxal, al)
+                if self.accept("p", ";"):
+                    break
+                self.expect("p", ",")
         self.expect("p", ";")
         size = (off + maxal - 1) & ~(maxal - 1)
         if not fields:
@@ -391,57 +531,40 @@ class Parser:
                            f"name (asm.md 2.3) - rename it (cc-m1.md "
                            f"section 2)")
 
-    def parse_func(self, ret, name, is_extern, line):
+    def parse_func(self, ftype, name, fparams, is_extern, line):
+        """Register a function prototype or definition. ftype is
+        ('func', ret, ptypes); fparams the named parameter list.
+        Returns True when a body was parsed (ends the declarator list)."""
+        _, ret, ptypes = ftype
         self.check_label_name(name, line)
         if name in self.u.globals:
             raise Cc(line, f"'{name}' already declared as a variable")
-        params = []
-        if not self.accept("p", ")"):
-            if self.peek()[:2] == ("kw", "void") and self.peek(1)[:2] == ("p", ")"):
-                self.next()
-                self.next()
-            else:
-                while True:
-                    pl = self.line()
-                    pt = self.parse_type()
-                    if pt == ("void",):
-                        raise Cc(pl, "void parameter")
-                    if not is_scalar(pt):
-                        raise Cc(pl, "parameters must be scalars or "
-                                     "pointers in m1 (structs/arrays: "
-                                     "pass a pointer)")
-                    pn = self.expect("id", what="parameter name")
-                    if any(pn == q[0] for q in params):
-                        raise Cc(pl, f"duplicate parameter '{pn}'")
-                    params.append((pn, pt))
-                    if self.accept("p", ")"):
-                        break
-                    self.expect("p", ",")
-        sig = (ret, tuple(p[1] for p in params))
+        sig = (ret, ptypes)
         old = self.u.funcs.get(name)
         if old is not None:
             if (old[0], tuple(p[1] for p in old[1])) != sig:
                 raise Cc(line, f"conflicting declaration of {name}()")
-        if self.accept("p", ";"):
+        if self.peek()[:2] != ("p", "{"):
             if old is None:
+                params = [(p[0], p[1]) for p in fparams]
                 self.u.funcs[name] = (ret, params, None, line)
-            return
+            return False
         if old is not None and old[2] is not None:
             raise Cc(line, f"{name}() redefined")
+        for pn, pt, pl in fparams:
+            if pn is None:
+                raise Cc(pl, f"parameter of {name}() needs a name in a "
+                             f"definition")
+        params = [(p[0], p[1]) for p in fparams]
         body = self.parse_block()
         self.u.funcs[name] = (ret, params, body, line)
         self.u.forder.append(name)
+        return True
 
     def parse_global(self, t, name, is_extern, line):
         self.check_label_name(name, line)
         if t == ("void",):
             raise Cc(line, "void variable")
-        if self.accept("p", "["):
-            cnt = self.const_expr("array size")
-            if cnt <= 0:
-                raise Cc(line, "array size must be > 0")
-            self.expect("p", "]")
-            t = ("arr", t, cnt)
         init = None
         if self.accept("p", "="):
             if is_extern:
@@ -468,7 +591,6 @@ class Parser:
                 raise Cc(line, "only integer scalars and arrays take "
                                "initializers in m1 (no address "
                                "initializers)")
-        self.expect("p", ";")
         old = self.u.globals.get(name)
         if old is not None:
             if old["type"] != t:
@@ -509,24 +631,27 @@ class Parser:
         if self.peek()[:2] == ("p", "{"):
             return self.parse_block()
         if self.at_type():
-            t = self.parse_type()
-            if t == ("void",):
-                raise Cc(line, "void variable")
-            name = self.expect("id", what="a variable name")
-            if self.accept("p", "["):
-                cnt = self.const_expr("array size")
-                if cnt <= 0:
-                    raise Cc(line, "array size must be > 0")
-                self.expect("p", "]")
-                t = ("arr", t, cnt)
-            init = None
-            if self.accept("p", "="):
-                if not is_scalar(t):
-                    raise Cc(line, "arrays and structs cannot be "
-                                   "initialized in m1")
-                init = self.parse_expr()
-            self.expect("p", ";")
-            return ("decl", line, t, name, init)
+            base = self.parse_base_type()
+            decls = []
+            while True:
+                t, name, _ = self.parse_declarator(base)
+                if t == ("void",):
+                    raise Cc(line, "void variable")
+                if t[0] == "func":
+                    raise Cc(line, "no function declarations at block "
+                                   "scope (declare it at file scope)")
+                self.reject_func_type(t, line)
+                init = None
+                if self.accept("p", "="):
+                    if not is_scalar(t):
+                        raise Cc(line, "arrays and structs cannot be "
+                                       "initialized in m1")
+                    init = self.parse_expr()
+                decls.append(("decl", line, t, name, init))
+                if self.accept("p", ";"):
+                    break
+                self.expect("p", ",")
+            return decls[0] if len(decls) == 1 else ("multi", line, decls)
         if self.accept("kw", "if"):
             self.expect("p", "(")
             cond = self.parse_expr()
@@ -596,8 +721,9 @@ class Parser:
             nk, nv, _ = self.peek(1)
             if nk == "kw" and (nv in TYPE_KW or nv == "struct"):
                 self.next()
-                t = self.parse_type()
+                t = self.parse_typename()
                 self.expect("p", ")")
+                self.reject_func_type(t, line)
                 if not is_scalar(t):
                     raise Cc(line, "casts are scalar-to-scalar only")
                 return ("cast", line, t, self.parse_unary())
@@ -611,8 +737,9 @@ class Parser:
             return ("addr", line, self.parse_unary())
         if self.accept("kw", "sizeof"):
             self.expect("p", "(")
-            t = self.parse_type()
+            t = self.parse_typename()
             self.expect("p", ")")
+            self.reject_func_type(t, line)
             if not is_scalar(t) and t[0] != "struct":
                 raise Cc(line, "sizeof takes a scalar, pointer, or "
                                "struct type")
@@ -1317,6 +1444,9 @@ class Func:
             for x in s[1]:
                 self.gen_stmt(x)
             self.scopes.pop()
+        elif op == "multi":
+            for x in s[2]:               # one declaration, N declarators
+                self.gen_stmt(x)
         elif op == "decl":
             _, line, t, name, init = s
             if name in self.scopes[-1]:
