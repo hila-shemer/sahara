@@ -33,10 +33,27 @@ else is normative.
 
 ## 1. Program contract
 
-1. **Invocation**: `python3 lang/cc/cc.py IN.c -o OUT.s`. One
-   translation unit, one output, no other flags in m1. On any error:
-   one diagnostic line `FILE:LINE: error: message` on stderr, exit 1,
-   no output file. There are no warnings (house loud-failure policy).
+1. **Invocation**: `python3 lang/cc/cc.py IN.c [IN2.c …] -o OUT.s`
+   (M2, 2026-08-15: multiple inputs). Each input is a real
+   translation unit — its own struct/union/enum tag, typedef, and
+   static namespaces — compiled into ONE merged `.s`: a single text
+   section in (file, source) order, one shared deduplicated string
+   pool, one set of section-seam labels (SPEC-ISSUES 38's single-
+   owner rule by construction). Functions, `extern` objects, and
+   non-static globals unify across units by exact structural
+   signature/type agreement (struct tags by name AND layout; an
+   unsized `extern T a[]` completes against a sized definition);
+   a mismatch, a duplicate non-static definition, or two `main`s is
+   a loud error naming both files. File-scope statics mangle with
+   their unit's CLI index (section 8.3), so same-named statics in
+   different files cannot collide — the correctness property `cpp`
+   concatenation cannot express. On any error: one diagnostic line
+   `FILE:LINE: error: message` (cross-unit conflicts:
+   `cc: error: … in FILE1 and FILE2`) on stderr, exit 1, no output
+   file. There are no warnings (house loud-failure policy).
+   Single-input invocations emit byte-identically to m1
+   (golden-verified); the header comment lists input basenames in
+   CLI order.
 2. **Determinism**: identical input produces byte-identical output,
    every run, every host. The output header comment carries the
    input's basename only — no absolute paths, no timestamps, no
@@ -848,14 +865,15 @@ boundary-label ownership.*
   useful size anyway; not a language limit, a diagnostic courtesy —
   the emitted `.asciiz` would be legal).
 
-- One translation unit per invocation — i.e. no linker, by design:
-  bundling sources is the m1 model (SABI §6: the assembler command
-  line is the layout). Roadmap (owner-shaped at sign-off): m2 grows
-  multi-input-one-output cc.py (compile-time linking inside the
-  compiler); an object format and a real linker come later behind a
-  SABI amendment when compilation stops scaling; runtime linking last,
-  tied to the OS loader deferral — loadable plugins are the real
-  motivation there, shared libraries only an optimization.
+- ~~One translation unit per invocation~~ — **landed in M2**
+  (2026-08-15): multi-input-one-output compilation (section 1) is
+  the committed relief path for the mini-libc stream's
+  recompile-everything cost, and the correctness path to multi-file
+  C89 (per-file statics). Still no linker, by design (SABI §6: the
+  assembler command line is the layout). The rest of the ladder
+  stands: an object format and a real linker later, behind a SABI
+  amendment, when compilation stops scaling; runtime linking last,
+  tied to the OS loader deferral.
 
 ## 12. Roadmap — the ladder this milestone must not saw off
 
@@ -908,6 +926,11 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **multi-input compilation** (work-order decision 8):
+  §1 the multi-TU invocation, per-unit namespaces, structural
+  cross-unit unification, merged single-owner emission, both-files
+  diagnostics; §11 the one-TU limit retired. Single-input output is
+  byte-identical to m1 (golden-verified).
 - 2026-08-15 — **global initializers, full** (work-order decision 9):
   §7 nested brace lists (braces required per level — documented
   simplification), string-literal initializers for `u8` arrays and

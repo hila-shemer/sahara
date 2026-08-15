@@ -3029,27 +3029,40 @@ def escape_string(data):
     return "".join(out)
 
 
-def render(unit, basename):
-    lines = [f"# {basename} - CC-M1 compiled output (lang/cc/cc.py; "
+def render(units, header_names):
+    """One merged emission for every translation unit (M2 decision 8):
+    single text section in (file, source) order, one shared string
+    pool, one set of seam labels - SPEC-ISSUES 38's single-owner rule
+    by construction. units: [(path, Unit)]."""
+    lines = [f"# {header_names} - CC-M1 compiled output (lang/cc/cc.py; "
              f"spec lang/cc/cc-m1.md)"]
 
-    # text
+    # text: (file, source) order; codegen diagnostics carry the file
     lines.append("        .align 16")
-    for fname in unit.forder:
-        lines.extend(Func(unit, fname).generate())
+    for path, unit in units:
+        try:
+            for fname in unit.forder:
+                lines.extend(Func(unit, fname).generate())
+        except Cc as ex:
+            print(f"{path}:{ex.line}: error: {ex.msg}", file=sys.stderr)
+            sys.exit(1)
 
     # objects, in section homes: const-with-init -> rodata (the spec's
     # const effect #2), init -> data, no init -> bss. Static locals
-    # ride along after the globals, source order.
-    objs = [(unit.globals[n]["label"], unit.globals[n]["type"],
-             unit.globals[n]["init"])
-            for n in unit.gorder if not unit.globals[n]["extern"]]
-    objs += unit.slocals
-    ro = [o for o in objs if o[2] is not None and is_const_obj(o[1])]
-    rw = [o for o in objs if o[2] is not None and not is_const_obj(o[1])]
-    zi = [o for o in objs if o[2] is None]
+    # ride along after their unit's globals, source order; units in
+    # CLI order.
+    objs = []
+    for path, unit in units:
+        objs += [(unit, unit.globals[n]["label"],
+                  unit.globals[n]["type"], unit.globals[n]["init"])
+                 for n in unit.gorder if not unit.globals[n]["extern"]]
+        objs += [(unit, la, t, init) for la, t, init in unit.slocals]
+    ro = [o for o in objs if o[3] is not None and is_const_obj(o[2])]
+    rw = [o for o in objs if o[3] is not None and not is_const_obj(o[2])]
+    zi = [o for o in objs if o[3] is None]
+    strings = units[0][1].strings        # the shared pool
 
-    def emit_data(label, t, atoms):
+    def emit_data(unit, label, t, atoms):
         align = unit.t_align(t)
         if align > 1:
             lines.append(f"        .align {align}")
@@ -3089,27 +3102,27 @@ def render(unit, basename):
     # order), then const objects
     lines.append("        .align 16")
     lines.append("__etext:")
-    for data, label in unit.strings.items():
+    for data, label in strings.items():
         lines.append(f"{label}:")
         lines.append(f'        .asciiz "{escape_string(data)}"')
-    for label, t, init in ro:
-        emit_data(label, t, init)
+    for u_, label, t, init in ro:
+        emit_data(u_, label, t, init)
 
     # data
     lines.append("        .align 16")
     lines.append("__erodata:")
-    for label, t, init in rw:
-        emit_data(label, t, init)
+    for u_, label, t, init in rw:
+        emit_data(u_, label, t, init)
 
     # bss
     lines.append("        .align 16")
     lines.append("__edata:")
-    for label, t, init in zi:
-        align = unit.t_align(t)
+    for u_, label, t, init in zi:
+        align = u_.t_align(t)
         if align > 1:
             lines.append(f"        .align {align}")
         lines.append(f"{label}:")
-        lines.append(f"        .space {unit.t_size(t)}")
+        lines.append(f"        .space {u_.t_size(t)}")
 
     lines.append("        .align 16")
     lines.append("_end:")
@@ -3134,43 +3147,166 @@ def fold_body(node, unit):
     return tuple(fold_body(x, unit) for x in node)
 
 
-def compile_unit(path, out_path):
-    try:
-        src = open(path, "r").read()
-    except OSError as ex:
-        print(f"cc: cannot read {path}: {ex}", file=sys.stderr)
+def types_agree(ua, a, ub, b, seen=None):
+    """Structural cross-unit type agreement (M2 decision 8): tags
+    must match by name (anonymous tags structurally) AND layout;
+    unsized arrays agree with any sized completion; const-insensitive
+    like every compatibility check."""
+    if seen is None:
+        seen = set()
+    a, b = uq(a), uq(b)
+    if a[0] != b[0]:
+        return False
+    if a[0] in ("int", "void"):
+        return a == b
+    if a[0] == "ptr":
+        return types_agree(ua, a[1], ub, b[1], seen)
+    if a[0] == "arr":
+        if a[2] is not None and b[2] is not None and a[2] != b[2]:
+            return False
+        return types_agree(ua, a[1], ub, b[1], seen)
+    if a[0] == "func":
+        if len(a[2]) != len(b[2]):
+            return False
+        if not types_agree(ua, a[1], ub, b[1], seen):
+            return False
+        return all(types_agree(ua, x, ub, y, seen)
+                   for x, y in zip(a[2], b[2]))
+    an, bn = a[1], b[1]
+    if not an.startswith(".anon") and not bn.startswith(".anon") \
+            and an != bn:
+        return False
+    if (an, bn) in seen:
+        return True                      # self-referential structs
+    seen.add((an, bn))
+    ea, eb = ua.structs.get(an), ub.structs.get(bn)
+    if ea is None or eb is None:
+        return ea is eb
+    if ea[0] is None or eb[0] is None:
+        return True                      # incomplete: pointer-only use
+    if ea[3] != eb[3] or ea[1] != eb[1] or ea[2] != eb[2] \
+            or len(ea[0]) != len(eb[0]):
+        return False
+    for (fa, ta, oa), (fb, tb, ob) in zip(ea[0], eb[0]):
+        if fa != fb or oa != ob:
+            return False
+        if not types_agree(ua, ta, ub, tb, seen):
+            return False
+    return True
+
+
+def unify_units(units):
+    """Cross-unit symbol agreement; diagnostics name both files."""
+    def fail(msg):
+        print(f"cc: error: {msg}", file=sys.stderr)
         sys.exit(1)
-    unit = Unit()
-    try:
-        parser = Parser(lex(src), unit)
-        parser.parse_unit()
-        # fold literal subexpressions (cc-m1.md 5.5)
-        for name, (ret, params, body, line) in list(unit.funcs.items()):
+
+    funcs = {}       # name -> [path, unit, ret, ptypes, defpath|None]
+    for path, u in units:
+        for name in u.funcs:
+            if name in u.static_funcs:
+                continue
+            ret, params, body, line = u.funcs[name]
+            ptypes = tuple(p[1] for p in params)
+            prev = funcs.get(name)
+            if prev is None:
+                funcs[name] = [path, u, ret, ptypes,
+                               path if body is not None else None]
+                continue
+            ok = len(ptypes) == len(prev[3]) \
+                and types_agree(prev[1], prev[2], u, ret) \
+                and all(types_agree(prev[1], x, u, y)
+                        for x, y in zip(prev[3], ptypes))
+            if not ok:
+                fail(f"{name}() declared with conflicting signatures "
+                     f"in {prev[0]} and {path}")
             if body is not None:
-                unit.funcs[name] = (ret, params, fold_body(body, unit),
-                                    line)
-        m = unit.funcs.get("main")
-        if m is None or m[2] is None:
-            raise Cc(1, "no main() defined (cc-m1.md section 1)")
-        if m[1] or m[0] not in (T_I64, T_U64):
-            raise Cc(m[3], "main must be 'i64 main()' or 'u64 main()' "
-                           "with no parameters")
-        text = render(unit, os.path.basename(path))
-    except Cc as ex:
-        print(f"{path}:{ex.line}: error: {ex.msg}", file=sys.stderr)
+                if prev[4] is not None:
+                    fail(f"{name}() defined in both {prev[4]} and "
+                         f"{path}")
+                prev[4] = path
+    gvars = {}       # name -> [path, unit, type, defpath|None]
+    for path, u in units:
+        for name in u.gorder:
+            g = u.globals[name]
+            if g["static"]:
+                continue
+            defp = None if g["extern"] else path
+            prev = gvars.get(name)
+            if prev is None:
+                gvars[name] = [path, u, g["type"], defp]
+                continue
+            if not types_agree(prev[1], prev[2], u, g["type"]):
+                fail(f"'{name}' declared with conflicting types in "
+                     f"{prev[0]} and {path}")
+            if defp is not None:
+                if prev[3] is not None:
+                    fail(f"'{name}' defined in both {prev[3]} and "
+                         f"{path}")
+                prev[3] = defp
+        for name in u.funcs:
+            if name not in u.static_funcs and name in gvars \
+                    and gvars[name][1] is not u:
+                fail(f"'{name}' is a function in one input and a "
+                     f"variable in another")
+    mains = [(path, u) for path, u in units
+             if "main" in u.funcs and u.funcs["main"][2] is not None]
+    if len(mains) > 1:
+        fail(f"main() defined in both {mains[0][0]} and {mains[1][0]}")
+    if not mains:
+        print(f"{units[0][0]}:1: error: no main() defined (cc-m1.md "
+              f"section 1)", file=sys.stderr)
         sys.exit(1)
+    mu = mains[0][1]
+    m = mu.funcs["main"]
+    if m[1] or m[0] not in (T_I64, T_U64):
+        print(f"{mains[0][0]}:{m[3]}: error: main must be 'i64 main()'"
+              f" or 'u64 main()' with no parameters", file=sys.stderr)
+        sys.exit(1)
+
+
+def compile_units(paths, out_path):
+    shared_strings = {}
+    units = []
+    for k, path in enumerate(paths):
+        try:
+            src = open(path, "r").read()
+        except OSError as ex:
+            print(f"cc: cannot read {path}: {ex}", file=sys.stderr)
+            sys.exit(1)
+        unit = Unit()
+        unit.index = k
+        unit.strings = shared_strings    # ONE deduplicated pool
+        try:
+            parser = Parser(lex(src), unit)
+            parser.parse_unit()
+            # fold literal subexpressions (cc-m1.md 5.5)
+            for name, (ret, params, body, line) in \
+                    list(unit.funcs.items()):
+                if body is not None:
+                    unit.funcs[name] = (ret, params,
+                                        fold_body(body, unit), line)
+        except Cc as ex:
+            print(f"{path}:{ex.line}: error: {ex.msg}", file=sys.stderr)
+            sys.exit(1)
+        units.append((path, unit))
+    unify_units(units)
+    names = ", ".join(os.path.basename(p) for p in paths)
+    text = render(units, names)
     with open(out_path, "w") as f:
         f.write(text)
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="CC-M1 compiler (lang/cc/cc-m1.md)")
-    ap.add_argument("input", help="one .c translation unit")
+        description="CC compiler (lang/cc/cc-m1.md, M2 amendment)")
+    ap.add_argument("inputs", nargs="+",
+                    help=".c translation units (each compiled as its "
+                         "own TU; one merged .s out)")
     ap.add_argument("-o", dest="output", required=True,
                     help="output .s path")
     args = ap.parse_args()
-    compile_unit(args.input, args.output)
+    compile_units(args.inputs, args.output)
 
 
 if __name__ == "__main__":

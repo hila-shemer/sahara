@@ -24,6 +24,8 @@
 # Case headers (comments in cases/NAME.c):
 #   // expect: VALUE        required (any python int literal)
 #   // oracle: no           skip the gcc leg (pointer-width/MMIO dep)
+#   // input: FILE.c        extra translation unit (repeatable; path
+#                           relative to cases/ - convention: inputs/)
 #   // fixture: FILE.s      extra text-only .s between sys.s and the unit
 #   // maxcycles: N         default 2000000
 #   // syscalls: N          assert exactly N TRAP cause-10 records
@@ -129,6 +131,12 @@ run_case() {
     expect=$(hdr "$src" expect | awk '{print $1}')
     oracle=$(hdr "$src" oracle | awk '{print $1}')
     fixture=$(hdr "$src" fixture)
+    # multi-input form (M2): every '// input:' line adds a TU
+    local extra=()
+    local f
+    for f in $(sed -n "s|^// input: *||p" "$src"); do
+        extra+=("$CASES/$f")
+    done
     maxcy=$(hdr "$src" maxcycles); maxcy="${maxcy:-2000000}"
     nsys=$(hdr "$src" syscalls)
     capture=$(hdr "$src" capture)
@@ -136,7 +144,8 @@ run_case() {
     # ---- negative tests: cc.py must reject, no output file
     if grep -q '^// cc-error' "$src"; then
         rm -f "$OUT/$name.s"
-        if python3 "$CCPY" "$src" -o "$OUT/$name.s" 2>"$OUT/$name.err"; then
+        if python3 "$CCPY" "$src" ${extra[@]+"${extra[@]}"} \
+                -o "$OUT/$name.s" 2>"$OUT/$name.err"; then
             echo "FAIL $name: cc.py accepted a program it must reject"
             note_fail "$name"; return
         fi
@@ -155,10 +164,12 @@ run_case() {
     local exphex; exphex=$(hex32 "$expect")
 
     # ---- layer 6a: compile twice, byte-identical
-    python3 "$CCPY" "$src" -o "$OUT/$name.s" 2>"$OUT/$name.err" \
+    python3 "$CCPY" "$src" ${extra[@]+"${extra[@]}"} -o "$OUT/$name.s" \
+            2>"$OUT/$name.err" \
         || { echo "FAIL $name: cc.py:"; sed 's/^/    /' "$OUT/$name.err"
              note_fail "$name"; return; }
-    python3 "$CCPY" "$src" -o "$OUT/$name.2.s" 2>/dev/null
+    python3 "$CCPY" "$src" ${extra[@]+"${extra[@]}"} \
+            -o "$OUT/$name.2.s" 2>/dev/null
     cmp -s "$OUT/$name.s" "$OUT/$name.2.s" \
         || { echo "FAIL $name: two compiles differ (nondeterminism)"
              note_fail "$name"; return; }
@@ -226,14 +237,22 @@ run_case() {
             echo "SKIP $name: oracle leg disabled (CC_ORACLE=0)"
             skip_notes=$((skip_notes+1))
         else
-            # two steps: -Dmain=cc_main must not rename the wrapper's main
-            { gcc -w -O0 -include "$ORACLE/prelude.h" -Dmain=cc_main \
-                  -c "$src" -o "$OUT/$name.o" \
-              && gcc -w -O0 "$OUT/$name.o" "$ORACLE/wrapper.c" \
-                  -o "$OUT/$name.host"; } 2>"$OUT/$name.gccerr" \
-                || { echo "FAIL $name: oracle build:"
-                     sed 's/^/    /' "$OUT/$name.gccerr" | head -5
-                     note_fail "$name"; return; }
+            # two steps: -Dmain=cc_main must not rename the wrapper's
+            # main; every extra input compiles as its own TU
+            local objs=() ei=0 ok=1
+            for f in "$src" ${extra[@]+"${extra[@]}"}; do
+                gcc -w -O0 -include "$ORACLE/prelude.h" -Dmain=cc_main \
+                    -c "$f" -o "$OUT/$name.$ei.o" \
+                    2>>"$OUT/$name.gccerr" || ok=0
+                objs+=("$OUT/$name.$ei.o"); ei=$((ei+1))
+            done
+            [ $ok = 1 ] && gcc -w -O0 "${objs[@]}" "$ORACLE/wrapper.c" \
+                  -o "$OUT/$name.host" 2>>"$OUT/$name.gccerr" || ok=0
+            if [ $ok = 0 ]; then
+                echo "FAIL $name: oracle build:"
+                sed 's/^/    /' "$OUT/$name.gccerr" | head -5
+                note_fail "$name"; return
+            fi
             local hostout
             hostout=$("$OUT/$name.host")
             if [ "$hostout" != "$exphex" ]; then
