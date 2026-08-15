@@ -15,5 +15,6 @@
 #include "src/str.c"
 #include "src/alloc.c"
 #include "src/conv.c"
+#include "src/io.c"
 
 #endif
