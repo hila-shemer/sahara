@@ -552,3 +552,68 @@ Both emulator implementations must match the readings marked
     job deadlocks loudly per 7.6, exactly as if the job did not
     exist. Both emulators implement the same gate, so difftest cannot
     catch a shared misreading - flagged here for the owner instead.
+
+44. **cc-m1 7 / libc work-order decision 4 — `extern u8 _end;` works;
+    the asm escape hatch was NOT needed** (libc agent). The probed
+    reading, recorded per the work order: cc.py accepts a user
+    `extern` declaration named `_end`, emits nothing for it (cc-m1.md
+    7), and the `(u64)&_end` reference resolves at assembly to the
+    boundary label the unit itself emits at the bss seam - the
+    compiler does not cross-check user externs against its own
+    emitted labels, which here is exactly the desired behavior. The
+    pre-authorized `lib/c/heap.s` fallback (`la r0, _end` leaf) was
+    never created. Fragility note for cc-m2: the same non-check means
+    `extern i64 __etext;` with a WRONG type also compiles and reads
+    garbage-shaped data; boundary labels as typed language-level
+    names could close that, but nothing today needs it.
+
+45. **cc-m1 9 (`static` absent) — namespace containment by prefix**
+    (libc agent, cc-m2 friction). Every libc internal (heap globals,
+    digit-value helpers) is a GLOBAL with a `__libc_` name prefix;
+    the amendment reserves the whole `__libc_*` space and duplicate-
+    definition loudness (asm.py E031) is the enforcement. Cost: the
+    internals are callable and writable by any program in the TU, and
+    the .sym carries them all. `static` in cc-m2 would turn the
+    convention into a guarantee; until then the prefix is the
+    containment, documented in libc.h.
+
+46. **cc-m1 9 (`void*`/`size_t` absent) — the libc surface is typed
+    u8*/u64** (libc agent, cc-m2 friction). Every classic void*
+    signature is rendered `u8*`, every size_t `u64`, and callers of
+    malloc for non-u8 objects must cast (`(u64*)malloc(n)` - legal,
+    explicit-cast-only per cc-m1 4). SABI v0.2 freezes names and the
+    register contract and PRE-AUTHORIZES the cc-m2 re-rendering to
+    void*/size_t as a source-level retyping with bit-identical ABI,
+    so the friction dies with m2 and no re-amendment is owed.
+
+47. **cc-m1 7 (no string-literal/address initializers for globals) —
+    no global constant tables** (libc agent, cc-m2 friction). The hex
+    digit table cannot be a file-scope `u8 digs[] = "0123..."`; it is
+    a string literal bound to a LOCAL pointer inside each function
+    that needs it (conv.c), costing one `la` per call and repeating
+    the literal in source (rodata dedup collapses the copies in the
+    image). The m2 roadmap already lists string-literal and address
+    initializers; this is the first real consumer asking.
+
+48. **cc-m1 9.7 (external cpp) — `-P` discards line provenance**
+    (libc agent, cc-m2 friction, predicted by the work order and hit
+    for real). cc.py has no `#line`, so ccbuild.sh must strip
+    linemarkers, so every cc.py diagnostic points into the combined
+    `out/NAME.tu.c` instead of the contributing source (first hit:
+    a comment-syntax error in libc.h reported as `NAME.tu.c:1`).
+    Route-around: none - read the .tu.c, it is left on disk for
+    exactly this. A `#line`-aware cc.py (m2 candidate) dissolves
+    this; multi-input cc.py (the roadmap's own plan) dissolves the
+    concatenation itself.
+
+49. **cc-m1 4/6 small-sugar list the libc bodies surfaced** (libc
+    agent, cc-m2 input, one entry so the m2 table has it in one
+    place). (a) The null pointer is always an explicit cast -
+    `u8 *p = (u8 *)0;` - because implicit conversions are integer-
+    scalar-only; comparisons against literal `0` are the one
+    exception, so tests read naturally but initializers do not.
+    (b) No `~`: 16-byte alignment masks are spelled
+    `& 0xFFFFFFFFFFFFFFF0`. (c) No `for`/`++`/`+=`: every digit loop
+    is `while` + `i = i + 1`, which is where most of the libc's line
+    count over its C89 equivalent comes from. All three are already
+    on the m2 roadmap; recorded as the first measured demand.
