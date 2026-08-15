@@ -76,6 +76,7 @@ RESERVED = build_reserved()
 
 KEYWORDS = {"u8", "i8", "u16", "i16", "u32", "i32", "i64", "u64",
             "i128", "u128", "void", "struct", "union", "enum",
+            "typedef", "static", "const", "volatile",
             "extern", "if", "else", "while", "break", "continue",
             "return", "sizeof",
             "switch", "case", "default", "for", "do", "goto"}
@@ -217,23 +218,59 @@ T_I128 = ("int", 128, True)
 T_U128 = ("int", 128, False)
 
 
+def uq(t):
+    """Strip top-level const qualification (M2). Expression values are
+    always unqualified; const survives only on declarations and inside
+    pointer/array component types."""
+    while t[0] == "const":
+        t = t[1]
+    return t
+
+
+def sdeep(t):
+    """Const-insensitive type image, for pointer compatibility checks
+    (a documented simplification: const participates in the two
+    effects the spec names - const-lvalue stores and rodata routing -
+    and is otherwise not a conversion barrier)."""
+    t = uq(t)
+    if t[0] == "ptr":
+        return ("ptr", sdeep(t[1]))
+    if t[0] == "arr":
+        return ("arr", sdeep(t[1]), t[2])
+    if t[0] == "func":
+        return ("func", sdeep(t[1]), tuple(sdeep(p) for p in t[2]))
+    return t
+
+
+def is_const_obj(t):
+    """An object declaration that must not be stored through: const
+    at the top, or an array of const elements."""
+    if t[0] == "const":
+        return True
+    if t[0] == "arr":
+        return is_const_obj(t[1])
+    return False
+
+
 def is_int(t):
-    return t[0] == "int"
+    return uq(t)[0] == "int"
 
 
 def is_ptr(t):
-    return t[0] == "ptr"
+    return uq(t)[0] == "ptr"
 
 
 def is_scalar(t):
-    return t[0] in ("int", "ptr")
+    return uq(t)[0] in ("int", "ptr")
 
 
 def is_aggr(t):
-    return t[0] in ("struct", "union")
+    return uq(t)[0] in ("struct", "union")
 
 
 def type_str(t):
+    if t[0] == "const":
+        return "const " + type_str(t[1])
     if t[0] == "int":
         return ("i" if t[2] else "u") + str(t[1])
     if t[0] == "void":
@@ -261,6 +298,9 @@ class Unit:
         self.structs = {}
         self.enumtags = set()
         self.nanon = 0
+        self.index = 0           # CLI input index (multi-input: M2)
+        self.static_funcs = set()
+        self.slocals = []        # static locals: (label, type, init)
         self.funcs = {}      # name -> (ret, params, body|None, line)
         self.globals = {}    # name -> dict(type, init, extern, line)
         self.gorder = []     # global names, declaration order
@@ -269,12 +309,14 @@ class Unit:
 
     def complete(self, t):
         """False only for a declared-but-undefined struct/union."""
+        t = uq(t)
         if is_aggr(t):
             ent = self.structs.get(t[1])
             return ent is not None and ent[0] is not None
         return True
 
     def t_align(self, t):
+        t = uq(t)
         if t[0] == "int":
             return t[1] // 8
         if t[0] == "ptr":
@@ -289,6 +331,7 @@ class Unit:
         raise AssertionError(t)
 
     def t_size(self, t):
+        t = uq(t)
         if t[0] == "int":
             return t[1] // 8
         if t[0] == "ptr":
@@ -308,6 +351,14 @@ class Unit:
                 return ft, off
         raise Cc(line, f"struct {sname} has no member '{fname}'")
 
+    def func_label(self, name):
+        """Emission label: file-scope statics mangle to
+        cc.static.<k>.<name> - dots make user-symbol collision
+        impossible (the cc.str.<n> precedent)."""
+        if name in self.static_funcs:
+            return f"cc.static.{self.index}.{name}"
+        return name
+
     def intern_string(self, data):
         if data not in self.strings:
             self.strings[data] = f"cc.str.{len(self.strings)}"
@@ -326,6 +377,7 @@ class Parser:
         # and locals/params shadow them, so the parser tracks blocks.
         self.pscopes = [{}]
         self.in_body = 0
+        self.cur_func = None
 
     def plookup(self, name):
         for sc in reversed(self.pscopes):
@@ -369,10 +421,53 @@ class Parser:
             raise Cc(line, f"expected {want}, got {got}")
         return r
 
+    def type_starts(self, ahead=0):
+        k, v, _ = self.peek(ahead)
+        if k == "kw":
+            return v in TYPE_KW or v in ("struct", "union", "enum",
+                                         "const", "volatile")
+        if k == "id":
+            ent = self.plookup(v)
+            return ent is not None and ent[0] == "typedef"
+        return False
+
     def at_type(self):
         k, v, _ = self.peek()
-        return k == "kw" and (v in TYPE_KW
-                              or v in ("struct", "union", "enum"))
+        if k == "kw" and v in ("static", "typedef"):
+            return True
+        return self.type_starts()
+
+    def parse_declspecs(self, what="declaration"):
+        """[storage-class and qualifiers] base-type [qualifiers].
+        Returns (storage, base) where storage is None | 'extern' |
+        'static' | 'typedef' and base carries a ('const', T) wrapper
+        when qualified. volatile is accepted and discarded: with no
+        optimizer every access is a real access, so its contract holds
+        for every object."""
+        storage = None
+        const = False
+        while True:
+            k, v, _ = self.peek()
+            if k == "kw" and v in ("extern", "static", "typedef"):
+                if storage is not None:
+                    raise Cc(self.line(), f"multiple storage classes "
+                                          f"in {what}")
+                storage = v
+                self.next()
+                continue
+            if k == "kw" and v in ("const", "volatile"):
+                const = const or v == "const"
+                self.next()
+                continue
+            break
+        base = self.parse_base_type()
+        while self.peek()[0] == "kw" and self.peek()[1] in ("const",
+                                                            "volatile"):
+            const = const or self.peek()[1] == "const"
+            self.next()
+        if const:
+            base = ("const", base)
+        return storage, base
 
     def parse_base_type(self):
         """Base type specifier only - no declarator parts. Handles
@@ -412,6 +507,11 @@ class Parser:
             elif name not in self.u.enumtags:
                 raise Cc(line, f"enum {name} not defined")
             return T_I32                 # every enum type is i32 (M2)
+        if k == "id":
+            ent = self.plookup(v)
+            if ent is not None and ent[0] == "typedef":
+                self.next()
+                return ent[1]
         if not (k == "kw" and v in TYPE_KW):
             raise Cc(line, "expected a type")
         self.next()
@@ -522,9 +622,14 @@ class Parser:
 
     def _declarator(self, abstract):
         line = self.line()
-        stars = 0
+        stars = []                       # per-star const flag
         while self.accept("p", "*"):
-            stars += 1                   # void* is legal from M2 on
+            c = False                    # '* const p': a const pointer
+            while self.peek()[0] == "kw" and self.peek()[1] in (
+                    "const", "volatile"):
+                c = c or self.peek()[1] == "const"
+                self.next()
+            stars.append(c)
         name, innerb = None, None
         if self.peek()[0] == "id":
             name = self.next()[1]
@@ -557,8 +662,10 @@ class Parser:
 
         def build(t):
             fparams = None
-            for _ in range(stars):
+            for c in stars:
                 t = ("ptr", t)
+                if c:
+                    t = ("const", t)
             for p in reversed(posts):
                 if p[0] == "arr":
                     if t[0] == "func":
@@ -583,14 +690,17 @@ class Parser:
 
     def _paren_is_declarator(self):
         """At '(' in declarator position: a parenthesized declarator
-        starts with '*', '(' or an identifier; a parameter list starts
-        with a type, 'void', or ')'."""
+        starts with '*', '(' or a non-typedef identifier; a parameter
+        list starts with a type (incl. a typedef name), 'void', or ')'."""
         k, v, _ = self.peek(1)
         if k == "kw":
             return False                     # type keyword: params
         if k == "p" and v == ")":
             return False                     # empty parameter list
-        return k in ("id",) or (k == "p" and v in ("*", "("))
+        if k == "id":
+            ent = self.plookup(v)
+            return not (ent is not None and ent[0] == "typedef")
+        return k == "p" and v in ("*", "(")
 
     def parse_params(self, line):
         """After the '(' of a function declarator.
@@ -605,8 +715,11 @@ class Parser:
         named = []
         while True:
             pl = self.line()
-            base = self.parse_base_type()
+            storage, base = self.parse_declspecs(what="a parameter")
+            if storage is not None:
+                raise Cc(pl, f"'{storage}' on a parameter")
             pt, pn, _ = self.parse_declarator(base, abstract=True)
+            pt = uq(pt)          # top-level qualifiers do not bind
             if pt == ("void",):
                 raise Cc(pl, "void parameter")
             if pt[0] == "func":
@@ -625,7 +738,9 @@ class Parser:
     def parse_typename(self):
         """A type-name: base type + abstract declarator (casts, sizeof)."""
         line = self.line()
-        base = self.parse_base_type()
+        storage, base = self.parse_declspecs(what="a type name")
+        if storage is not None:
+            raise Cc(line, f"'{storage}' in a type name")
         t, name, _ = self.parse_declarator(base, abstract=True)
         if name is not None:
             raise Cc(line, f"unexpected name '{name}' in a type name")
@@ -636,20 +751,27 @@ class Parser:
     def parse_unit(self):
         while self.peek()[0] != "eof":
             line = self.line()
-            is_extern = bool(self.accept("kw", "extern"))
-            base = self.parse_base_type()
+            storage, base = self.parse_declspecs()
             if self.accept("p", ";"):
                 continue                 # tag-only declaration
             while True:
                 t, name, fparams = self.parse_declarator(base)
-                if t[0] == "func":
-                    if self.parse_func(t, name, fparams, is_extern, line):
+                if storage == "typedef":
+                    self.register_typedef(t, name, line)
+                elif t[0] == "func":
+                    if self.parse_func(t, name, fparams, storage, line):
                         break                # a definition ends the list
                 else:
-                    self.parse_global(t, name, is_extern, line)
+                    self.parse_global(t, name, storage, line)
                 if self.accept("p", ";"):
                     break
                 self.expect("p", ",")
+
+    def register_typedef(self, t, name, line):
+        sc = self.pscopes[-1]
+        if name in sc:
+            raise Cc(line, f"'{name}' redeclared as a typedef")
+        sc[name] = ("typedef", t)
 
     def check_label_name(self, name, line):
         if name.lower() in RESERVED:
@@ -657,12 +779,23 @@ class Parser:
                            f"name (asm.md 2.3) - rename it (cc-m1.md "
                            f"section 2)")
 
-    def parse_func(self, ftype, name, fparams, is_extern, line):
+    def parse_func(self, ftype, name, fparams, storage, line):
         """Register a function prototype or definition. ftype is
         ('func', ret, ptypes); fparams the named parameter list.
         Returns True when a body was parsed (ends the declarator list)."""
         _, ret, ptypes = ftype
-        self.check_label_name(name, line)
+        ret = uq(ret)            # a const return type binds nothing
+        if storage == "static":
+            if name == "main":
+                raise Cc(line, "main cannot be static (crt0 calls it "
+                               "by name)")
+            if name in self.u.funcs and name not in self.u.static_funcs:
+                raise Cc(line, f"{name}() was declared non-static")
+            self.u.static_funcs.add(name)
+        elif name in self.u.static_funcs:
+            raise Cc(line, f"{name}() was declared static")
+        if storage != "static":
+            self.check_label_name(name, line)
         if name in self.u.globals:
             raise Cc(line, f"'{name}' already declared as a variable")
         sig = (ret, ptypes)
@@ -688,23 +821,38 @@ class Parser:
         for pn, pt, pl in fparams:
             self.declare_name(pn, pl)
         self.in_body += 1
+        self.cur_func = name
         body = self.parse_block()
+        self.cur_func = None
         self.in_body -= 1
         self.pscopes.pop()
         self.u.funcs[name] = (ret, params, body, line)
         self.u.forder.append(name)
         return True
 
-    def parse_global(self, t, name, is_extern, line):
-        self.check_label_name(name, line)
-        if t == ("void",):
+    def parse_global(self, t, name, storage, line):
+        is_extern = storage == "extern"
+        static = storage == "static"
+        if static:
+            label = f"cc.static.{self.u.index}.{name}"
+        else:
+            self.check_label_name(name, line)
+            label = name
+        old = self.u.globals.get(name)
+        if old is not None and old["static"] != static:
+            raise Cc(line, f"'{name}' redeclared with different "
+                           f"linkage")
+        if uq(t) == ("void",):
             raise Cc(line, "void variable")
+        if not self.u.complete(t):
+            raise Cc(line, f"'{name}' has incomplete type "
+                           f"{type_str(t)}")
         init = None
         if self.accept("p", "="):
             if is_extern:
                 raise Cc(line, "extern declaration with initializer")
-            if t[0] == "arr":
-                if not is_int(t[1]):
+            if uq(t)[0] == "arr":
+                if not is_int(uq(t)[1]):
                     raise Cc(line, "only integer arrays can be "
                                    "initialized in m1")
                 self.expect("p", "{")
@@ -740,7 +888,8 @@ class Parser:
             raise Cc(line, f"'{name}' already declared as a function")
         self.declare_name(name, line)
         self.u.globals[name] = {"type": t, "init": init,
-                                "extern": is_extern, "line": line}
+                                "extern": is_extern, "static": static,
+                                "label": label, "line": line}
         self.u.gorder.append(name)
 
     # ---- constant expressions (global inits, array sizes)
@@ -768,26 +917,62 @@ class Parser:
         if self.peek()[:2] == ("p", "{"):
             return self.parse_block()
         if self.at_type():
-            base = self.parse_base_type()
+            storage, base = self.parse_declspecs()
+            if storage == "extern":
+                raise Cc(line, "extern is file-scope only")
             decls = []
             while True:
                 t, name, _ = self.parse_declarator(base)
-                if t == ("void",):
+                if storage == "typedef":
+                    self.register_typedef(t, name, line)
+                    if self.accept("p", ";"):
+                        break
+                    self.expect("p", ",")
+                    continue
+                if uq(t) == ("void",):
                     raise Cc(line, "void variable")
                 if t[0] == "func":
                     raise Cc(line, "no function declarations at block "
                                    "scope (declare it at file scope)")
+                if not self.u.complete(t):
+                    raise Cc(line, f"'{name}' has incomplete type "
+                                   f"{type_str(t)}")
                 self.pscopes[-1][name] = ("name",)
-                init = None
-                if self.accept("p", "="):
-                    if not is_scalar(t):
-                        raise Cc(line, "arrays and structs cannot be "
-                                       "initialized in m1")
-                    init = self.parse_assign()
-                decls.append(("decl", line, t, name, init))
+                if storage == "static":
+                    # a static local is a global with a private label
+                    # (constant initializers only - C89's own rule)
+                    label = f"cc.static.{self.u.index}." \
+                            f"{self.cur_func}.{name}"
+                    if any(sl[0] == label for sl in self.u.slocals):
+                        n = sum(1 for sl in self.u.slocals
+                                if sl[0].startswith(label))
+                        label = f"{label}.{n}"
+                    init = None
+                    if self.accept("p", "="):
+                        if not is_scalar(t):
+                            raise Cc(line, "static aggregate "
+                                           "initializers are not in "
+                                           "yet (zero-init and assign)")
+                        if not is_int(t):
+                            raise Cc(line, "static pointer locals "
+                                           "take no initializer (no "
+                                           "address initializers yet)")
+                        init = self.const_expr("static initializer")
+                    self.u.slocals.append((label, t, init))
+                    decls.append(("sdecl", line, t, name, label))
+                else:
+                    init = None
+                    if self.accept("p", "="):
+                        if not is_scalar(t):
+                            raise Cc(line, "arrays and structs cannot "
+                                           "be initialized in m1")
+                        init = self.parse_assign()
+                    decls.append(("decl", line, t, name, init))
                 if self.accept("p", ";"):
                     break
                 self.expect("p", ",")
+            if not decls:
+                return ("empty", line)
             return decls[0] if len(decls) == 1 else ("multi", line, decls)
         if self.accept("kw", "if"):
             self.expect("p", "(")
@@ -918,10 +1103,8 @@ class Parser:
     def parse_unary(self):
         k, v, line = self.peek()
         if (k, v) == ("p", "("):
-            # cast?  '(' type ... ')'
-            nk, nv, _ = self.peek(1)
-            if nk == "kw" and (nv in TYPE_KW
-                               or nv in ("struct", "union", "enum")):
+            # cast?  '(' type ... ')' - incl. typedef names/qualifiers
+            if self.type_starts(1):
                 self.next()
                 t = self.parse_typename()
                 self.expect("p", ")")
@@ -946,10 +1129,7 @@ class Parser:
         if self.accept("p", "&"):
             return ("addr", line, self.parse_unary())
         if self.accept("kw", "sizeof"):
-            nk, nv, _ = self.peek(1)
-            if self.peek()[:2] == ("p", "(")                     and nk == "kw" and (nv in TYPE_KW
-                                        or nv in ("struct", "union",
-                                                  "enum")):
+            if self.peek()[:2] == ("p", "(") and self.type_starts(1):
                 self.next()
                 t = self.parse_typename()
                 self.expect("p", ")")
@@ -1286,6 +1466,7 @@ class Func:
     def __init__(self, unit, name):
         self.u = unit
         self.name = name
+        self.sym = unit.func_label(name)
         self.ret, self.params, self.body, self.dline = unit.funcs[name]
         self.lines = []          # body text; %%FRAME%% patched at render
         self.depth = 0
@@ -1325,6 +1506,8 @@ class Func:
             stack.extend(reversed([x for x in n
                                    if isinstance(x, (tuple, list))]))
         for n in order:
+            if n[0] == "sdecl":
+                continue                 # static local: no frame slot
             if n[0] == "decl":
                 size = self.u.t_size(n[2])
                 size = (size + 15) & ~15
@@ -1344,7 +1527,7 @@ class Func:
 
     def label(self):
         self.nlabel += 1
-        return f"{self.name}.L{self.nlabel}"
+        return f"{self.sym}.L{self.nlabel}"
 
     def home(self, slot):
         return self.spill_base + 16 * slot
@@ -1377,11 +1560,11 @@ class Func:
                 return sc[name]
         g = self.u.globals.get(name)
         if g is not None:
-            return ("global", name, g["type"])
+            return ("global", g["label"], g["type"])
         f = self.u.funcs.get(name)
         if f is not None:
-            return ("func", name, ("func", f[0], tuple(p[1]
-                                                       for p in f[1])))
+            return ("func", self.u.func_label(name),
+                    ("func", f[0], tuple(p[1] for p in f[1])))
         raise Cc(line, f"'{name}' is not declared")
 
     # ---- conversions (cc-m1.md section 4); operate on register r
@@ -1390,7 +1573,8 @@ class Func:
         # src is always a promoted (or pointer/128) type: 32/64/128
         # bits. dst may be any scalar type; a sub-width dst leaves the
         # promoted image of the narrowed value in r (cc-m1.md 4).
-        if src == dst:
+        src, dst = uq(src), uq(dst)
+        if sdeep(src) == sdeep(dst):
             return
         if is_ptr(src) and is_ptr(dst):
             return
@@ -1430,12 +1614,14 @@ class Func:
         return                                # i64 image is the sext
 
     def implicit(self, r, src, dst, line, what):
-        if src == dst or (is_int(src) and is_int(dst)):
-            self.convert(r, promote(src) if is_int(src) else src, dst, line)
+        dst = uq(dst)
+        if sdeep(src) == sdeep(dst) or (is_int(src) and is_int(dst)):
+            self.convert(r, promote(src) if is_int(src) else src, dst,
+                         line)
             return
         if is_ptr(src) and is_ptr(dst) \
-                and (src[1] == ("void",) or dst[1] == ("void",)) \
-                and src[1][0] != "func" and dst[1][0] != "func":
+                and (uq(src[1]) == ("void",) or uq(dst[1]) == ("void",)) \
+                and uq(src[1])[0] != "func" and uq(dst[1])[0] != "func":
             return          # T* <-> void*, both directions, no code (M2)
         raise Cc(line, f"{what}: cannot convert {type_str(src)} to "
                        f"{type_str(dst)} implicitly (cast needed?)")
@@ -1456,14 +1642,14 @@ class Func:
             t = self.rvalue(e[2])
             if not is_ptr(t):
                 raise Cc(e[1], f"cannot dereference {type_str(t)}")
-            if t[1] == ("void",):
+            if uq(t[1]) == ("void",):
                 raise Cc(e[1], "cannot dereference void* (cast first)")
             return t[1]
         if op == "index":
             bt = self.rvalue(e[2])
             if not is_ptr(bt):
                 raise Cc(e[1], f"cannot index {type_str(bt)}")
-            if bt[1][0] in ("void", "func"):
+            if uq(bt[1])[0] in ("void", "func"):
                 raise Cc(e[1], f"cannot index {type_str(bt)} (no "
                                f"object size)")
             it = self.rvalue(e[3])
@@ -1479,20 +1665,24 @@ class Func:
             _, line, base, fname, arrow = e
             if arrow:
                 bt = self.rvalue(base)
-                if not (is_ptr(bt) and is_aggr(bt[1])):
+                if not (is_ptr(bt) and is_aggr(uq(bt)[1])):
                     raise Cc(line, f"-> needs a struct/union pointer, "
                                    f"got {type_str(bt)}")
-                st = bt[1]
+                st = uq(bt)[1]
             else:
+                bt = None
                 st = self.lvalue(base)
                 if not is_aggr(st):
                     raise Cc(line, f". needs a struct/union, got "
                                    f"{type_str(st)}")
             if not self.u.complete(st):
                 raise Cc(line, f"{type_str(st)} is incomplete here")
-            ft, off = self.u.field(st[1], fname, line)
+            ft, off = self.u.field(uq(st)[1], fname, line)
             if off:
                 self.emit(f"add {self.top()}, {self.top()}, {off}")
+            if (st[0] == "const" or (arrow and bt[1][0] == "const")) \
+                    and ft[0] != "const":
+                ft = ("const", ft)       # constness flows into members
             return ft
         raise Cc(e[1], "not an lvalue")
 
@@ -1533,7 +1723,7 @@ class Func:
             return ("ptr", ("int", 8, False))
         if op == "var":
             kind = self.lookup(e[2], e[1])
-            t = kind[2]
+            t = uq(kind[2])
             if kind[0] == "local" and is_scalar(t):
                 r = self.push()
                 bits = t[1] if is_int(t) else 128
@@ -1544,7 +1734,7 @@ class Func:
                               f"[sp + {kind[1]}]")
                 return promote(t)
         if op in ("var", "deref", "index", "field"):
-            t = self.lvalue(e)
+            t = uq(self.lvalue(e))
             r = self.top()
             if t[0] == "arr":
                 return ("ptr", t[1])          # decay: address already up
@@ -1625,6 +1815,7 @@ class Func:
         raise AssertionError(op)
 
     def load(self, r, t):
+        t = uq(t)
         bits = t[1] if is_int(t) else 128
         if bits == 128:
             self.emit(f"ld128 {r}, [{r} + 0]")
@@ -1632,6 +1823,7 @@ class Func:
             self.emit(f"{LOADS[(bits, t[2])]} {r}, [{r} + 0]")
 
     def store_to(self, addr_reg, val_reg, t):
+        t = uq(t)
         bits = t[1] if is_int(t) else 128
         if bits == 128:
             self.emit(f"st128 [{addr_reg} + 0], {val_reg}")
@@ -1655,11 +1847,11 @@ class Func:
         # pointer arithmetic (cc-m1.md 5.3)
         if opname in ("+", "-") and (is_ptr(lt) or is_ptr(rt)):
             for pt_ in (lt, rt):
-                if is_ptr(pt_) and pt_[1][0] in ("void", "func"):
+                if is_ptr(pt_) and uq(pt_[1])[0] in ("void", "func"):
                     raise Cc(line, f"pointer arithmetic on "
                                    f"{type_str(pt_)} (no object size)")
             if is_ptr(lt) and is_ptr(rt):
-                if opname != "-" or lt != rt:
+                if opname != "-" or sdeep(lt) != sdeep(rt):
                     raise Cc(line, "pointer +/- pointer: only p - q of "
                                    "the same type")
                 size = self.u.t_size(lt[1])
@@ -1739,12 +1931,12 @@ class Func:
         rt = self.rvalue(r)
         rl, rr = self.reg(self.depth - 2), self.top()
         if is_ptr(lt) or is_ptr(rt):
-            ok = (lt == rt) \
+            ok = (sdeep(lt) == sdeep(rt)) \
                 or (is_ptr(lt) and r[0] == "num" and r[2] == 0) \
                 or (is_ptr(rt) and l[0] == "num" and l[2] == 0) \
                 or (is_ptr(lt) and is_ptr(rt)
-                    and (lt[1] == ("void",) or rt[1] == ("void",))
-                    and lt[1][0] != "func" and rt[1][0] != "func")
+                    and (uq(lt[1]) == ("void",) or uq(rt[1]) == ("void",))
+                    and uq(lt[1])[0] != "func" and uq(rt[1])[0] != "func")
             if not ok:
                 raise Cc(line, f"cannot compare {type_str(lt)} with "
                                f"{type_str(rt)}")
@@ -1810,6 +2002,8 @@ class Func:
         if lhs[0] == "var":
             kind = self.lookup(lhs[2], line)
             t = kind[2]
+            if t[0] == "const":
+                raise Cc(line, f"assignment to const '{lhs[2]}'")
             if is_scalar(t):
                 vt = self.rvalue(rhs)
                 rv = self.top()
@@ -1824,6 +2018,9 @@ class Func:
                 return promote(t) if is_int(t) else t
         # General: lvalue address first (left-to-right), then the value.
         t = self.lvalue(lhs)
+        if t[0] == "const":
+            raise Cc(line, f"assignment to const lvalue "
+                           f"({type_str(t)})")
         if not is_scalar(t):
             raise Cc(line, f"cannot assign to {type_str(t)}")
         vt = self.rvalue(rhs)
@@ -1835,6 +2032,7 @@ class Func:
         return promote(t) if is_int(t) else t
 
     def store_direct(self, off, val_reg, t):
+        t = uq(t)
         bits = t[1] if is_int(t) else 128
         if bits == 128:
             self.emit(f"st128 [sp + {off}], {val_reg}")
@@ -1871,7 +2069,7 @@ class Func:
                 ins = self.lines
                 self.lines = saved
                 self.lines[m1:m1] = ins
-        elif is_ptr(t1) and is_ptr(t2) and t1 == t2:
+        elif is_ptr(t1) and is_ptr(t2) and sdeep(t1) == sdeep(t2):
             t = t1
         elif is_ptr(t1) and b[0] == "num" and b[2] == 0:
             t = t1                        # null arm: image already 0
@@ -1887,6 +2085,8 @@ class Func:
         op, line, target, delta = e
         post = op == "postinc"
         t = self.lvalue(target)
+        if t[0] == "const":
+            raise Cc(line, f"++/-- on a const lvalue ({type_str(t)})")
         if not is_scalar(t):
             raise Cc(line, f"++/-- needs a scalar lvalue, got "
                            f"{type_str(t)}")
@@ -1900,7 +2100,7 @@ class Func:
         else:
             work = rv
         if is_ptr(t):
-            if t[1][0] in ("func", "void"):
+            if uq(t[1])[0] in ("func", "void"):
                 raise Cc(line, f"++/-- on {type_str(t)} (no object "
                                f"size)")
             step = self.u.t_size(t[1]) * delta
@@ -1931,6 +2131,9 @@ class Func:
         expression value is the stored value, promoted."""
         _, line, opname, lhs, rhs = e
         t = self.lvalue(lhs)
+        if t[0] == "const":
+            raise Cc(line, f"assignment to const lvalue "
+                           f"({type_str(t)})")
         if not is_scalar(t):
             raise Cc(line, f"cannot assign to {type_str(t)}")
         ra = self.top()
@@ -1944,7 +2147,7 @@ class Func:
                 raise Cc(line, f"{opname}= is not pointer arithmetic")
             if not is_int(rt_):
                 raise Cc(line, "pointer arithmetic needs an integer")
-            if t[1][0] in ("func", "void"):
+            if uq(t[1])[0] in ("func", "void"):
                 raise Cc(line, f"{opname}= on {type_str(t)} (no "
                                f"object size)")
             self.index_to_128(rr, rt_)
@@ -2029,6 +2232,7 @@ class Func:
 
     def load_from(self, rd, raddr, t):
         """Typed load of *raddr into rd (rd != raddr variant of load)."""
+        t = uq(t)
         bits = t[1] if is_int(t) else 128
         if bits == 128:
             self.emit(f"ld128 {rd}, [{raddr} + 0]")
@@ -2084,7 +2288,7 @@ class Func:
         for i in range(min(8, len(args))):
             self.emit(f"ld128 r{i}, [sp + {self.home(astart + i)}]")
         if direct is not None:
-            self.emit(f"jal {direct}")
+            self.emit(f"jal {self.u.func_label(direct)}")
         else:
             self.emit(f"ld128 r8, [sp + {self.home(base)}]")
             self.emit("jalr ra, r8, 0")
@@ -2154,6 +2358,11 @@ class Func:
         elif op == "multi":
             for x in s[2]:               # one declaration, N declarators
                 self.gen_stmt(x)
+        elif op == "sdecl":
+            _, line, t, name, label = s
+            if name in self.scopes[-1]:
+                raise Cc(line, f"'{name}' redeclared in the same block")
+            self.scopes[-1][name] = ("global", label, t)
         elif op == "decl":
             _, line, t, name, init = s
             if name in self.scopes[-1]:
@@ -2185,7 +2394,7 @@ class Func:
                 self.implicit(self.top(), t, self.ret, line, "return")
                 self.emit(f"mov r0, {self.top()}")
                 self.pop()
-            self.emit(f"b {self.name}.Lret")
+            self.emit(f"b {self.sym}.Lret")
         elif op == "if":
             _, line, cond, then, els = s
             if els is None:
@@ -2264,14 +2473,14 @@ class Func:
             _, line, name, stmt = s
             if name in self.golabels:
                 raise Cc(line, f"label '{name}' redefined")
-            lab = f"{self.name}.L.{name}"
+            lab = f"{self.sym}.L.{name}"
             self.golabels[name] = lab
             self.emit_label(lab)
             self.gen_stmt(stmt)
         elif op == "goto":
             _, line, name = s
             self.gotos.append((name, line))
-            self.emit(f"b {self.name}.L.{name}")
+            self.emit(f"b {self.sym}.L.{name}")
         elif op == "break":
             if not self.loopstack:
                 raise Cc(s[1], "break outside a loop or switch")
@@ -2404,9 +2613,9 @@ class Func:
                 return pre + str(frame + int(extra)) + post
             return line
 
-        out = [f"# cc: func {self.name} frame={frame} "
+        out = [f"# cc: func {self.sym} frame={frame} "
                f"calls={1 if self.calls else 0}",
-               f"{self.name}:"]
+               f"{self.sym}:"]
         if frame:
             out.append(f"        add sp, sp, -{frame}")
         if self.calls:
@@ -2415,7 +2624,7 @@ class Func:
         out.extend(patch(x) for x in self.lines)
         if self.ret != ("void",):
             out.append("        li r0, 0")   # end of a non-void body:
-        out.append(f"{self.name}.Lret:")      # defined return 0
+        out.append(f"{self.sym}.Lret:")       # defined return 0
         if self.calls:
             out.append(f"        ld128 ra, [sp + {frame - 16}]")
         if frame:
@@ -2457,27 +2666,25 @@ def render(unit, basename):
     for fname in unit.forder:
         lines.extend(Func(unit, fname).generate())
 
-    # rodata: string literals, first-use order (dict = insertion order)
-    lines.append("        .align 16")
-    lines.append("__etext:")
-    for data, label in unit.strings.items():
-        lines.append(f"{label}:")
-        lines.append(f'        .asciiz "{escape_string(data)}"')
+    # objects, in section homes: const-with-init -> rodata (the spec's
+    # const effect #2), init -> data, no init -> bss. Static locals
+    # ride along after the globals, source order.
+    objs = [(unit.globals[n]["label"], unit.globals[n]["type"],
+             unit.globals[n]["init"])
+            for n in unit.gorder if not unit.globals[n]["extern"]]
+    objs += unit.slocals
+    ro = [o for o in objs if o[2] is not None and is_const_obj(o[1])]
+    rw = [o for o in objs if o[2] is not None and not is_const_obj(o[1])]
+    zi = [o for o in objs if o[2] is None]
 
-    # data: initialized globals, declaration order
-    lines.append("        .align 16")
-    lines.append("__erodata:")
-    for name in unit.gorder:
-        g = unit.globals[name]
-        if g["extern"] or g["init"] is None:
-            continue
-        t, init = g["type"], g["init"]
+    def emit_data(label, t, init):
+        t = uq(t)
         elem = t[1] if t[0] == "arr" else t
         size = unit.t_size(elem)
         align = unit.t_align(t)
         if align > 1:
             lines.append(f"        .align {align}")
-        lines.append(f"{name}:")
+        lines.append(f"{label}:")
         values = init if isinstance(init, list) else [init]
         if t[0] == "arr" and len(values) < t[2]:
             values = values + [0] * (t[2] - len(values))
@@ -2487,18 +2694,30 @@ def render(unit, basename):
             chunk = ", ".join(f"0x{v & mask:x}" for v in values[i:i + 8])
             lines.append(f"        {directive} {chunk}")
 
-    # bss: uninitialized globals, declaration order
+    # rodata: string literals (first-use order; dict = insertion
+    # order), then const objects
+    lines.append("        .align 16")
+    lines.append("__etext:")
+    for data, label in unit.strings.items():
+        lines.append(f"{label}:")
+        lines.append(f'        .asciiz "{escape_string(data)}"')
+    for label, t, init in ro:
+        emit_data(label, t, init)
+
+    # data
+    lines.append("        .align 16")
+    lines.append("__erodata:")
+    for label, t, init in rw:
+        emit_data(label, t, init)
+
+    # bss
     lines.append("        .align 16")
     lines.append("__edata:")
-    for name in unit.gorder:
-        g = unit.globals[name]
-        if g["extern"] or g["init"] is not None:
-            continue
-        t = g["type"]
+    for label, t, init in zi:
         align = unit.t_align(t)
         if align > 1:
             lines.append(f"        .align {align}")
-        lines.append(f"{name}:")
+        lines.append(f"{label}:")
         lines.append(f"        .space {unit.t_size(t)}")
 
     lines.append("        .align 16")

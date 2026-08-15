@@ -700,9 +700,10 @@ Out of m1, each with its reason (see also the roadmap):
   for milestone size, not difficulty. The flagship ports use function
   pointers pervasively, so m2 starts here.
 
-- **`typedef`, `static`, `const`, `volatile`** — no optimizer means
-  every access is a real access, which is all m1 code could want from
-  `volatile`; the rest is m2 bookkeeping.
+- **`typedef`, `static`, `const`, `volatile`** — landed in M2
+  (2026-08-15, see the amendment summary); the m1 note stands as
+  history: no optimizer means every access is a real access, which is
+  volatile's whole contract here.
 - **bitfields, multi-dimensional arrays** — layout complexity with no
   m1 consumer.
 - **`void*`** — needs implicit-conversion rules worth doing properly
@@ -838,6 +839,25 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **`typedef`, `static`, `const`, `volatile`**
+  (work-order decision 8): §2 keywords; §7 declaration specifiers.
+  `typedef` is block-scoped name→type aliasing and the port-compat
+  hook (`typedef i32 int_t` — cc never reserved C's type names).
+  `static` at file scope renders as `cc.static.<k>.<name>` (`<k>` =
+  input index; dots make user-symbol collision impossible — the
+  `cc.str.<n>` precedent), which also exempts static names from the
+  reserved-name check; static locals are `cc.static.<k>.<func>.
+  <name>` with constant scalar initializers (C89's own rule), in
+  data/bss like globals. `const` is tracked for exactly two effects:
+  assignment through a const lvalue is a compile error (constness
+  flows into members and through pointers-to-const), and a const
+  GLOBAL with an initializer is emitted to RODATA. Const is NOT a
+  pointer-conversion barrier (documented simplification: no
+  optimizer to inform, and the two effects above are the entire
+  contract). `volatile` is accepted and discarded — with no
+  optimizer every source access is a real access, so volatile's
+  contract holds for every object (§9's "why absent" graduates to
+  "why trivially honored"). `main` cannot be static.
 - 2026-08-15 — **enums, unions, `void*`, `sizeof expr`, incomplete
   tags** (work-order decisions 1.6/6): §3 the four M2 derived-type
   additions (union offset-0/defined-punning representation, enum =
