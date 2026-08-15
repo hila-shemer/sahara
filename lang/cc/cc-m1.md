@@ -525,6 +525,31 @@ declarator lists, unnamed prototype parameters.)*
 - **Prototypes are the interop surface**: an `extern` prototype is how
   C calls hand-written `.s`, and a C function's verbatim label is how
   `.s` calls C. Both sides speak SABI v0 (section 8).
+- **Global initializers, full (M2, 2026-08-15).** Brace lists for
+  arrays, structs, and unions, nested; **braces are required at each
+  aggregate level** (C89's fill-in-order flattening is NOT adopted —
+  a documented simplification; fully-braced tables initialize
+  identically). Scalar members take constant expressions; partial
+  initialization zero-fills the remainder (and all padding). String
+  literals initialize `u8` arrays (bytes plus NUL, size-checked;
+  exact-fit without NUL legal) and `u8*` scalars (a pointer to the
+  pooled rodata object — shared with identical code literals).
+  ADDRESS initializers — `&global`, an array name (decayed),
+  `array + k` / `&array[k]` (element-scaled), a function name or
+  `&function` — emit as `.oct label` / `.oct label ± off`, resolved
+  by the assembler in pass 2; the label may live in any input unit or
+  an earlier `.s` on the assembler line. A pointer initializer is
+  otherwise an explicit-cast constant (`(T*)k`) or the literal `0`.
+  Names in address initializers must be declared before use (C89's
+  rule). An unsized array `T name[]` takes its size from its
+  initializer (or stays incomplete under `extern` until another
+  declaration completes it). A union initializer brace-initializes
+  its FIRST member (C89). Sub-width array data emits via `.half`/
+  `.word` rows in the chunked style; long zero tails emit as
+  `.space`. Static locals take the same initializer grammar
+  (constant, C89's own restriction). A function-pointer table global
+  — the DOOM `states[]` shape — is therefore an ordinary initialized
+  global.
 - **Globals**: file-scope variables of any m1 type.
   - With an initializer (scalars: one constant expression; arrays of
     scalars: a brace list of ≤ N constant expressions, remainder
@@ -883,6 +908,12 @@ one entry per change, with its date and the sections it grew.
   arrays, declarator lists, parenthesized declarators, unnamed
   prototype parameters); §8.2 the indirect-call lowering and the
   `jalr ra, rX, 0` abicheck rule.
+- 2026-08-15 — **global initializers, full** (work-order decision 9):
+  §7 nested brace lists (braces required per level — documented
+  simplification), string-literal initializers for `u8` arrays and
+  `u8*`, address initializers via pass-2 `.oct label ± off`, unsized
+  arrays sized by their initializers, union first-member rule,
+  static-local initializers, `.space` zero tails.
 - 2026-08-15 — **aggregates by value** (work-order decision 7): §8.2a
   the full convention — inline compiler-emitted copies (never
   memcpy), caller-staged by-address parameters, the hidden-r0 return

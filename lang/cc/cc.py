@@ -337,6 +337,8 @@ class Unit:
         if t[0] == "ptr":
             return 16
         if t[0] == "arr":
+            if t[2] is None:
+                raise Cc(0, f"incomplete array type {type_str(t)}")
             return self.t_size(t[1]) * t[2]
         if is_aggr(t):
             ent = self.structs.get(t[1])
@@ -547,6 +549,8 @@ class Parser:
                 if ft[0] == "func":
                     raise Cc(fl, f"member '{fn}' is a function (use a "
                                  f"function pointer)")
+                if ft[0] == "arr" and ft[2] is None:
+                    raise Cc(fl, f"member '{fn}' is an unsized array")
                 if not self.u.complete(ft if ft[0] != "arr" else ft[1]):
                     raise Cc(fl, f"member '{fn}' has incomplete type")
                 if any(fn == f[0] for f in fields):
@@ -645,11 +649,14 @@ class Parser:
         while True:
             pl = self.line()
             if self.accept("p", "["):
-                cnt = self.const_expr("array size")
-                if cnt <= 0:
-                    raise Cc(pl, "array size must be > 0")
-                self.expect("p", "]")
-                posts.append(("arr", cnt, pl))
+                if self.accept("p", "]"):
+                    posts.append(("arr", None, pl))   # unsized: [] (M2)
+                else:
+                    cnt = self.const_expr("array size")
+                    if cnt <= 0:
+                        raise Cc(pl, "array size must be > 0")
+                    self.expect("p", "]")
+                    posts.append(("arr", cnt, pl))
             elif self.peek()[:2] == ("p", "(") and (posts or stars
                                                     or innerb is not None
                                                     or name is not None
@@ -855,34 +862,24 @@ class Parser:
         if self.accept("p", "="):
             if is_extern:
                 raise Cc(line, "extern declaration with initializer")
-            if uq(t)[0] == "arr":
-                if not is_int(uq(t)[1]):
-                    raise Cc(line, "only integer arrays can be "
-                                   "initialized in m1")
-                self.expect("p", "{")
-                init = []
-                while True:
-                    init.append(self.const_expr("initializer"))
-                    if self.accept("p", "}"):
-                        break
-                    self.expect("p", ",")
-                    if self.accept("p", "}"):
-                        break
-                if len(init) > t[2]:
-                    raise Cc(line, f"too many initializers ({len(init)} "
-                                   f"for {t[2]} elements)")
-            elif is_int(t):
-                init = self.const_expr("initializer")
-            else:
-                raise Cc(line, "only integer scalars and arrays take "
-                               "initializers in m1 (no address "
-                               "initializers)")
+            t, init = self.parse_initializer_top(t, name, line)
+        if uq(t)[0] == "arr" and uq(t)[2] is None and not is_extern:
+            raise Cc(line, f"unsized array '{name}' needs an "
+                           f"initializer (or extern)")
         old = self.u.globals.get(name)
         if old is not None:
-            if old["type"] != t:
+            ot, nt = uq(old["type"]), uq(t)
+            compat = sdeep(old["type"]) == sdeep(t) \
+                or (ot[0] == "arr" and nt[0] == "arr"
+                    and sdeep(ot[1]) == sdeep(nt[1])
+                    and (ot[2] is None or nt[2] is None
+                         or ot[2] == nt[2]))
+            if not compat:
                 raise Cc(line, f"conflicting declaration of '{name}'")
             if not old["extern"] and not is_extern:
                 raise Cc(line, f"'{name}' redefined")
+            if ot[0] == "arr" and ot[2] is None and nt[2] is not None:
+                old["type"] = t          # completion
             if is_extern:
                 return
             old["extern"] = False
@@ -897,6 +894,207 @@ class Parser:
         self.u.gorder.append(name)
 
     # ---- constant expressions (global inits, array sizes)
+
+    # ---- initializers (M2, full): nested brace lists, strings,
+    # address initializers. The result is a flat list of atoms
+    # covering the object byte-exactly: ("int", size, value),
+    # ("addr", label, byteoff), ("zero", nbytes).
+
+    def parse_initializer_top(self, t, name, line):
+        """Initializer for a file-scope object; resolves unsized
+        arrays from the initializer. -> (type, atoms)."""
+        ut = uq(t)
+        if ut[0] == "arr" and ut[2] is None:
+            elem = uq(ut[1])
+            if self.peek()[0] == "str" and is_int(elem) \
+                    and elem[1] == 8:
+                data = self.next()[1]
+                atoms = [("int", 1, b & 0xFF) for b in data]
+                atoms.append(("int", 1, 0))
+                return ("arr", ut[1], len(data) + 1), atoms
+            self.expect("p", "{", what="an initializer list")
+            atoms = []
+            count = 0
+            while True:
+                atoms += self.init_atoms(ut[1])
+                count += 1
+                if self.accept("p", "}"):
+                    break
+                self.expect("p", ",")
+                if self.accept("p", "}"):
+                    break
+            return ("arr", ut[1], count), atoms
+        return t, self.init_atoms(t)
+
+    def init_atoms(self, t):
+        line = self.line()
+        t = uq(t)
+        if t[0] == "arr":
+            elem = t[1]
+            if self.peek()[0] == "str" and is_int(uq(elem)) \
+                    and uq(elem)[1] == 8:
+                data = self.next()[1]
+                if len(data) > t[2]:
+                    raise Cc(line, f"string initializer of {len(data)} "
+                                   f"bytes for a {t[2]}-byte array")
+                atoms = [("int", 1, b & 0xFF) for b in data]
+                left = t[2] - len(data)
+                if left:
+                    atoms.append(("int", 1, 0))
+                    atoms += self.zfill(elem, left - 1)
+                return atoms
+            self.expect("p", "{", what="an initializer list (braces "
+                                        "required at each aggregate "
+                                        "level)")
+            atoms = []
+            count = 0
+            while True:
+                if count >= t[2]:
+                    raise Cc(self.line(), f"too many initializers "
+                                          f"(array of {t[2]})")
+                atoms += self.init_atoms(elem)
+                count += 1
+                if self.accept("p", "}"):
+                    break
+                self.expect("p", ",")
+                if self.accept("p", "}"):
+                    break
+            atoms += self.zfill(elem, t[2] - count)
+            return atoms
+        if t[0] == "struct":
+            ent = self.u.structs[t[1]]
+            fields, size = ent[0], ent[1]
+            self.expect("p", "{", what="an initializer list (braces "
+                                        "required at each aggregate "
+                                        "level)")
+            atoms = []
+            pos = 0
+            idx = 0
+            while True:
+                if idx >= len(fields):
+                    raise Cc(self.line(), f"too many initializers for "
+                                          f"{type_str(t)}")
+                fn, ft, off = fields[idx]
+                if off > pos:
+                    atoms.append(("zero", off - pos))
+                    pos = off
+                atoms += self.init_atoms(ft)
+                pos += self.u.t_size(ft)
+                idx += 1
+                if self.accept("p", "}"):
+                    break
+                self.expect("p", ",")
+                if self.accept("p", "}"):
+                    break
+            if size > pos:
+                atoms.append(("zero", size - pos))
+            return atoms
+        if t[0] == "union":
+            ent = self.u.structs[t[1]]
+            fields, size = ent[0], ent[1]
+            self.expect("p", "{", what="an initializer list")
+            # C89: a union initializer brace-initializes the FIRST member
+            atoms = self.init_atoms(fields[0][1])
+            pos = self.u.t_size(fields[0][1])
+            self.accept("p", ",")
+            self.expect("p", "}")
+            if size > pos:
+                atoms.append(("zero", size - pos))
+            return atoms
+        if self.peek()[:2] == ("p", "{"):
+            raise Cc(line, "braces around a scalar initializer")
+        return [self.scalar_atom(t, self.parse_assign(), line)]
+
+    def zfill(self, elem, n):
+        """Zero-fill n trailing elements: short tails keep the m1
+        value-row shape, long ones become .space."""
+        if n <= 0:
+            return []
+        esz = self.u.t_size(elem)
+        if is_int(uq(elem)) and n <= 64:
+            return [("int", esz, 0)] * n
+        return [("zero", esz * n)]
+
+    def scalar_atom(self, t, e, line):
+        t = uq(t)
+        size = self.u.t_size(t)
+        v = const_eval(e, self.u)
+        if v is not None:
+            if is_ptr(t):
+                if to_val(v[2], v[3]) != 0:
+                    raise Cc(line, "a pointer initializer needs an "
+                                   "address or an explicit cast "
+                                   "(only 0 initializes bare)")
+                return ("int", 16, 0)
+            return ("int", size, v[2] & ((1 << (8 * size)) - 1))
+        if is_ptr(t):
+            ee = e
+            if e[0] == "cast" and is_ptr(e[2]):
+                inner = const_eval(e[3], self.u)
+                if inner is not None:
+                    return ("int", 16, inner[2] & MASK128)
+                ee = e[3]
+            a = self.addr_eval(ee)
+            if a is not None:
+                return ("addr", a[0], a[1])
+        raise Cc(line, "initializer must be a constant expression or "
+                       "an address (&global, an array name, a "
+                       "function name, name + constant)")
+
+    def addr_eval(self, e):
+        r = self.addr_eval_t(e)
+        return None if r is None else (r[0], r[1])
+
+    def addr_eval_t(self, e):
+        """Address-constant expressions -> (label, byteoff, pointee)."""
+        op = e[0]
+        if op == "strlit":
+            return (self.u.intern_string(e[2]), 0, ("int", 8, False))
+        if op == "var":
+            name = e[2]
+            g = self.u.globals.get(name)
+            if g is not None and uq(g["type"])[0] == "arr":
+                return (g["label"], 0, uq(g["type"])[1])   # decay
+            f = self.u.funcs.get(name)
+            if f is not None:
+                return (self.u.func_label(name), 0,
+                        ("func", f[0], tuple(q[1] for q in f[1])))
+            return None
+        if op == "addr":
+            inner = e[2]
+            if inner[0] == "var":
+                name = inner[2]
+                g = self.u.globals.get(name)
+                if g is not None:
+                    return (g["label"], 0, g["type"])
+                f = self.u.funcs.get(name)
+                if f is not None:
+                    return (self.u.func_label(name), 0,
+                            ("func", f[0], tuple(q[1] for q in f[1])))
+                return None
+            if inner[0] == "index":
+                base = self.addr_eval_t(inner[2])
+                idx = const_eval(inner[3], self.u)
+                if base is None or idx is None:
+                    return None
+                label, off, pt = base
+                if pt[0] == "func":
+                    return None
+                return (label,
+                        off + to_val(idx[2], idx[3]) * self.u.t_size(pt),
+                        pt)
+            return None
+        if op == "bin" and e[2] in ("+", "-"):
+            base = self.addr_eval_t(e[3])
+            k = const_eval(e[4], self.u)
+            if base is None or k is None:
+                return None
+            label, off, pt = base
+            if pt[0] == "func":
+                return None              # no function-pointer arithmetic
+            n = to_val(k[2], k[3]) * self.u.t_size(pt)
+            return (label, off + (n if e[2] == "+" else -n), pt)
+        return None
 
     def const_expr(self, what):
         line = self.line()
@@ -938,6 +1136,11 @@ class Parser:
                 if t[0] == "func":
                     raise Cc(line, "no function declarations at block "
                                    "scope (declare it at file scope)")
+                if t[0] == "arr" and t[2] is None \
+                        and storage != "static":
+                    raise Cc(line, f"'{name}' is an unsized array "
+                                   f"(size from initializer needs "
+                                   f"static storage)")
                 if not self.u.complete(t):
                     raise Cc(line, f"'{name}' has incomplete type "
                                    f"{type_str(t)}")
@@ -953,15 +1156,12 @@ class Parser:
                         label = f"{label}.{n}"
                     init = None
                     if self.accept("p", "="):
-                        if not is_scalar(t):
-                            raise Cc(line, "static aggregate "
-                                           "initializers are not in "
-                                           "yet (zero-init and assign)")
-                        if not is_int(t):
-                            raise Cc(line, "static pointer locals "
-                                           "take no initializer (no "
-                                           "address initializers yet)")
-                        init = self.const_expr("static initializer")
+                        t, init = self.parse_initializer_top(t, name,
+                                                             line)
+                    if uq(t)[0] == "arr" and uq(t)[2] is None:
+                        raise Cc(line, f"unsized static array "
+                                       f"'{name}' needs an "
+                                       f"initializer")
                     self.u.slocals.append((label, t, init))
                     decls.append(("sdecl", line, t, name, label))
                 else:
@@ -2849,22 +3049,41 @@ def render(unit, basename):
     rw = [o for o in objs if o[2] is not None and not is_const_obj(o[1])]
     zi = [o for o in objs if o[2] is None]
 
-    def emit_data(label, t, init):
-        t = uq(t)
-        elem = t[1] if t[0] == "arr" else t
-        size = unit.t_size(elem)
+    def emit_data(label, t, atoms):
         align = unit.t_align(t)
         if align > 1:
             lines.append(f"        .align {align}")
         lines.append(f"{label}:")
-        values = init if isinstance(init, list) else [init]
-        if t[0] == "arr" and len(values) < t[2]:
-            values = values + [0] * (t[2] - len(values))
-        mask = (1 << (8 * size)) - 1
-        directive = DATA_DIRECTIVE[size]
-        for i in range(0, len(values), 8):
-            chunk = ", ".join(f"0x{v & mask:x}" for v in values[i:i + 8])
-            lines.append(f"        {directive} {chunk}")
+        run_size, run_vals = None, []
+
+        def flush():
+            nonlocal run_size, run_vals
+            if run_vals:
+                d = DATA_DIRECTIVE[run_size]
+                for i in range(0, len(run_vals), 8):
+                    chunk = ", ".join(f"0x{v:x}"
+                                      for v in run_vals[i:i + 8])
+                    lines.append(f"        {d} {chunk}")
+            run_size, run_vals = None, []
+
+        for a in atoms:
+            if a[0] == "int":
+                if run_size != a[1]:
+                    flush()
+                    run_size = a[1]
+                run_vals.append(a[2])
+            elif a[0] == "addr":
+                flush()
+                if a[2] == 0:
+                    lines.append(f"        .oct {a[1]}")
+                elif a[2] > 0:
+                    lines.append(f"        .oct {a[1]} + {a[2]}")
+                else:
+                    lines.append(f"        .oct {a[1]} - {-a[2]}")
+            else:
+                flush()
+                lines.append(f"        .space {a[1]}")
+        flush()
 
     # rodata: string literals (first-use order; dict = insertion
     # order), then const objects
