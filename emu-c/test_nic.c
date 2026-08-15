@@ -782,6 +782,219 @@ static void test_udp_flows(void)
     cap_clear();
 }
 
+/* ------------------------------------------------------------ SBP/1 */
+
+/* Frozen rom/netboot/sbp.md vectors. SBP-TV-1: the ROM's REQ frame
+ * verbatim (reference MAC, client port 45063, max_block 1024). */
+static const uint8_t sbp_tv1[60] = {
+    0x52, 0x55, 0x0A, 0x00, 0x02, 0x02, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+    0x08, 0x00, 0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11,
+    0x62, 0xB5, 0x0A, 0x00, 0x02, 0x0F, 0x0A, 0x00, 0x02, 0x02, 0xB0, 0x07,
+    0x00, 0x45, 0x00, 0x14, 0x00, 0x00, 0x53, 0x42, 0x50, 0x31, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+/* SBP-TV-2: DATA(1) for the 16-byte image "SBP1-TEST-BLOB!!" -- one
+ * short (hence final) block, no padding needed at 70 bytes. */
+static const uint8_t sbp_tv2[70] = {
+    0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x52, 0x55, 0x0A, 0x00, 0x02, 0x02,
+    0x08, 0x00, 0x45, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11,
+    0x62, 0xA5, 0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00, 0x02, 0x0F, 0x00, 0x45,
+    0xB0, 0x07, 0x00, 0x24, 0x00, 0x00, 0x53, 0x42, 0x50, 0x31, 0x02, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x53, 0x42, 0x50, 0x31, 0x2D, 0x54,
+    0x45, 0x53, 0x54, 0x2D, 0x42, 0x4C, 0x4F, 0x42, 0x21, 0x21,
+};
+
+/* SBP-TV-3: ACK(1) -- byte-identical to TV-1 except opcode and arg. */
+static const uint8_t sbp_tv3[60] = {
+    0x52, 0x55, 0x0A, 0x00, 0x02, 0x02, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+    0x08, 0x00, 0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11,
+    0x62, 0xB5, 0x0A, 0x00, 0x02, 0x0F, 0x0A, 0x00, 0x02, 0x02, 0xB0, 0x07,
+    0x00, 0x45, 0x00, 0x14, 0x00, 0x00, 0x53, 0x42, 0x50, 0x31, 0x03, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+/* SBP-TV-4: ERR 1, the unconfigured-server reply to TV-1; padded from
+ * 54 to the 60-byte exposure minimum. */
+static const uint8_t sbp_tv4[60] = {
+    0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x52, 0x55, 0x0A, 0x00, 0x02, 0x02,
+    0x08, 0x00, 0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11,
+    0x62, 0xB5, 0x0A, 0x00, 0x02, 0x02, 0x0A, 0x00, 0x02, 0x0F, 0x00, 0x45,
+    0xB0, 0x07, 0x00, 0x14, 0x00, 0x00, 0x53, 0x42, 0x50, 0x31, 0x04, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+/* One binary UDP datagram from the guest (sport 45063 fixed, like the
+ * ROM); udp_frame is string-payload only. */
+static uint16_t sbp_dgram(uint8_t *f, uint32_t dst, uint16_t dport,
+                          const uint8_t *pay, uint16_t plen)
+{
+    uint16_t total = (uint16_t)(20u + 8u + plen);
+    memset(f, 0, SE_NIC_FRAME_MIN);
+    memcpy(f, peer_mac, 6u);
+    memcpy(f + 6u, tv8 + 6u, 6u);
+    f[12] = 0x08;
+    f[14] = 0x45;
+    f[16] = (uint8_t)(total >> 8);
+    f[17] = (uint8_t)total;
+    f[22] = 64u;
+    f[23] = 17u;
+    f[26] = 0x0A;
+    f[28] = 0x02;
+    f[29] = 0x0F;
+    f[30] = (uint8_t)(dst >> 24);
+    f[31] = (uint8_t)(dst >> 16);
+    f[32] = (uint8_t)(dst >> 8);
+    f[33] = (uint8_t)dst;
+    fix_ip_csum(f);
+    f[34] = 0xB0;
+    f[35] = 0x07;
+    f[36] = (uint8_t)(dport >> 8);
+    f[37] = (uint8_t)dport;
+    f[39] = (uint8_t)(8u + plen);
+    memcpy(f + 42u, pay, plen);
+    uint16_t flen = (uint16_t)(14u + total);
+    return flen < SE_NIC_FRAME_MIN ? SE_NIC_FRAME_MIN : flen;
+}
+
+static void sbp12(uint8_t *p, uint32_t op, uint32_t arg)
+{
+    memcpy(p, "SBP1", 4u);
+    for (unsigned i = 0; i < 4u; i++) {
+        p[4u + i] = (uint8_t)(op >> (8u * i));
+        p[8u + i] = (uint8_t)(arg >> (8u * i));
+    }
+}
+
+/* The single captured reply is DATA(block) carrying want[0, wlen) with
+ * the NIC-C-27 constants; clears the capture. */
+static void expect_sbp_data(uint32_t block, const uint8_t *want,
+                            uint16_t wlen)
+{
+    RWC_ASSERT(cap.nframes == 1u && cap.nsends == 0u);
+    const uint8_t *f = cap.frame[0];
+    uint16_t flen = (uint16_t)(14u + 20u + 8u + 12u + wlen);
+    uint16_t exp = flen < SE_NIC_FRAME_MIN ? SE_NIC_FRAME_MIN : flen;
+    RWC_ASSERT(cap.flen[0] == exp);
+    check_reply_constants(f, cap.flen[0]);
+    RWC_ASSERT(rd16(f + 34u) == 69u && rd16(f + 36u) == 0xB007u);
+    RWC_ASSERT(rd16(f + 38u) == (uint16_t)(8u + 12u + wlen));
+    RWC_ASSERT(memcmp(f + 42u, "SBP1", 4u) == 0);
+    RWC_ASSERT(f[46] == 2u && f[47] == 0u && f[48] == 0u && f[49] == 0u);
+    for (unsigned i = 0; i < 4u; i++)
+        RWC_ASSERT(f[50u + i] == (uint8_t)(block >> (8u * i)));
+    if (wlen != 0u)
+        RWC_ASSERT(memcmp(f + 54u, want, wlen) == 0);
+    cap_clear();
+}
+
+static void test_sbp(void)
+{
+    SeNic n;
+    nic_start(&n);
+    uint8_t f[SE_NIC_FRAME_MAX];
+    uint8_t pay[16];
+
+    /* Unconfigured (the reset state): REQ elicits exactly ERR 1 --
+     * loud, not a drop -- and ACK likewise. */
+    SeNic_tx(&n, sbp_tv1, sizeof sbp_tv1);
+    expect_one(sbp_tv4, sizeof sbp_tv4);
+    SeNic_tx(&n, sbp_tv3, sizeof sbp_tv3);
+    expect_one(sbp_tv4, sizeof sbp_tv4);
+
+    /* The 16-byte image: REQ -> the byte-exact final DATA(1); a
+     * duplicate REQ re-elicits identical bytes (stateless server). */
+    static const uint8_t blob16[17] = "SBP1-TEST-BLOB!!";
+    SeNic_serve_image(&n, blob16, 16u, true);
+    SeNic_tx(&n, sbp_tv1, sizeof sbp_tv1);
+    expect_one(sbp_tv2, sizeof sbp_tv2);
+    SeNic_tx(&n, sbp_tv1, sizeof sbp_tv1);
+    expect_one(sbp_tv2, sizeof sbp_tv2);
+
+    /* 1024+200 bytes: full DATA(1), short DATA(2), dup-ACK identity,
+     * no DATA past the final block. */
+    static uint8_t blob[2048];
+    for (unsigned i = 0; i < sizeof blob; i++)
+        blob[i] = (uint8_t)(i * 7u + 3u);
+    SeNic_serve_image(&n, blob, 1224u, true);
+    SeNic_tx(&n, sbp_tv1, sizeof sbp_tv1);
+    expect_sbp_data(1u, blob, 1024u);
+    SeNic_tx(&n, sbp_tv3, sizeof sbp_tv3);
+    RWC_ASSERT(cap.nframes == 1u);
+    static uint8_t first[SE_NIC_FRAME_MAX];
+    uint16_t firstlen = cap.flen[0];
+    memcpy(first, cap.frame[0], firstlen);
+    expect_sbp_data(2u, blob + 1024u, 200u);
+    SeNic_tx(&n, sbp_tv3, sizeof sbp_tv3); /* duplicate ACK(1) */
+    RWC_ASSERT(cap.nframes == 1u && cap.flen[0] == firstlen);
+    RWC_ASSERT(memcmp(cap.frame[0], first, firstlen) == 0);
+    cap_clear();
+    sbp12(pay, 3u, 2u); /* ACK(2): past the final block -> silence */
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_silence();
+
+    /* Exact multiple: the final block is zero-length DATA(3). */
+    SeNic_serve_image(&n, blob, 2048u, true);
+    SeNic_tx(&n, sbp_tv1, sizeof sbp_tv1);
+    expect_sbp_data(1u, blob, 1024u);
+    sbp12(pay, 3u, 1u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_sbp_data(2u, blob + 1024u, 1024u);
+    sbp12(pay, 3u, 2u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_sbp_data(3u, NULL, 0u);
+    sbp12(pay, 3u, 3u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_silence();
+
+    /* max_block below the served size: ERR 2 (the stateless server
+     * cannot honor it); above it: served at 1024 regardless. */
+    sbp12(pay, 1u, 512u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    RWC_ASSERT(cap.nframes == 1u);
+    RWC_ASSERT(cap.frame[0][46] == 4u && cap.frame[0][50] == 2u);
+    cap_clear();
+    sbp12(pay, 1u, 2048u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_sbp_data(1u, blob, 1024u);
+
+    /* Malformed datagrams drop: short, oversize, bad magic, unknown
+     * opcode, server-only opcode, ACK(0). */
+    sbp12(pay, 1u, 1024u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 11u));
+    expect_silence();
+    uint8_t pay13[13];
+    sbp12(pay13, 1u, 1024u);
+    pay13[12] = 0;
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay13, 13u));
+    expect_silence();
+    sbp12(pay, 1u, 1024u);
+    pay[0] = 'X';
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_silence();
+    sbp12(pay, 5u, 1u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_silence();
+    sbp12(pay, 2u, 1u); /* DATA is server-to-client only */
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_silence();
+    sbp12(pay, 3u, 0u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 69u, pay, 12u));
+    expect_silence();
+
+    /* Classification: only 10.0.2.2:69 reaches the service -- the
+     * broadcast and other-host forms still take the 6.2 drops, and
+     * SBP traffic consumed no flow slots anywhere above. */
+    sbp12(pay, 1u, 1024u);
+    SeNic_tx(&n, f, sbp_dgram(f, 0xFFFFFFFFu, 69u, pay, 12u));
+    expect_silence();
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000203u, 69u, pay, 12u));
+    expect_silence();
+    SeNic_tx(&n, f, sbp_dgram(f, 0x0A000202u, 70u, pay, 12u));
+    expect_silence();
+    RWC_ASSERT(n.flow_count == 0u);
+}
+
 int main(void)
 {
     test_arp();
@@ -791,6 +1004,7 @@ int main(void)
     test_class_drops();
     test_trailing_bytes();
     test_udp_flows();
+    test_sbp();
     printf("test_nic: all passed\n");
     return 0;
 }

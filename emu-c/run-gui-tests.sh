@@ -150,7 +150,11 @@ BASE_SHA="$(git merge-base main HEAD)"
 if [ "$BASE_SHA" = "$(git rev-parse HEAD)" ]; then
     echo "  HEAD is the merge base: nothing to compare"
 else
-    BASE_WT="${TMPDIR:-/tmp}/sahara-gui-base-$BASE_SHA"
+    # The throwaway worktree must sit beside this checkout, not in
+    # /tmp: the build resolves rightwayc as ../../rightwayc, and only
+    # our parent directory has that sibling (checkout or worktree
+    # layout alike).
+    BASE_WT="$(cd ../.. && pwd)/sahara-gui-base-$BASE_SHA"
     [ -d "$BASE_WT" ] || git worktree add --detach "$BASE_WT" "$BASE_SHA"
     (cd "$BASE_WT/emu-c" && bazel build //:sahara-gui)
     SDL_VIDEODRIVER=dummy "$BASE_WT/emu-c/bazel-bin/sahara-gui" \
@@ -158,5 +162,75 @@ else
         --trace "$OUT/session-base.trc" > /dev/null
     cmp "$OUT/session.trc" "$OUT/session-base.trc"
 fi
+
+echo "netboot ROM reproducibility gate"
+# Committed netboot.img, the generated netboot_rom.c TU, and VERSION's
+# sha256 must all reproduce from a fresh asm.py rebuild - the two
+# in-tree copies of the ROM bytes stay honest.
+../rom/netboot/build.sh --check
+
+echo "netboot fixtures"
+NBROM=../rom/netboot/netboot.img
+NBSCRIPT=../rom/netboot/test/netboot.script
+python3 "$ASM" -o "$OUT/nb-core.img" ../rom/netboot/test/payload.s
+python3 ../rom/netboot/test/mkpayload.py --core "$OUT/nb-core.img" \
+    --rom "$NBROM" --outdir "$OUT"
+
+echo "netboot headline gate (no IMAGE, --nic fake, --serve-image)"
+# The vision made test: no image argument - the embedded ROM
+# materializes next to the trace, fetches the multi-block payload over
+# SBP, copy-downs it over its own footprint (zero-fill tail included),
+# and the payload HALTs 600d. Then the same double-run and
+# printed-command replay idioms as the sessions above: the image came
+# over the network and the frozen headless binary reproduces the boot
+# offline from the trace alone.
+SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui --script "$NBSCRIPT" \
+    --nic fake --serve-image "$OUT/payload.img" --hz 0 \
+    --maxcycles 3000000 --trace "$OUT/netboot.trc" > "$OUT/netboot.out"
+grep -qx "$PASS_LINE" "$OUT/netboot.out"
+cmp "$OUT/netboot.rom.img" "$NBROM"
+cp "$OUT/netboot.trc" "$OUT/netboot.first.trc"
+SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui --script "$NBSCRIPT" \
+    --nic fake --serve-image "$OUT/payload.img" --hz 0 \
+    --maxcycles 3000000 --trace "$OUT/netboot.trc" > /dev/null
+cmp "$OUT/netboot.first.trc" "$OUT/netboot.trc"
+CMD="$(grep '^sahara-emu ' "$OUT/netboot.out")"
+PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/netboot-replay.out"
+grep -qx "$PASS_LINE" "$OUT/netboot-replay.out"
+cmp_post_meta "$OUT/netboot.trc" "$OUT/netboot.trc.replay.trc"
+
+echo "netboot loud-failure legs"
+# Each malformed image is one scripted run asserting its frozen HALT
+# code (the codes are the CI contract; the on-screen text is for
+# humans). Traces go to /dev/null - failure legs prove codes, not
+# replay, and the timeout leg alone would write a ~2 GB level-0 trace.
+nb_fail() { # nb_fail CODE extra-args...
+    local code=$1; shift
+    SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui --rom "$NBROM" \
+        --script "$NBSCRIPT" --hz 0 --maxcycles 50000000 \
+        --trace /dev/null "$@" \
+        | grep -qx "HALT r0=0000000000000000000000000000$code"
+}
+nb_fail bad6 --nic fake --serve-image "$OUT/bad-magic.img"
+nb_fail bad7 --nic fake --serve-image "$OUT/truncated.img"
+nb_fail bad7 --nic fake --serve-image "$OUT/low-seg.img"
+# Image bigger than stage_cap under a small --ram: overflows the
+# staging window mid-download (192 KB RAM -> 64 KB cap).
+nb_fail bad8 --nic fake --serve-image "$OUT/too-big.img" --ram 0x30000
+# No translator at all: the timer-COUNT retransmit path, 5 sends x 8M
+# cycles, then 0xBAD4 - the only leg where the timeout budget runs.
+nb_fail bad4 --nic off
+
+echo "netboot no-server leg + error-screen decode"
+# No --serve-image: the service answers ERR 1 in one round trip ->
+# 0xBAD5. Runs at level 1 through the embedded-ROM path so the same
+# trace also feeds the fbcheck-style decode: the human-readable
+# message really rendered (font parsed from the ROM's own font.s).
+SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui --script "$NBSCRIPT" \
+    --nic fake --hz 0 --maxcycles 3000000 --trace-level 1 \
+    --trace "$OUT/nb-noserve.trc" > "$OUT/nb-noserve.out"
+grep -qx "HALT r0=0000000000000000000000000000bad5" "$OUT/nb-noserve.out"
+python3 ../rom/netboot/test/screencheck.py "$OUT/nb-noserve.trc" \
+    --expect-sub "no boot image configured"
 
 echo "run-gui-tests: all green"

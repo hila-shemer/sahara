@@ -419,6 +419,114 @@ static void nic_udp_flow(SeNic *n, uint16_t sport, uint32_t dst,
     n->send(n->send_ctx, i, dns, dst, dport, data, dlen);
 }
 
+/* ------------------------------------------------------ SBP/1 boot */
+
+/* The boot-image server on 10.0.2.2:69 (rom/netboot/sbp.md): one more
+ * local-plane service beside DHCP, fully synthesized and backend-free,
+ * so netboot is guest-visibly identical under --nic fake and host.
+ * Stateless by design: DATA(k) is a pure function of (blob, k), so a
+ * duplicate REQ/ACK re-elicits identical bytes and the server needs no
+ * session table. All SBP integers are little-endian (guest-side
+ * convention), unlike everything else in a frame. */
+
+enum {
+    SBP_OP_REQ = 1,
+    SBP_OP_DATA = 2,
+    SBP_OP_ACK = 3,
+    SBP_OP_ERR = 4,
+};
+
+enum {
+    SBP_ERR_NO_IMAGE = 1,  /* no image configured (--serve-image) */
+    SBP_ERR_MAX_BLOCK = 2, /* REQ max_block below the served size */
+};
+
+static const uint8_t sbp_magic[4] = { 'S', 'B', 'P', '1' };
+
+static uint32_t sbp_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
+           (uint32_t)p[3] << 24;
+}
+
+static void sbp_put32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+/* Reply to the request's source port: the ROM's 45063 is a client
+ * constant, not a server assumption. */
+static void nic_sbp_reply(SeNic *n, uint16_t dport, uint32_t op,
+                          uint32_t arg, const uint8_t *data,
+                          uint16_t dlen)
+{
+    uint8_t gmac[6];
+    nic_guest_mac(gmac);
+    uint8_t *u = nic_ip_begin(n, gmac, 17u, NIC_GW_IP, NIC_GUEST_IP);
+    put16(u, 69u);
+    put16(u + 2u, dport);
+    put16(u + 4u, (uint16_t)(8u + 12u + dlen));
+    put16(u + 6u, 0); /* UDP checksum absent (6.1) */
+    memcpy(u + 8u, sbp_magic, 4u);
+    sbp_put32(u + 12u, op);
+    sbp_put32(u + 16u, arg);
+    if (dlen != 0u)
+        memcpy(u + 20u, data, dlen);
+    nic_ip_emit(n, (uint16_t)(8u + 12u + dlen));
+}
+
+/* REQ and ACK are exactly 12 payload bytes; anything else -- wrong
+ * size, wrong magic, opcodes only the server sends -- drops like any
+ * classification miss. ERR when unconfigured is deliberate loudness:
+ * a guest netbooting against a serverless plane fails in one round
+ * trip instead of timing out (SPEC-ISSUES entry). */
+static void nic_sbp(SeNic *n, uint16_t sport, const uint8_t *d,
+                    uint16_t dlen)
+{
+    if (dlen != 12u || memcmp(d, sbp_magic, 4u) != 0)
+        return;
+    uint32_t op = sbp_le32(d + 4u), arg = sbp_le32(d + 8u), block;
+    if (op == SBP_OP_REQ) {
+        if (!n->sbp_configured) {
+            nic_sbp_reply(n, sport, SBP_OP_ERR, SBP_ERR_NO_IMAGE, NULL,
+                          0);
+            return;
+        }
+        if (arg < SE_NIC_SBP_BLOCK) {
+            /* A stateless server cannot hold a smaller negotiated
+             * block across ACKs; loud refusal beats a broken walk. */
+            nic_sbp_reply(n, sport, SBP_OP_ERR, SBP_ERR_MAX_BLOCK, NULL,
+                          0);
+            return;
+        }
+        block = 1u;
+    } else if (op == SBP_OP_ACK) {
+        if (!n->sbp_configured) {
+            nic_sbp_reply(n, sport, SBP_OP_ERR, SBP_ERR_NO_IMAGE, NULL,
+                          0);
+            return;
+        }
+        if (arg == 0u)
+            return; /* blocks are 1-based; ACK(0) is malformed */
+        block = arg + 1u;
+    } else {
+        return;
+    }
+    uint64_t off = (uint64_t)(block - 1u) * SE_NIC_SBP_BLOCK;
+    if (off > n->sbp_len)
+        return; /* past the final block: no such DATA exists */
+    uint32_t dl = n->sbp_len - (uint32_t)off;
+    if (dl > SE_NIC_SBP_BLOCK)
+        dl = SE_NIC_SBP_BLOCK;
+    /* dl < SE_NIC_SBP_BLOCK marks the final block; an exact-multiple
+     * blob ends with a zero-length DATA (off == sbp_len). */
+    nic_sbp_reply(n, sport, SBP_OP_DATA, block,
+                  dl != 0u ? n->sbp_blob + off : NULL, (uint16_t)dl);
+}
+
 static void nic_udp(SeNic *n, const uint8_t *pl, uint16_t ipl,
                     uint32_t src, uint32_t dst)
 {
@@ -443,6 +551,12 @@ static void nic_udp(SeNic *n, const uint8_t *pl, uint16_t ipl,
     }
     if (dst == NIC_DNS_IP && dport == 53u) {
         nic_udp_flow(n, sport, dst, dport, true, data, dlen);
+        return;
+    }
+    if (dst == NIC_GW_IP && dport == 69u) {
+        /* SBP/1 boot service: the one (host, port) pair carved out of
+         * the 6.2 subnet drop, gui-only (SPEC-ISSUES entry). */
+        nic_sbp(n, sport, data, dlen);
         return;
     }
     if (dst == 0xFFFFFFFFu)
@@ -510,6 +624,15 @@ void SeNic_tx(SeNic *n, const uint8_t *frame, uint16_t len)
     default:
         return; /* any other IP protocol: drop */
     }
+}
+
+void SeNic_serve_image(SeNic *n, const uint8_t *blob, uint32_t len,
+                       bool configured)
+{
+    RWC_ASSERT(!configured || blob != NULL || len == 0u);
+    n->sbp_blob = blob;
+    n->sbp_len = len;
+    n->sbp_configured = configured;
 }
 
 void SeNic_datagram(SeNic *n, uint32_t flow, const uint8_t *payload,

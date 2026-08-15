@@ -36,7 +36,10 @@ not recorded, not replayable` on stderr at startup AND exit. Combining
 it with `--trace`/`--trace-level` is a startup error, never a silent
 override. It composes with `--nic`/`--hz`/`--script`; pair with
 `--hz 0` for throughput work - free-run with the recorder detached is
-the point.
+the point. It also composes with netboot (no IMAGE): the embedded ROM
+still materializes and boots, but with no trace to name the file
+after it falls back to `untethered-<epoch>.rom.img` - the replay
+guarantee the (trace, rom) pair anchors is forfeited anyway.
 
 Recorded mode stays the default and the only mode any gate runs;
 `sahara-emu` is untouched (headless without `--trace` was already

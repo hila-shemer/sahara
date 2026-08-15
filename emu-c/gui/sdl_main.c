@@ -2,9 +2,23 @@
  * interactive face, emu-c-prompt.md; design fixed by
  * emu-c-gui-frontend-prompt.md).
  *
- *   sahara-gui IMAGE [--trace OUT.trc] [--trace-level {0,1,2}]
+ *   sahara-gui [IMAGE] [--rom PATH] [--serve-image PATH]
+ *              [--trace OUT.trc] [--trace-level {0,1,2}]
  *              [--hz N] [--ram BYTES] [--maxcycles N] [--script FILE]
  *              [--nic host|off|fake] [--untethered]
+ *
+ * No IMAGE boots the embedded netboot ROM (rom/netboot/), which
+ * fetches a boot image over SBP/1 from the local plane's 10.0.2.2:69
+ * - the file --serve-image names. Mechanism is materialize-then-load:
+ * the ROM bytes are written next to the trace as
+ * <trace-basename>.rom.img (untethered-<epoch>.rom.img under
+ * --untethered, which has no trace) and loaded through the ordinary
+ * image loader, so META image_sha256, --replay validation and the printed
+ * replay command work unchanged and the (trace, rom) pair is
+ * self-contained on disk. --rom PATH substitutes a ROM file; IMAGE
+ * plus --rom together is a usage error. The frozen headless CLI is
+ * untouched: replay is always `sahara-emu <rom file> --replay ...`
+ * with the path explicit.
  *
  * The front end is a device-event author: host input is translated
  * (gui/translate.c) and fed through SeCpu_feed, where the unchanged
@@ -53,6 +67,7 @@
 #include "gen/sahara_isa.h"
 #include "gen/spec_version.h"
 #include "gui/blit.h"
+#include "gui/netboot_rom.h"
 #include "gui/nic.h"
 #include "gui/nic_fake.h"
 #include "gui/nic_host.h"
@@ -443,6 +458,31 @@ static bool step_chunk(Gui *g, uint64_t target)
 
 /* ---------------------------------------------------------------- meta */
 
+/* Slurp a whole binary file (the --serve-image blob); the blob is
+ * handed to the sans-IO translator as bytes, so nic.c stays file-free
+ * and the service is backend-independent by construction. */
+static uint8_t *read_blob(const char *path, uint32_t *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        die("cannot open --serve-image file");
+    if (fseek(f, 0, SEEK_END) != 0)
+        die("cannot size --serve-image file");
+    long flen = ftell(f);
+    if (flen < 0)
+        die("cannot size --serve-image file");
+    if ((unsigned long)flen > 0xFFFFFFFFul)
+        die("--serve-image file exceeds 4 GB");
+    if (fseek(f, 0, SEEK_SET) != 0)
+        die("cannot size --serve-image file");
+    uint8_t *buf = se_host_alloc((size_t)flen + 1u);
+    if (fread(buf, 1u, (size_t)flen, f) != (size_t)flen)
+        die("cannot read --serve-image file");
+    fclose(f);
+    *len_out = (uint32_t)flen;
+    return buf;
+}
+
 static void meta_record(SeTrace *tr, const char *image_arg,
                         const char *sha_hex, int level)
 {
@@ -472,7 +512,7 @@ static void untethered_banner(void)
 int main(int argc, char **argv)
 {
     const char *image = NULL, *trace_path = NULL, *script_path = NULL;
-    const char *nic_arg = NULL;
+    const char *nic_arg = NULL, *rom_path = NULL, *serve_path = NULL;
     uint64_t maxcycles = 0, ram = DEFAULT_RAM, hz = DEFAULT_HZ;
     int level = 0; /* the cheapest legal level (SPEC-ISSUES 39) */
     bool untethered = false, level_arg = false;
@@ -499,6 +539,10 @@ int main(int argc, char **argv)
             script_path = argv[++i];
         } else if (strcmp(a, "--nic") == 0 && i + 1 < argc) {
             nic_arg = argv[++i];
+        } else if (strcmp(a, "--rom") == 0 && i + 1 < argc) {
+            rom_path = argv[++i];
+        } else if (strcmp(a, "--serve-image") == 0 && i + 1 < argc) {
+            serve_path = argv[++i];
         } else if (a[0] == '-') {
             fprintf(stderr, "sahara-gui: unknown option %s\n", a);
             return 1;
@@ -508,10 +552,10 @@ int main(int argc, char **argv)
             die("more than one IMAGE argument");
         }
     }
-    if (!image)
-        die("usage: sahara-gui IMAGE [--trace OUT.trc] [--trace-level N] "
-            "[--hz N] [--ram BYTES] [--maxcycles N] [--script FILE] "
-            "[--nic host|off|fake] [--untethered]");
+    if (image && rom_path)
+        die("usage: IMAGE and --rom are mutually exclusive (no IMAGE "
+            "boots the embedded netboot ROM; --rom substitutes a ROM "
+            "file)");
     /* Not a silent override in either direction (work-order decision
      * 2): asking to record and to not-record is a contradiction the
      * user resolves, not us. */
@@ -549,6 +593,59 @@ int main(int argc, char **argv)
                               ? se_lo64(SE_PLAT_RAM_MAX)
                               : ram;
 
+    /* Recording is mandatory: it is the session's source of truth.
+     * Resolved before the image because the materialized ROM's name
+     * derives from the trace path. --untethered never records: the
+     * path stays NULL (the recorder below never attaches) and the
+     * materialized ROM falls back to its own timestamp name. */
+    char default_trace[64];
+    if (!untethered && !trace_path) {
+        snprintf(default_trace, sizeof default_trace,
+                 "session-%llu.trc",
+                 (unsigned long long)time(NULL));
+        trace_path = default_trace;
+    }
+
+    /* Materialize-then-load: with no IMAGE and no --rom, write the
+     * embedded ROM bytes next to the trace and load that file through
+     * the ordinary loader. Everything downstream - META image_sha256,
+     * the printed replay command, --replay validation - sees a plain
+     * image file; the frozen headless binary needs no default-ROM
+     * behavior. */
+    char rom_file[576];
+    if (!image && rom_path) {
+        image = rom_path;
+    } else if (!image) {
+        /* Under --untethered there is no trace for the ROM to sit
+         * next to; fall back to the same timestamp convention
+         * (untethered-<epoch>.rom.img) so the one artifact the
+         * session must leave - the bytes the loader hashed - is
+         * still findable and its provenance is in the name. */
+        char untethered_base[64];
+        const char *rom_base = trace_path;
+        if (!rom_base) {
+            snprintf(untethered_base, sizeof untethered_base,
+                     "untethered-%llu",
+                     (unsigned long long)time(NULL));
+            rom_base = untethered_base;
+        }
+        size_t tl = strlen(rom_base);
+        if (tl >= 4u && strcmp(rom_base + tl - 4u, ".trc") == 0)
+            tl -= 4u;
+        int n = snprintf(rom_file, sizeof rom_file, "%.*s.rom.img",
+                         (int)tl, rom_base);
+        if (n < 0 || (size_t)n >= sizeof rom_file)
+            die("trace path too long for the materialized ROM name");
+        FILE *rf = fopen(rom_file, "wb");
+        if (!rf)
+            die("cannot write the materialized ROM image");
+        if (fwrite(se_netboot_rom, 1u, se_netboot_rom_len, rf) !=
+                se_netboot_rom_len ||
+            fclose(rf) != 0)
+            die("cannot write the materialized ROM image");
+        image = rom_file;
+    }
+
     static Gui g; /* one instance; zero-initialized */
     g.hz = hz;
     g.maxcycles = maxcycles;
@@ -563,22 +660,14 @@ int main(int argc, char **argv)
     char sha_hex[65];
     for (unsigned i = 0; i < 32u; i++)
         snprintf(sha_hex + 2u * i, 3u, "%02x", sha[i]);
-
-    /* Recording is mandatory: it is the session's source of truth.
-     * --untethered is the sanctioned opt-out: g.tr.f stays NULL, which
-     * is the recorder's existing off switch (every SeTrace_* call
-     * no-ops on it, exactly headless-without---trace), so nothing is
-     * attached and nothing is emitted on the hot path. */
-    char default_trace[64];
+    /* --untethered is the sanctioned opt-out of mandatory recording:
+     * g.tr.f stays NULL, which is the recorder's existing off switch
+     * (every SeTrace_* call no-ops on it, exactly
+     * headless-without---trace), so nothing is attached and nothing is
+     * emitted on the hot path. */
     if (untethered) {
         untethered_banner();
     } else {
-        if (!trace_path) {
-            snprintf(default_trace, sizeof default_trace,
-                     "session-%llu.trc",
-                     (unsigned long long)time(NULL));
-            trace_path = default_trace;
-        }
         g.tr.level = level;
         g.tr.f = fopen(trace_path, "wb");
         if (!g.tr.f)
@@ -627,6 +716,14 @@ int main(int argc, char **argv)
         }
         g.dev.tx_doorbell = gui_nic_tx;
         g.dev.tx_ctx = &g;
+        /* SBP boot-image service: configured only when --serve-image
+         * names a blob; the unconfigured service answers ERR 1 (loud,
+         * rom/netboot/sbp.md). Blob bytes live for the whole run. */
+        if (serve_path) {
+            uint32_t blob_len = 0;
+            uint8_t *blob = read_blob(serve_path, &blob_len);
+            SeNic_serve_image(&g.nic, blob, blob_len, true);
+        }
     }
 
     /* Window at the reset mode, non-resizable: META cannot carry a

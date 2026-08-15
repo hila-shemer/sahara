@@ -52,14 +52,16 @@ housekeeping tick, so NIC return traffic can wait up to 250 ms before
 being fed. Acceptable for a dev tool; the stamp is pump_earliest, so
 determinism is untouched either way.
 
-## Known future consumers
+## Netboot (present consumer)
 
-The planned netboot ROM will fetch boot images through this plane via
-an image-server service on a virtual host — keep the local-plane
-service dispatch (the `nic_udp` leaf that today serves only DHCP and
-DNS) extensible for another virtual-host service. Because arrivals are
-RX-recorded EVENTs, a netboot session's trace already replays offline
-with no image server present.
+The netboot ROM (rom/netboot/) fetches boot images through this
+plane: the SBP/1 image server at 10.0.2.2:69 is one more `nic_udp`
+dispatch leaf beside DHCP and DNS, fully synthesized and
+backend-free — see rom/netboot/sbp.md for the protocol and the
+hand-off contract. Because arrivals are RX-recorded EVENTs, a netboot
+session's trace contains the downloaded image and replays offline
+through the frozen headless binary with no server present — the
+run-gui-tests netboot legs prove the whole path under `--nic fake`.
 
 ## Milestone-2 recipe (TCP translation, nic.md 6.7)
 

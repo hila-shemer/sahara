@@ -573,3 +573,55 @@ Both emulator implementations must match the readings marked
     FUTURE high-instruction-volume suites: outcomes (exit contract,
     memory, framebuffer state) may stand in for byte-identity —
     documented convention only, no existing gate converts.
+
+45. **netboot — UDP to 10.0.2.2:69 now reaches a local-plane service
+    instead of the 6.2 subnet drop** (netboot agent). nic.md 6.2
+    classifies UDP to "anything else in 10.0.2.0/24" as a silent
+    drop; the netboot work order adds the SBP/1 boot-image server on
+    the gateway at port 69 (rom/netboot/sbp.md), one dispatch leaf in
+    gui/nic.c before the subnet drop. Guest-visible delta is exactly
+    one (host, port) pair; broadcast-to-69 and other-host-69 still
+    drop, and the leaf exists only in the GUI translator - the frozen
+    headless emulator has no translator at all. Proposed as a future
+    nic.md 6.2 amendment ("UDP to 10.0.2.2:69 -> boot service, see
+    rom/netboot/sbp.md"); devspec is not edited here.
+
+46. **netboot — sahara-gui CLI grows optional IMAGE, --rom,
+    --serve-image** (netboot agent). The GUI front end's CLI is not
+    frozen anywhere, but recording the reading: no IMAGE boots the
+    embedded netboot ROM via materialize-then-load (the bytes land
+    next to the trace as <trace-basename>.rom.img and go through the
+    ordinary loader, so META/replay semantics are unchanged; under
+    --untethered there is no trace to sit next to, so the file falls
+    back to untethered-<epoch>.rom.img); --rom substitutes a ROM
+    file; IMAGE plus --rom is a usage error. The
+    frozen headless sahara-emu CLI is untouched byte-for-byte - a
+    netboot session replays as `sahara-emu <rom.img> --replay` with
+    the path explicit, deliberately.
+
+47. **netboot — SBP server answers ERR 1 when unconfigured rather
+    than dropping** (netboot agent). Nothing specifies the behavior
+    of the boot service when no --serve-image blob exists. Reading
+    chosen (sbp.md S2, per the loud-failure policy): the service
+    always exists and answers ERR code 1, so a guest netbooting
+    against a serverless plane fails in one round trip (ROM: HALT
+    0xBAD5 + error screen) instead of presenting as a mystery
+    timeout. The alternative (drop, indistinguishable from --nic off)
+    would hide a configuration error behind a 20-second retry budget.
+
+48. **netboot — the in-guest SAHIMG01 validation subset** (netboot
+    agent). TOOLING-SPEC 1 defines the format; host loaders
+    (image.c) additionally reject overlapping segments and segments
+    intersecting the device table window. The ROM checks: magic;
+    entry u128 high half 0, 8-aligned, inside [0x1000, stage_base);
+    nsegs in [1, 64]; per segment file window inside the download, no
+    u64 wraps, mem_len >= file_len, target inside [0x1000,
+    stage_base) - the one range check that structurally protects the
+    [0, 0x800) tripwire, the table, the staging window and the stack.
+    NOT checked, deliberately: segment-vs-segment overlap (the ROM is
+    not a linker; the assembler refuses overlap at build time; a
+    hand-hostile image gets last-writer-wins in table order) and the
+    reserved flags word (boot.md 4.4 tolerated-surface spirit). The
+    nsegs cap of 64 is the ROM's own bound (the relocated table must
+    fit beside the copy loop in the 64 KB stack window), not a format
+    rule - a host loader may accept more.
