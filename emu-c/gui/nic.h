@@ -36,6 +36,11 @@
  * (nic.md 6.5). */
 #define SE_NIC_UDP_MAX 1472u
 
+/* SBP/1 server block size (rom/netboot/sbp.md): DATA carries at most
+ * this many bytes, so a full DATA frame is 14+20+8+12+1024 = 1078,
+ * comfortably one frame. */
+#define SE_NIC_SBP_BLOCK 1024u
+
 typedef struct SeNicFlow {
     bool used;
     bool dns;       /* 6.6 flow: backend sends to the host resolver */
@@ -65,6 +70,12 @@ typedef struct SeNic {
     void *send_ctx;
     SeNicFlow flows[SE_NIC_UDP_FLOWS];
     uint32_t flow_count; /* flows are appended and never freed */
+    /* SBP/1 boot-image service (rom/netboot/sbp.md): the served blob,
+     * borrowed for the SeNic's lifetime. Unconfigured (the reset
+     * state) still answers -- ERR 1, never a silent drop. */
+    const uint8_t *sbp_blob;
+    uint32_t sbp_len;
+    bool sbp_configured;
     uint8_t scratch[SE_NIC_FRAME_MAX]; /* frame composition buffer */
 } SeNic;
 
@@ -84,5 +95,13 @@ void SeNic_tx(SeNic *n, const uint8_t *frame, uint16_t len);
  * if the payload exceeds SE_NIC_UDP_MAX. */
 void SeNic_datagram(SeNic *n, uint32_t flow, const uint8_t *payload,
                     uint16_t len);
+
+/* Configure the SBP/1 boot-image service (rom/netboot/sbp.md): blob is
+ * borrowed, not copied -- the caller keeps it alive for the SeNic's
+ * lifetime. configured=false (also the reset default) keeps the
+ * service answering ERR 1, so a missing --serve-image is a loud
+ * guest-visible failure instead of a mystery timeout. */
+void SeNic_serve_image(SeNic *n, const uint8_t *blob, uint32_t len,
+                       bool configured);
 
 #endif /* SE_GUI_NIC_H */
