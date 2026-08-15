@@ -336,6 +336,7 @@ adding a consumer is a one-line change to this list.
 
 - Oasis kernel — `os/oasis/`
 - cc compiler — `lang/cc/`
+- mini-libc — `lib/c/`
 
 **Amendment rules, now that the document is live:**
 
@@ -488,6 +489,180 @@ remains out of scope per amendment rule 2:
 - Signal-like upcalls.
 - User heap / allocator.
 - W^X (the v0.1 image mapping is U+R+W+X).
+
+**Amendment status: DRAFT — awaiting owner sign-off.** Consumers may
+develop against this draft only on the branch that carries it; nothing
+merges to main until the owner flips this flag and logs the change.
+
+---
+
+## Amendment v0.2 — the libc surface (DRAFT — awaiting owner sign-off)
+
+Fills the "libc surface, string/memory routine names" deferral of
+section 7, and the allocator-API deferral with it (heap direction was
+already frozen by 4.6; this amendment puts a contract over it). First
+conforming implementation: the mini-libc (`lib/c/`), developed against
+this draft on the branch that carries it, per amendment rule 2.
+
+Everything in B.1–B.7 is normative. The C-level signatures are
+**m1-subset renderings**: `u8*` stands in for `void*`/`char*` and
+`u64` for `size_t`, because CC-M1 has neither. What is frozen at ABI
+level is the **names and the register contract** — every routine is an
+ordinary SABI section-1 function (args in r0–r7 in declaration order,
+result in r0, pointers as canonical 128-bit values, caller-saved rules
+unchanged; nothing here extends or bends section 1). A cc-m2
+re-rendering of these prototypes to `void*`/`size_t`/`char*` is
+**pre-authorized** as a source-level retyping with bit-identical ABI —
+same registers, same widths, same semantics — and needs no
+re-amendment.
+
+### B.1 Environments served
+
+Kernel/bare-metal code, now: the heap of B.3 is section 4.6's
+KERNEL-side heap, and the library's entire OS surface is the two
+extern wrappers `sys_write`/`sys_exit` (B.5) — it never issues
+SYSCALL itself, so it is OS-neutral by construction and runs today
+under the cc runtime shim (`lang/cc/rt/`) and under any kernel that
+provides those two labels. User-mode programs get this libc only when
+the user-heap deferral (v0.1 A.8) is amended; until then a user-mode
+caller of `malloc` is out of scope by definition, exactly per
+amendment rule 2.
+
+### B.2 mem\* and str\* — names, semantics
+
+    u8 *memcpy (u8 *dst, u8 *src, u64 n)   dst r0, src r1, n r2 -> r0 = dst
+    u8 *memmove(u8 *dst, u8 *src, u64 n)   same contract
+    u8 *memset (u8 *dst, u64 c,   u64 n)   dst r0, c r1, n r2 -> r0 = dst
+    i64 memcmp (u8 *a,   u8 *b,   u64 n)   a r0, b r1, n r2 -> r0
+
+- `memcpy` copies forward, byte by byte, ALWAYS — overlap is a
+  deterministic forward copy, defined and documented. This platform
+  has no UB culture and the libc does not import one.
+- `memmove` chooses copy order by comparing dst/src; correct for all
+  overlap.
+- `memset` stores `c mod 256` to each of `n` bytes.
+- `memcmp` returns `(i64)a[i] − (i64)b[i]` at the first differing
+  byte, else 0. Stronger than C's sign-only contract, and
+  deterministic; portable callers compare the sign only.
+
+    u64 strlen (u8 *s)                     s r0 -> r0
+    i64 strcmp (u8 *a, u8 *b)              a r0, b r1 -> r0
+    i64 strncmp(u8 *a, u8 *b, u64 n)       a r0, b r1, n r2 -> r0
+    u8 *strcpy (u8 *dst, u8 *src)          dst r0, src r1 -> r0 = dst
+    u8 *strchr (u8 *s, u64 c)              s r0, c r1 -> r0
+
+- `strcmp`/`strncmp` use the memcmp difference convention over
+  unsigned bytes; NUL terminates the comparison; `strncmp` with
+  `n = 0` returns 0.
+- `strcpy` copies through the terminating NUL, returns `dst`.
+- `strchr` searches for `c mod 256`; finds the terminating NUL when
+  `c = 0`; returns 0 when absent.
+
+**Deferred by name** — `strcat`, `strncpy`, `strstr`, `strcasecmp`:
+they wait for the DOOM-shim amendment, which adds them from the
+port's *measured* symbol list, not a guess. Adding a name later is a
+v0.x amendment; that is cheap and honest.
+
+### B.3 Allocator contract
+
+    u8 *malloc (u64 n)                     n r0 -> r0
+    void free  (u8 *p)                     p r0
+    u8 *realloc(u8 *p, u64 n)              p r0, n r1 -> r0
+
+- **Heap extent**: [`_end` rounded up to 16, **0x0200_0000**), growing
+  up, per section 4.6. The ceiling is a v0.2 constant in its own
+  right; it is UBASE's value — the two coincide by construction, one
+  value in two roles (user-window floor above it, kernel-heap ceiling
+  below it). The v0.1 owner note that the window must grow or move
+  before an allocator consumes the ceiling is acknowledged: the
+  amendment that moves the window moves this constant in the same
+  change, and this allocator's OOM behavior is what makes that safe
+  to do late.
+- **Alignment**: every pointer malloc/realloc returns is 16-byte
+  aligned (the SABI slot / LD128 granule).
+- **OOM**: return 0. Never trap, never halt. An exhausted heap is the
+  caller's problem, reported through the return value.
+- Pinned corners, all defined: `malloc(0)` → 0; `free(0)` → no-op;
+  `realloc(0, n)` ≡ `malloc(n)`; `realloc(p, 0)` ≡ `free(p)`,
+  returns 0. Double free is self-sabotage the platform does not
+  detect — same stance as writing rodata (cc-m1.md 5.4).
+- **Reuse is contractual, observably**: a loop of
+  `malloc(big); free(p)` must not creep toward OOM — freed memory is
+  reusable and adjacent free blocks coalesce, stated as observable
+  behavior; the internal data structure is NOT frozen (the reference
+  implementation is a K&R-style address-ordered first-fit free list
+  with 16-byte headers, and may change freely under the same
+  observables).
+- **Determinism, out loud because ports will ask**: same program,
+  same allocation sequence, same addresses, every run. Trivially true
+  on this machine — no entropy, no ASLR — and the contract keeps it
+  that way: nothing in this allocator may introduce address
+  variation between identical runs.
+
+### B.4 Conversion routines — buffer-filling, fixed arity
+
+To text — each writes minimal digits (no leading zeros, "0" for
+zero, lowercase hex, no 0x prefix, a leading `-` only for a negative
+i64), NUL-terminates, and returns the length excluding the NUL.
+Caller's buffer minimums, including the NUL:
+
+    u64 u64_to_dec (u8 *buf, u64 v)        21 bytes
+    u64 i64_to_dec (u8 *buf, i64 v)        21 bytes
+    u64 u64_to_hex (u8 *buf, u64 v)        17 bytes
+    u64 u128_to_dec(u8 *buf, u128 v)       40 bytes
+    u64 u128_to_hex(u8 *buf, u128 v)       33 bytes
+
+From text — strict: no whitespace skip, no 0x prefix, digits consumed
+until the first non-digit (`dec_to_i64` additionally accepts one
+leading `-`). `*end` = address of the first unconsumed byte, written
+only when `end` ≠ 0. No digits consumed ⇒ result 0 and `*end == s` —
+that is the caller's whole error check. Overflow wraps mod 2^width,
+the language's own arithmetic semantics (cc-m1.md 5.3), defined and
+documented:
+
+    u64  dec_to_u64 (u8 *s, u8 **end)
+    i64  dec_to_i64 (u8 *s, u8 **end)
+    u128 dec_to_u128(u8 *s, u8 **end)
+    u64  hex_to_u64 (u8 *s, u8 **end)
+    u128 hex_to_u128(u8 *s, u8 **end)
+
+### B.5 Output helpers — fixed arity, over the write syscall
+
+    i64 print_str     (u8 *s)
+    i64 print_u64     (u64 v)
+    i64 print_i64     (i64 v)
+    i64 print_hex     (u64 v)
+    i64 print_u128_hex(u128 v)
+
+Each formats into a local buffer via B.4 and passes the
+`sys_write(0, buf, len)` result through unchanged — the return value
+is the syscall's, negated-errno and all. fd is 0 always: the capture
+buffer under the bare cc runtime, the console under an OS that adopts
+the library. The libc never contains a SYSCALL instruction; it calls
+the extern `sys_write`/`sys_exit` wrappers of whatever runtime is on
+the assembler command line, and those two labels plus `_end` are its
+only external needs.
+
+### B.6 printf: deferred, with the committed path
+
+No printf, no sprintf, and **no varargs emulation in the meantime** —
+arg-array pseudo-printf hacks are banned; fixed arity is the m1
+shape. The committed path: cc-m2 delivers varargs (cc-m1.md roadmap,
+over SABI's uniform 16-byte stack slots), then libc m2 adds printf
+over them as a v0.x amendment to this document.
+
+### B.7 Linkage model and namespace
+
+The library is source, compiled into the consuming program as ONE
+translation unit (`#include "libc.c"`, preprocessed by external cpp —
+the owner-sanctioned build-side preprocessing of cc-m1.md 9.7). There
+is no binary artifact and no linker; SPEC-ISSUES 38's single-owner
+rule is satisfied because there is exactly one unit. Public names are
+exactly the B.2–B.5 list. Internal names are prefixed `__libc_` — m1
+has no `static`, so the prefix IS the containment — and the whole
+`__libc_*` space is reserved to the library. A program defining any
+public name collides at compile time (duplicate definition, loud);
+that loudness is the reservation mechanism.
 
 **Amendment status: DRAFT — awaiting owner sign-off.** Consumers may
 develop against this draft only on the branch that carries it; nothing
