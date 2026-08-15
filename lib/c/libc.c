@@ -14,5 +14,6 @@
 #include "src/mem.c"
 #include "src/str.c"
 #include "src/alloc.c"
+#include "src/conv.c"
 
 #endif

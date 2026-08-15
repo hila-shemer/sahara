@@ -614,7 +614,8 @@ Caller's buffer minimums, including the NUL:
 
 From text — strict: no whitespace skip, no 0x prefix, digits consumed
 until the first non-digit (`dec_to_i64` additionally accepts one
-leading `-`). `*end` = address of the first unconsumed byte, written
+leading `-`; hex parsing accepts either letter case — lowercase is an
+output-side rule only). `*end` = address of the first unconsumed byte, written
 only when `end` ≠ 0. No digits consumed ⇒ result 0 and `*end == s` —
 that is the caller's whole error check. Overflow wraps mod 2^width,
 the language's own arithmetic semantics (cc-m1.md 5.3), defined and
