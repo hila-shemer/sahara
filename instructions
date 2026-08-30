@@ -1,0 +1,11 @@
+Right — this is the first genuinely wide dispatch of the project: independent obligations, not competing hypotheses, so it's decomposition-style parallelism with an ownership matrix rather than fork-and-cull. The prompt below is written for that: one coordinator, six subagents, each owning a document, with shared semantics assigned to exactly one owner so parallel writers can't diverge on them.The structural choices, since this doubles as a trial run of the workflow patterns from the top of this conversation:
+
+**The ownership matrix is the interface freeze.** Six writers in parallel will silently diverge on exactly the semantics that appear in more than one document — EVENT payload encodings being the worst case (keyboard, mouse, NIC, and trace all touch them). One owner per shared semantic, everyone else references-never-defines, and a placeholder-plus-declared-dependency protocol when an owner's output doesn't exist yet. The coordinator's integration pass resolves placeholders and fixes referencing docs toward owners, never the reverse.
+
+**Subagents don't see each other's output.** The acceptance test is "implementable by a fresh agent from this document alone," so fresh-context authoring is the honest setup — and it's also what makes the parallelism real rather than serialized-through-shared-context.
+
+**Test vectors are mandatory and framed as the highest-value output.** A hex device table, source↔encoding pairs, a decoded trace fragment, a DHCP byte exchange — these convert each spec from prose into fixtures the emulator suite can execute, which is the same move as the conformance suite's one-test-per-sentence rule applied at the device layer.
+
+**SPEC-ISSUES flows up, never sideways.** Subagents finding problems in the frozen specs record the conservative reading and continue; the coordinator aggregates; only you edit the frozen layer. Same erosion-prevention channel as the emulator prompt.
+
+Run order flexibility: this and the emulator build are themselves parallel — the emulator prompt's steps 1–5 depend only on the frozen specs, and its step 6 (devices) is where `devspec/` output lands. If you launch both, tell the emulator agent that `devspec/` may appear mid-build and PLATFORM-SPEC remains authoritative until INDEX.md exists.
