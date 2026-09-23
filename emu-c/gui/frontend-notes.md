@@ -123,11 +123,15 @@ Both ends need the same secret token, in a private file (setup below).
   same. **Nothing a view sends ends the session**: the guest halting,
   `--maxcycles`, or SIGINT/SIGTERM to sahara-serve do, and each prints
   the replay line (SIGTERM is what `systemctl --user stop` sends). The
+  two are taken whether the guest sleeps or spins: a busy guest at
+  `--hz 0` never waits in the server's ppoll, so each poll also takes a
+  pending one without waiting. The
   old `sahara-view --end-session` is gone and says so.
 - A view that dies without closing (laptop suspended) is reaped by TCP
   keepalive + `TCP_USER_TIMEOUT` on the server's socket in about 20 s;
-  until then the slot is still taken. sahara-view retries BUSY and
-  "connection refused" for up to 60 s (one line on stderr), so a view
+  until then the slot is still taken. sahara-view retries BUSY,
+  "connection refused" and a close before CHALLENGE (a full pending
+  table, below) for up to 60 s (one line on stderr), so a view
   started right after a resume gets in once the dead one is gone. A
   server that accepts but never sends HELLO fails the view in 5 s.
   Any other connect failure (no route, no IPv6, no fds) fails at once.
@@ -188,9 +192,11 @@ of DES (gui/svp.h has the wire detail):
   bytes are read as input. It waits in a separate pending table (4
   entries) and never holds or contends for the viewer slot, so it can
   neither push out nor block an authenticated view. BUSY is only ever
-  said to an authenticated view. Residual: a tailnet peer without the
-  token can keep the 4 pending entries full (5 s each) and so delay new
-  views; it can never reach the session.
+  said to an authenticated view. A connection that finds all 4 entries
+  taken is closed unanswered; the view treats that close as retryable.
+  Residual: a tailnet peer without the token can keep the 4 pending
+  entries full (5 s each) and so hold new views off (each gives up
+  after 60 s); it can never reach the session.
 - One-way, as in VNC: the view does not authenticate the server (the
   tailnet already authenticates the host). SHA-256 is the core's
   FIPS 180-4 one (sha256.c, unchanged); HMAC is gui/hmac.c. test_svp
@@ -215,9 +221,12 @@ with no FRAME, the server keeps running, and its trace has 0 keyboard
 EVENTs; the real view with a wrong token prints the message above,
 exits 1, and never retries; view 1 probes 10 keys and CLOSEs, the
 session keeps running, view 2 (token from the environment) attaches
-while an unauthenticated peer sits in the door and probes 4 more, and
-the one trace (28 keyboard EVENTs) replays byte-identically after
-SIGTERM.
+while an unauthenticated peer (confirmed holding its CHALLENGE) sits
+in the door and probes 4 more, and the one trace (28 keyboard EVENTs)
+replays byte-identically after SIGTERM; with 4 peers filling the
+pending table the real view says so once, retries, and attaches when
+they leave; and a guest that spins at `--hz 0` without ever sleeping
+still ends on SIGTERM with the replay line.
 
 **Open decision (owner's call, not implemented):**
 - *Trace retention.* The live session trace grows about 65 KB/s

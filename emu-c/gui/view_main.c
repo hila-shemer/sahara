@@ -34,10 +34,13 @@
  * process can see it (compositor and scanout excluded). Also reports
  * PING round trips. Runs under SDL_VIDEODRIVER=offscreen.
  *
- * A BUSY answer or a refused connection is retried for up to a minute:
- * after a laptop resume the server may still hold the slot for the
- * view that died with the suspend, until its keepalive reaps it (about
- * 20 s), and a server being restarted refuses for a moment.
+ * A BUSY answer, a refused connection, or one closed before CHALLENGE
+ * is retried for up to a minute: after a laptop resume the server may
+ * still hold the slot for the view that died with the suspend, until
+ * its keepalive reaps it (about 20 s); a server being restarted refuses
+ * for a moment; and a server whose small table of connections waiting
+ * to authenticate is full closes new ones unanswered, each waiting one
+ * leaving within 5 s.
  *
  * This TU is an SDL + socket carve-out (allow_banned, out of the source
  * audits); every protocol decision lives in gui/svp.c. */
@@ -75,6 +78,7 @@ typedef enum OpenResult {
     OPEN_OK,
     OPEN_BUSY,    /* another view (maybe a dead one) owns the session */
     OPEN_REFUSED, /* nothing listening there right now */
+    OPEN_DOOR_FULL, /* closed before CHALLENGE: its waiting table full */
 } OpenResult;
 
 static int fd = -1;
@@ -194,8 +198,10 @@ static bool pull(int timeout_ms)
 }
 
 /* The next whole message into m, by t0 + HELLO_TIMEOUT_US; what names
- * the message awaited, for the diagnostics. */
-static void next_by(uint64_t t0, SeSvpMsg *m, const char *what)
+ * the message awaited, for the diagnostics. False when the server
+ * closed the connection first: the caller decides whether that is
+ * worth another try. */
+static bool next_by(uint64_t t0, SeSvpMsg *m, const char *what)
 {
     char msg[128];
     while (!SeSvpRx_next(&rx, m)) {
@@ -208,17 +214,19 @@ static void next_by(uint64_t t0, SeSvpMsg *m, const char *what)
                            "wedged?)", what);
             die(msg);
         }
-        if (!pull((int)((HELLO_TIMEOUT_US - spent) / 1000u) + 1)) {
-            (void)snprintf(msg, sizeof msg,
-                           "server closed the connection before %s", what);
-            die(msg);
-        }
+        if (!pull((int)((HELLO_TIMEOUT_US - spent) / 1000u) + 1))
+            return false;
     }
+    return true;
 }
 
 /* Connect, authenticate, and read HELLO into rx (a small buffer: HELLO
- * sizes the rest). BUSY and refusal come back for the caller to retry;
- * DENIED is fatal at once (one attempt, and the token will not
+ * sizes the rest). BUSY, refusal and a close before CHALLENGE come
+ * back for the caller to retry -- sahara-serve closes a connection,
+ * saying nothing, when its table of connections waiting to
+ * authenticate is full, and that clears within
+ * SE_SVP_AUTH_DEADLINE_MS. A close after AUTH is fatal: the server
+ * has seen our answer. DENIED is fatal at once (one attempt, and the token will not
  * change), and so is a connection that stays silent for
  * HELLO_TIMEOUT_US -- that is not a sahara-serve, or it is wedged. */
 static OpenResult open_session(const char *hostport, SeSvpMsg *hello)
@@ -228,7 +236,11 @@ static OpenResult open_session(const char *hostport, SeSvpMsg *hello)
     SeSvpRx_reset(&rx, rx.buf, rx.cap);
     uint64_t t0 = now_us();
     SeSvpMsg ch;
-    next_by(t0, &ch, "CHALLENGE");
+    if (!next_by(t0, &ch, "CHALLENGE")) {
+        close(fd);
+        fd = -1;
+        return OPEN_DOOR_FULL;
+    }
     uint8_t nonce[SE_SVP_NONCE_BYTES];
     if (ch.type == SE_SVP_HELLO)
         die("server speaks SVP/1, without authentication: upgrade "
@@ -237,7 +249,8 @@ static OpenResult open_session(const char *hostport, SeSvpMsg *hello)
         die("bad CHALLENGE (not an SVP/2 server?)");
     uint8_t m[64];
     send_all(m, SeSvp_auth(m, token, token_len, nonce));
-    next_by(t0, hello, "HELLO");
+    if (!next_by(t0, hello, "HELLO"))
+        die("server closed the connection before HELLO");
     if (hello->type == SE_SVP_DENIED)
         die("authentication failed (wrong token for this server)");
     if (hello->type != SE_SVP_BUSY)
@@ -516,13 +529,20 @@ int main(int argc, char **argv)
         if (now_us() - t_first >= RETRY_FOR_US)
             die(r == OPEN_BUSY ? "session busy: another viewer owns it "
                                  "(gave up after 60 s)"
-                               : "connection refused (gave up after 60 s; "
-                                 "is sahara-serve listening there?)");
+                : r == OPEN_DOOR_FULL
+                    ? "server kept closing the connection before "
+                      "CHALLENGE (gave up after 60 s; too many "
+                      "connections waiting to authenticate?)"
+                    : "connection refused (gave up after 60 s; "
+                      "is sahara-serve listening there?)");
         if (!said) {
             fprintf(stderr, "sahara-view: %s; retrying for up to 60 s\n",
                     r == OPEN_BUSY ? "session busy (another viewer, or a "
                                      "dead one not reaped yet)"
-                                   : "connection refused");
+                    : r == OPEN_DOOR_FULL
+                        ? "server closed the connection before CHALLENGE "
+                          "(too many connections waiting to authenticate?)"
+                        : "connection refused");
             said = true;
         }
         struct timespec ts = { RETRY_EVERY_S, 0 };

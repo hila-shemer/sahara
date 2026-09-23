@@ -310,14 +310,17 @@ bazel-bin/sahara-serve "$OUT/demo.img" --script gui/session.script \
     --token-file "$TOKEN_FILE" --trace "$OUT/serve-script.trc" > /dev/null
 cmp "$OUT/session.trc" "$OUT/serve-script.trc"
 
-# start_serve NAME: sahara-serve on the demo image, loopback port 0 (the
-# kernel picks a free one, no pick-then-bind race); sets SERVE_PID and
-# PORT from the "listening on" line.
+# start_serve NAME [IMAGE [ARGS...]]: sahara-serve on IMAGE (default the
+# demo image), loopback port 0 (the kernel picks a free one, no
+# pick-then-bind race); sets SERVE_PID and PORT from the "listening on"
+# line.
 start_serve() {
-    local name=$1
-    bazel-bin/sahara-serve "$OUT/demo.img" --nic off \
+    local name=$1 img=${2:-$OUT/demo.img}
+    shift
+    [ $# -gt 0 ] && shift
+    bazel-bin/sahara-serve "$img" --nic off \
         --listen 127.0.0.1:0 --token-file "$TOKEN_FILE" \
-        --trace "$OUT/$name.trc" \
+        --trace "$OUT/$name.trc" "$@" \
         > "$OUT/$name.out" 2> "$OUT/$name.err" &
     SERVE_PID=$!
     BG_PIDS+=("$SERVE_PID")
@@ -470,13 +473,22 @@ if grep -q '^sahara-emu ' "$OUT/serve-live.out"; then
 fi
 # An unauthenticated connection holds a door slot during view 2's
 # whole attach: it must not take or block the viewer slot.
+# It says "in the door" once it holds its CHALLENGE, and view 2 starts
+# only then, so the check below cannot pass by the lurker being late.
 python3 -c "
 import socket, sys, time
 s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))
-time.sleep(6)" "$PORT" &
+assert s.recv(8)[0] == 5
+print('in the door', flush=True)
+time.sleep(6)" "$PORT" > "$OUT/lurker.out" &
 LURKER_PID=$!
 BG_PIDS+=("$LURKER_PID")
-sleep 0.2
+for _ in $(seq 50); do
+    grep -q 'in the door' "$OUT/lurker.out" 2>/dev/null && break
+    sleep 0.1
+done
+grep -q 'in the door' "$OUT/lurker.out" || {
+    echo "ERROR: the lurker never got its CHALLENGE"; exit 1; }
 SAHARA_VIEW_TOKEN="$(cat "$TOKEN_FILE")" SDL_VIDEODRIVER=offscreen \
     timeout 60 bazel-bin/sahara-view "127.0.0.1:$PORT" --probe 4 \
     > "$OUT/view-probe2.out" 2> "$OUT/view-probe2.err"
@@ -577,5 +589,70 @@ PYEOF
 CMD="$(grep '^sahara-emu ' "$OUT/serve-flood.out")"
 PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/serve-flood-replay.out" || true
 cmp_post_meta "$OUT/serve-flood.trc" "$OUT/serve-flood.trc.replay.trc"
+
+echo "sahara-serve: a full door holds a view off, and the view retries"
+# Four unauthenticated peers fill the pending table (PENDING_MAX), so
+# the server closes the view's connection before CHALLENGE. The view
+# must say so once and retry, not exit; the peers leave after 3 s and
+# the view gets in within its minute.
+start_serve serve-door
+python3 - "$PORT" > "$OUT/door-holders.out" <<'PYEOF' &
+import socket, sys, time
+port = int(sys.argv[1])
+socks = []
+for _ in range(4):
+    s = socket.create_connection(("127.0.0.1", port))
+    assert s.recv(8)[0] == 5  # CHALLENGE: it holds a pending slot
+    socks.append(s)
+print("door full", flush=True)
+time.sleep(3)
+for s in socks:
+    s.close()
+PYEOF
+HOLDERS_PID=$!
+BG_PIDS+=("$HOLDERS_PID")
+for _ in $(seq 50); do
+    grep -q 'door full' "$OUT/door-holders.out" 2>/dev/null && break
+    sleep 0.1
+done
+grep -q 'door full' "$OUT/door-holders.out" || {
+    echo "ERROR: the door holders never filled the table"; exit 1; }
+SDL_VIDEODRIVER=offscreen timeout 60 bazel-bin/sahara-view \
+    "127.0.0.1:$PORT" --token-file "$TOKEN_FILE" --probe 1 \
+    > "$OUT/view-door.out" 2> "$OUT/view-door.err"
+wait "$HOLDERS_PID"
+grep -q 'too many unauthenticated connections; closed one' \
+    "$OUT/serve-door.err"
+grep -q 'closed the connection before CHALLENGE.*retrying for up to 60 s' \
+    "$OUT/view-door.err"
+test "$(grep -c retrying "$OUT/view-door.err")" = 1
+grep -q '^input-to-present: n=1 ' "$OUT/view-door.out"
+stop_serve
+echo "  view retried past a full door and attached"
+
+echo "sahara-serve: SIGTERM ends a session whose guest never sleeps"
+# t_spin.s never WFIs and --hz 0 never paces, so the loop never sleeps
+# in ppoll; the stop signal must still be taken once per chunk. The
+# trace is the smallest there is and short-lived: an unpaced spinning
+# guest writes ~100 MB a second even at level 0 (measured), GBs at the
+# default.
+python3 "$ASM" -o "$OUT/t_spin.img" gui/t_spin.s
+start_serve serve-spin "$OUT/t_spin.img" --hz 0 --trace-level 0
+sleep 0.3
+kill -TERM "$SERVE_PID"
+for _ in $(seq 50); do
+    kill -0 "$SERVE_PID" 2>/dev/null || break
+    sleep 0.1
+done
+if kill -0 "$SERVE_PID" 2>/dev/null; then
+    kill -KILL "$SERVE_PID"
+    echo "ERROR: SIGTERM did not end a busy session within 5 s"; exit 1
+fi
+wait "$SERVE_PID" || true
+BG_PIDS=()
+grep -q 'SIGTERM: ending the session' "$OUT/serve-spin.err"
+grep -q '^sahara-emu ' "$OUT/serve-spin.out"
+rm -f "$OUT/serve-spin.trc"
+echo "  busy guest: SIGTERM ended the session with its replay line"
 
 echo "run-gui-tests: all green"

@@ -17,8 +17,10 @@
  * (DENIED). So a peer without the token can neither see a frame, feed
  * the guest, learn whether the slot is taken, nor push an owner out.
  * The table is small and full means new connections are closed at
- * once: a tailnet peer can still keep the door busy (for 5 s per
- * connection), but never reach the session.
+ * once, unanswered: a tailnet peer can still keep the door busy (for
+ * 5 s per connection), but never reach the session. sahara-view
+ * retries such a close for up to a minute, so a peer that keeps the
+ * table full holds a new view off, never the running session.
  *
  * One authenticated viewer owns input; a second one gets BUSY and is
  * closed. A viewer leaving -- CLOSE or a dropped connection -- is a
@@ -181,9 +183,14 @@ static void on_stop_signal(int sig)
  * quits, and live_main flushes the trace and prints the replay line --
  * now that no viewer can. The two stay blocked except inside the
  * ppoll() in wait_fds, which unblocks them atomically: a signal that
- * lands while the guest runs waits for that ppoll and cuts it short at
- * once, never racing a check-then-sleep into a long idle wait. */
+ * lands while the guest sleeps cuts the ppoll short at once, never
+ * racing a check-then-sleep into a long idle wait. A guest that never
+ * sleeps (--hz 0 and no WFI, or a host that cannot keep the pace)
+ * never reaches that ppoll, so SeLiveBe_poll also takes a pending one
+ * with a zero-timeout sigtimedwait -- once per chunk, at most CHUNK_MS
+ * of guest time after it lands. */
 static sigset_t run_mask; /* the mask to sleep with: stop signals open */
+static sigset_t stop_set; /* SIGINT, SIGTERM */
 
 static void catch_stop_signals(void)
 {
@@ -193,11 +200,10 @@ static void catch_stop_signals(void)
     sigemptyset(&sa.sa_mask);
     (void)sigaction(SIGINT, &sa, NULL);
     (void)sigaction(SIGTERM, &sa, NULL);
-    sigset_t stop;
-    sigemptyset(&stop);
-    sigaddset(&stop, SIGINT);
-    sigaddset(&stop, SIGTERM);
-    (void)sigprocmask(SIG_BLOCK, &stop, &run_mask);
+    sigemptyset(&stop_set);
+    sigaddset(&stop_set, SIGINT);
+    sigaddset(&stop_set, SIGTERM);
+    (void)sigprocmask(SIG_BLOCK, &stop_set, &run_mask);
 }
 
 void SeLiveBe_check(void)
@@ -484,6 +490,14 @@ void SeLiveBe_poll(SeLive *lv)
 {
     if (scripted)
         return;
+    if (!stop_signal) {
+        /* A busy guest never sleeps in wait_fds' ppoll: take a stop
+         * signal still pending here, without waiting. */
+        struct timespec zero = { 0, 0 };
+        int sig = sigtimedwait(&stop_set, NULL, &zero);
+        if (sig > 0)
+            stop_signal = sig;
+    }
     if (stop_signal) {
         fprintf(stderr, "sahara-serve: %s: ending the session\n",
                 stop_signal == SIGINT ? "SIGINT" : "SIGTERM");
