@@ -110,7 +110,9 @@ static void send_all(const uint8_t *p, uint32_t n)
 }
 
 /* False only when every address refused the connection (retryable);
- * any other failure is fatal. */
+ * any other failure is fatal, including a socket() that fails (an
+ * IPv6-only name on a host without IPv6, or no fds left): that is not
+ * a server still starting, and retrying it only hides the reason. */
 static bool connect_to(const char *hostport)
 {
     char host[256];
@@ -125,22 +127,26 @@ static bool connect_to(const char *hostport)
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, colon + 1, &hints, &res) != 0 || !res)
         die("cannot resolve HOST:PORT");
-    bool all_refused = true;
+    bool refused = false, other = false;
     for (struct addrinfo *a = res; a; a = a->ai_next) {
         fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC,
                     a->ai_protocol);
-        if (fd < 0)
+        if (fd < 0) {
+            other = true;
             continue;
+        }
         if (connect(fd, a->ai_addr, a->ai_addrlen) == 0)
             break;
-        if (errno != ECONNREFUSED)
-            all_refused = false;
+        if (errno == ECONNREFUSED)
+            refused = true;
+        else
+            other = true;
         close(fd);
         fd = -1;
     }
     freeaddrinfo(res);
     if (fd < 0) {
-        if (all_refused)
+        if (refused && !other)
             return false;
         die("cannot connect (is sahara-serve listening there?)");
     }
