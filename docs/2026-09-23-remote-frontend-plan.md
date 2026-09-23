@@ -65,3 +65,15 @@ suite, and `run-gui-tests.sh`, unchanged.
 
 Guest-visible resize (owner answer 3 unanswered, default keep 640x480, the
 view scales); multiple viewers; audio (Sahara has no audio device).
+
+## Status 2026-09-23
+
+- Steps 1-5 DONE (branch design-remote-frontend, 8fb6e27..7a67278):
+  live session split; SVP/1; sahara-serve; sahara-view; tailnet
+  bring-up. Acceptance from mercury over the tailnet: input-to-present
+  p50 12.6 ms, p95 15.2 ms, max 17.6 ms, over 100 keys; the session
+  replayed byte-identically (200 keyboard EVENTs). All gates green.
+- Step 6 (spark H.264) NOT started, deliberately. See the handoff: for
+  the Oasis console XRLE is a few hundred bytes per key, and H.264
+  would add encode + decode + a hop, making text slower. It pays only
+  for full-motion guests (the DOOM lane), which do not exist yet.

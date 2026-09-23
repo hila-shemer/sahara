@@ -100,3 +100,48 @@ the window resizable:
 - alt-tab away mid-keypress: the trace shows the synthesized release
 - idle guest (WFI) wakes on input; close prints the replay command
   and running it reproduces the session byte-identically
+
+## Remote: sahara-serve + sahara-view (2026-09-23)
+
+`sahara-serve` is this live session with an SVP/1 socket backend
+(gui/be_svp.c) instead of the window; `sahara-view` is the window,
+anywhere on the network (gui/view_main.c). Protocol: gui/svp.h.
+
+    sahara-serve IMAGE --listen 100.123.236.10:8453 [live options]
+    sahara-view flatpot.tail0b59ad.ts.net:8453 [--probe N] [--end-session]
+
+- The view sends raw host facts; the server translates and feeds them
+  through the same path as SDL, so a served session replays under
+  `sahara-emu --replay` (run-gui-tests: scripted serve == gui, whole
+  file; live loopback serve+view replays byte-identically).
+- One viewer owns input; a second gets BUSY. Closing the view
+  disconnects (a capture loss: all keys and buttons released); the
+  session keeps running and the next view gets a full frame.
+  `--end-session` makes the view end the session instead.
+- Frames: RAW or XRLE (XOR vs previous frame, run-length), whichever
+  is smaller -- a glyph echo is a few hundred bytes. Frames coalesce to
+  the newest while one is draining.
+- Build `-c opt` for real use: the XRLE encode is 3 ms optimized and
+  20 ms at fastbuild's -O0.
+- Recording is on (level 0): a served Oasis session grows its trace at
+  ~60 KiB/s idle (~210 MB/hour). Keep traces on tmpfs, and restart the
+  session to reset.
+
+Latency (`sahara-view --probe`, key sent -> frame presented by the view,
+compositor and scanout excluded), Oasis, --hz 2 MHz, -c opt:
+
+| path | p50 | p95 | max |
+|---|---|---|---|
+| loopback on flatpot | 10.2 ms | 11.4 ms | 16.7 ms |
+| mercury -> flatpot, tailnet on the home LAN | 12.6 ms | 15.2 ms | 17.6 ms |
+
+Two live-only pacing rules in live_main.c exist for this; --script
+never takes them:
+
+- When input lands and the guest is ahead of the pacing clock, which it
+  is after any WFI because WFI jumps the cycle to timecmp (ISA 7.6),
+  re-anchor pacing at the guest's cycle with one chunk of budget.
+  Without this, every key waited up to one timer period (50 ms at
+  Oasis's 100k-cycle tick and 2 MHz).
+- A PRESENT ends the step chunk, so the frame is handed over at once,
+  not up to CHUNK_MS later.
