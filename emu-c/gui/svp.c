@@ -225,16 +225,34 @@ void SeSvpRx_commit(SeSvpRx *r, uint64_t n)
     r->len += n;
 }
 
+/* A payload the buffer cannot hold is as fatal as garbage: a server's
+ * small input buffer rejects a view that sends frames. */
+static bool header_bad(const SeSvpRx *r, const uint8_t *h, uint32_t plen)
+{
+    return h[1] != 0u || h[2] != 0u || h[3] != 0u ||
+           plen > SE_SVP_PAYLOAD_MAX ||
+           SE_SVP_HDR_BYTES + (uint64_t)plen > r->cap;
+}
+
+bool SeSvpRx_ready(const SeSvpRx *r)
+{
+    if (r->bad)
+        return false; /* already reported; nothing more will come */
+    if (r->len - r->off < SE_SVP_HDR_BYTES)
+        return false;
+    const uint8_t *h = r->buf + r->off;
+    uint32_t plen = rd32(h + 4u);
+    return header_bad(r, h, plen) ||
+           r->len - r->off >= SE_SVP_HDR_BYTES + (uint64_t)plen;
+}
+
 bool SeSvpRx_next(SeSvpRx *r, SeSvpMsg *m)
 {
     if (r->bad || r->len - r->off < SE_SVP_HDR_BYTES)
         return false;
     const uint8_t *h = r->buf + r->off;
     uint32_t plen = rd32(h + 4u);
-    /* A payload the buffer cannot hold is as fatal as garbage: a
-     * server's small input buffer rejects a view that sends frames. */
-    if (h[1] != 0u || h[2] != 0u || h[3] != 0u || plen > SE_SVP_PAYLOAD_MAX ||
-        SE_SVP_HDR_BYTES + (uint64_t)plen > r->cap) {
+    if (header_bad(r, h, plen)) {
         r->bad = true;
         return false;
     }

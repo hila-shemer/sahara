@@ -121,6 +121,11 @@ RWC_WARN_UNUSED uint8_t *SeSvpRx_space(SeSvpRx *r, uint64_t *room);
 void SeSvpRx_commit(SeSvpRx *r, uint64_t n);
 /* Next complete message, or false (need more bytes, or r->bad). */
 RWC_WARN_UNUSED bool SeSvpRx_next(SeSvpRx *r, SeSvpMsg *m);
+/* True when SeSvpRx_next has something to say without more bytes: a
+ * whole message is buffered, or the buffered header is malformed. A
+ * consumer that stops early (a per-poll budget) must not sleep on its
+ * socket while this holds -- the bytes are already here. */
+RWC_WARN_UNUSED bool SeSvpRx_ready(const SeSvpRx *r);
 
 /* Field readers for fixed payloads; false if the payload is short. */
 RWC_WARN_UNUSED bool SeSvp_parse_hello(const SeSvpMsg *m, uint32_t *w,

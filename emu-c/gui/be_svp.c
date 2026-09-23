@@ -12,7 +12,19 @@
  * released) and the session keeps running; the next viewer gets HELLO
  * and a full frame. Frames coalesce: while the previous FRAME is still
  * draining, only the newest snapshot is kept, so a slow link never
- * queues stale frames (display.md 5: the host may drop frames). */
+ * queues stale frames (display.md 5: the host may drop frames).
+ *
+ * Input is budgeted: one poll handles at most POLL_MSG_BUDGET messages
+ * and leaves the rest in the receive buffer and the socket. Every KEY
+ * and MOUSE becomes a SeCpu_feed, whose queue only empties as the guest
+ * runs, so an unbounded drain would let a viewer that floods the
+ * socket grow the server's memory and stall the session inside one
+ * poll. TCP flow control pushes the backlog back to the viewer.
+ *
+ * A viewer that vanishes without a FIN (a laptop suspended mid-session)
+ * would otherwise hold the only slot forever: an idle guest sends
+ * nothing, so nothing ever fails. TCP keepalive and TCP_USER_TIMEOUT
+ * on the accepted socket reap such a peer in about 20 s. */
 #define _GNU_SOURCE /* accept4, SOCK_NONBLOCK/SOCK_CLOEXEC */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -32,7 +44,17 @@
 
 const char *const se_live_prog = "sahara-serve";
 
-enum { RX_CAP = 4096 }; /* input messages only; a frame-sized one is bad */
+enum {
+    RX_CAP = 4096,         /* input messages only; a frame-sized one is bad */
+    POLL_MSG_BUDGET = 256, /* per SeLiveBe_poll; a full RX_CAP of KEYs */
+    /* Dead-peer reaping, seconds: first probe after KEEPIDLE quiet
+     * seconds, then every KEEPINTVL; USER_TIMEOUT_MS also bounds how
+     * long sent frame bytes may sit unacknowledged. */
+    KEEPIDLE_S = 10,
+    KEEPINTVL_S = 5,
+    KEEPCNT = 3,
+    USER_TIMEOUT_MS = 20000,
+};
 
 static const char *listen_arg;
 static bool scripted;
@@ -74,8 +96,8 @@ static void open_listener(void)
     host[colon - listen_arg] = '\0';
     char *end = NULL;
     unsigned long port = strtoul(colon + 1, &end, 10);
-    if (!end || *end != '\0' || port == 0u || port > 65535u)
-        die("--listen port must be 1..65535");
+    if (!end || end == colon + 1 || *end != '\0' || port > 65535u)
+        die("--listen port must be 0..65535 (0: any free port)");
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
@@ -91,7 +113,13 @@ static void open_listener(void)
         die("bind failed (address in use, or not this host's address?)");
     if (listen(lfd, 2) != 0)
         die("listen failed");
-    fprintf(stderr, "sahara-serve: listening on %s\n", listen_arg);
+    /* Report the bound port, not the requested one: port 0 lets a test
+     * take a free port without a pick-then-bind race. */
+    socklen_t salen = sizeof sa;
+    if (getsockname(lfd, (struct sockaddr *)&sa, &salen) != 0)
+        die("getsockname failed");
+    fprintf(stderr, "sahara-serve: listening on %s:%u\n", host,
+            (unsigned)ntohs(sa.sin_port));
 }
 
 void SeLiveBe_init(SeLive *lv, uint64_t w, uint64_t h, bool is_scripted)
@@ -177,6 +205,21 @@ static void queue_small(const uint8_t *msg, uint32_t n)
     out_len += n;
 }
 
+/* Keepalive + user timeout: a peer that stops answering is dropped by
+ * the kernel (recv then fails with ETIMEDOUT) instead of owning the
+ * session until the server restarts. Best effort: without them the
+ * server still works, it just cannot notice a silent death. */
+static void set_reaping(int fd)
+{
+    int one = 1, idle = KEEPIDLE_S, intvl = KEEPINTVL_S, cnt = KEEPCNT;
+    unsigned int uto = USER_TIMEOUT_MS;
+    (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &uto, sizeof uto);
+}
+
 static void accept_viewer(void)
 {
     int fd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -192,6 +235,7 @@ static void accept_viewer(void)
         return;
     }
     cfd = fd;
+    set_reaping(cfd);
     SeSvpRx_reset(&rx, rxbuf, sizeof rxbuf);
     SeSvpEnc_reset(&enc, enc_prev, (uint64_t)fw * fh);
     out_len = out_off = 0;
@@ -243,7 +287,23 @@ void SeLiveBe_poll(SeLive *lv)
     accept_viewer();
     if (cfd < 0)
         return;
+    /* Buffered messages first (a previous poll may have stopped on its
+     * budget), then the socket, until the budget or the socket runs
+     * out. Whatever is left waits for the next poll, in order. */
+    uint32_t budget = POLL_MSG_BUDGET;
     for (;;) {
+        SeSvpMsg m;
+        while (budget > 0u && SeSvpRx_next(&rx, &m)) {
+            handle(lv, &m);
+            budget--;
+        }
+        if (rx.bad) {
+            fprintf(stderr, "sahara-serve: malformed stream\n");
+            drop_viewer(lv);
+            return;
+        }
+        if (budget == 0u)
+            break;
         uint64_t room;
         uint8_t *dst = SeSvpRx_space(&rx, &room);
         ssize_t n = recv(cfd, dst, room, MSG_DONTWAIT);
@@ -254,14 +314,6 @@ void SeLiveBe_poll(SeLive *lv)
         if (n < 0)
             break;
         SeSvpRx_commit(&rx, (uint64_t)n);
-        SeSvpMsg m;
-        while (SeSvpRx_next(&rx, &m))
-            handle(lv, &m);
-        if (rx.bad) {
-            fprintf(stderr, "sahara-serve: malformed stream\n");
-            drop_viewer(lv);
-            return;
-        }
     }
     if (!pump_frame())
         drop_viewer(lv);
@@ -285,6 +337,8 @@ void SeLiveBe_present(const uint8_t *frame, uint64_t w, uint64_t h)
  * (the next poll handles it) or when a draining frame can move. */
 static void wait_fds(int ms)
 {
+    if (cfd >= 0 && SeSvpRx_ready(&rx))
+        ms = 0; /* the last poll stopped on its budget: no sleeping */
     struct pollfd p[2];
     nfds_t n = 0;
     if (lfd >= 0)

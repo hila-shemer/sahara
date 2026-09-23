@@ -1,7 +1,8 @@
 /* Short-tier unit tests for SVP/1 (gui/svp.h): fixed-message layout,
- * the incremental receiver under every split, the RAW/XRLE frame codec
- * round trip across successive frames, and rejection of every
- * malformation the decoder guards -- the socket shims above these are
+ * the incremental receiver under every split and under the server's
+ * per-poll budget, the RAW/XRLE frame codec round trip across
+ * successive frames, and rejection of every malformation the decoder
+ * guards -- the socket shims above these are
  * too thin to unit-test; run-gui-tests.sh's serve/view leg covers the
  * assembled pipeline. */
 #include <stdio.h>
@@ -124,6 +125,99 @@ static void test_rx_rejects(void)
     RWC_ASSERT(!SeSvp_parse_hello(&m, &(uint32_t){0}, &(uint32_t){0}));
 }
 
+/* The server's per-poll input budget (gui/be_svp.c) against a long
+ * stream of small messages: a mirror of SeLiveBe_poll's loop, with the
+ * socket played by a byte array that hands out ragged recv-sized
+ * pieces. Every message must come out once, in order, no poll may
+ * handle more than the budget, and SeSvpRx_ready must say "don't
+ * sleep" exactly when a poll stopped on its budget with a whole
+ * message still buffered. */
+enum { STREAM_MSGS = 20000, POLL_BUDGET = 256, SERVER_RX = 4096 };
+
+static void test_budgeted_stream(void)
+{
+    uint64_t total = (uint64_t)STREAM_MSGS * 16u;
+    uint8_t *wire = se_host_alloc(total);
+    uint64_t wlen = 0;
+    for (uint32_t i = 0; i < STREAM_MSGS; i++)
+        wlen += SeSvp_key(wire + wlen, i, (i & 1u) != 0u, false);
+    RWC_ASSERT(wlen == total);
+
+    static uint8_t rxbuf[SERVER_RX];
+    SeSvpRx r;
+    SeSvpRx_reset(&r, rxbuf, sizeof rxbuf);
+    uint64_t sent = 0;     /* wire bytes the "socket" has handed out */
+    uint32_t next_usage = 0, polls = 0, piece = 0;
+    while (next_usage < STREAM_MSGS) {
+        RWC_ASSERT(polls < 4u * STREAM_MSGS / POLL_BUDGET + 16u);
+        polls++;
+        uint32_t budget = POLL_BUDGET;
+        bool socket_empty = false;
+        for (;;) {
+            SeSvpMsg m;
+            while (budget > 0u && SeSvpRx_next(&r, &m)) {
+                uint32_t usage;
+                bool press, repeat;
+                RWC_ASSERT(SeSvp_parse_key(&m, &usage, &press, &repeat));
+                RWC_ASSERT(usage == next_usage);
+                RWC_ASSERT(press == ((usage & 1u) != 0u) && !repeat);
+                next_usage++;
+                budget--;
+            }
+            RWC_ASSERT(!r.bad);
+            if (budget == 0u)
+                break;
+            uint64_t room;
+            uint8_t *dst = SeSvpRx_space(&r, &room);
+            /* Ragged pieces, 1..4999 bytes, some of them empty-socket
+             * "EAGAIN" turns so a poll can also end short of budget. */
+            uint64_t want = 1u + (uint64_t)(piece++ * 7919u) % 4999u;
+            if (sent == wlen || piece % 13u == 0u) {
+                socket_empty = true;
+                break;
+            }
+            if (want > room)
+                want = room;
+            if (want > wlen - sent)
+                want = wlen - sent;
+            memcpy(dst, wire + sent, want);
+            SeSvpRx_commit(&r, want);
+            sent += want;
+        }
+        if (socket_empty)
+            RWC_ASSERT(!SeSvpRx_ready(&r)); /* drained what was here */
+    }
+    RWC_ASSERT(next_usage == STREAM_MSGS && sent == wlen);
+    RWC_ASSERT(polls >= STREAM_MSGS / POLL_BUDGET); /* budget held */
+    RWC_ASSERT(!SeSvpRx_ready(&r));
+    se_host_free(wire, total);
+
+    /* Budget stop with a whole message buffered: ready, no socket. */
+    SeSvpRx_reset(&r, rxbuf, sizeof rxbuf);
+    uint64_t room;
+    uint8_t *dst = SeSvpRx_space(&r, &room);
+    uint32_t n = SeSvp_key(dst, 7u, true, false);
+    n += SeSvp_key(dst + n, 8u, true, false);
+    SeSvpRx_commit(&r, n - 3u); /* one whole, one partial */
+    RWC_ASSERT(SeSvpRx_ready(&r));
+    SeSvpMsg m;
+    RWC_ASSERT(SeSvpRx_next(&r, &m));
+    RWC_ASSERT(!SeSvpRx_ready(&r)); /* partial: needs the socket */
+    SeSvpRx_commit(&r, 3u);
+    RWC_ASSERT(SeSvpRx_ready(&r));
+    RWC_ASSERT(SeSvpRx_next(&r, &m) && !SeSvpRx_ready(&r));
+
+    /* A malformed header is ready (the next poll must see it and drop
+     * the viewer), and after SeSvpRx_next reports it, quiet. */
+    dst = SeSvpRx_space(&r, &room);
+    memset(dst, 0, 8u);
+    dst[0] = SE_SVP_KEY;
+    dst[2] = 1u;
+    SeSvpRx_commit(&r, 8u);
+    RWC_ASSERT(SeSvpRx_ready(&r));
+    RWC_ASSERT(!SeSvpRx_next(&r, &m) && r.bad && !SeSvpRx_ready(&r));
+}
+
 static void test_frame_codec(void)
 {
     uint64_t max = SeSvp_frame_msg_max(W, H);
@@ -220,6 +314,7 @@ int main(void)
 {
     test_fixed_messages();
     test_rx_rejects();
+    test_budgeted_stream();
     test_frame_codec();
     printf("test_svp: ok\n");
     return 0;
