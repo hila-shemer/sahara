@@ -1,4 +1,4 @@
-/* SVP/1 framing and frame codecs, sans-IO (gui/svp.h). The socket
+/* SVP/2 framing and frame codecs, sans-IO (gui/svp.h). The socket
  * shims (gui/be_svp.c, gui/view_main.c) only move bytes between fds
  * and these functions; every decision -- message layout, the XRLE
  * run coding, every bounds check on untrusted input -- is here, under
@@ -7,6 +7,7 @@
 
 #include <string.h>
 
+#include "gui/hmac.h"
 #include "rwc/status.h"
 
 static void wr32(uint8_t *p, uint32_t v)
@@ -85,6 +86,87 @@ uint32_t SeSvp_ping(uint8_t *out, SeSvpType type, uint64_t token)
 uint32_t SeSvp_empty(uint8_t *out, SeSvpType type)
 {
     return header(out, type, 0u);
+}
+
+/* ----------------------------------------------------- authentication */
+
+/* The MAC input: a label, so the token's HMAC over a bare nonce can
+ * never be mistaken for an answer in some other protocol that happens
+ * to share the secret, then the nonce. */
+static const uint8_t AUTH_LABEL[10] = { 'S', 'V', 'P', '/', '2',
+                                        ' ', 'A', 'U', 'T', 'H' };
+
+static void auth_mac(const uint8_t *token, uint32_t tlen,
+                     const uint8_t nonce[SE_SVP_NONCE_BYTES],
+                     uint8_t mac[SE_SVP_MAC_BYTES])
+{
+    RWC_ASSERT(tlen >= SE_SVP_TOKEN_MIN && tlen <= SE_SVP_TOKEN_MAX);
+    uint8_t msg[sizeof AUTH_LABEL + SE_SVP_NONCE_BYTES];
+    memcpy(msg, AUTH_LABEL, sizeof AUTH_LABEL);
+    memcpy(msg + sizeof AUTH_LABEL, nonce, SE_SVP_NONCE_BYTES);
+    SeHmac_sha256(token, tlen, msg, (uint32_t)sizeof msg, mac);
+}
+
+uint32_t SeSvp_challenge(uint8_t *out, const uint8_t nonce[SE_SVP_NONCE_BYTES])
+{
+    uint32_t n = header(out, SE_SVP_CHALLENGE, 4u + SE_SVP_NONCE_BYTES);
+    wr32(out + n, SE_SVP_VERSION);
+    memcpy(out + n + 4u, nonce, SE_SVP_NONCE_BYTES);
+    return n + 4u + SE_SVP_NONCE_BYTES;
+}
+
+uint32_t SeSvp_auth(uint8_t *out, const uint8_t *token, uint32_t tlen,
+                    const uint8_t nonce[SE_SVP_NONCE_BYTES])
+{
+    uint32_t n = header(out, SE_SVP_AUTH, SE_SVP_MAC_BYTES);
+    auth_mac(token, tlen, nonce, out + n);
+    return n + SE_SVP_MAC_BYTES;
+}
+
+bool SeSvp_auth_ok(const SeSvpMsg *m, const uint8_t *token, uint32_t tlen,
+                   const uint8_t nonce[SE_SVP_NONCE_BYTES])
+{
+    if (m->type != SE_SVP_AUTH || m->len != SE_SVP_MAC_BYTES)
+        return false;
+    uint8_t want[SE_SVP_MAC_BYTES];
+    auth_mac(token, tlen, nonce, want);
+    return SeHmac_equal(m->p, want, SE_SVP_MAC_BYTES);
+}
+
+bool SeSvp_parse_challenge(const SeSvpMsg *m,
+                           uint8_t nonce[SE_SVP_NONCE_BYTES])
+{
+    if (m->type != SE_SVP_CHALLENGE || m->len != 4u + SE_SVP_NONCE_BYTES ||
+        rd32(m->p) != SE_SVP_VERSION)
+        return false;
+    memcpy(nonce, m->p + 4u, SE_SVP_NONCE_BYTES);
+    return true;
+}
+
+bool SeSvp_token_trim(const uint8_t *buf, uint64_t len, uint32_t *tlen)
+{
+    while (len > 0u && (buf[len - 1u] == '\n' || buf[len - 1u] == '\r' ||
+                        buf[len - 1u] == ' ' || buf[len - 1u] == '\t'))
+        len--;
+    if (len < SE_SVP_TOKEN_MIN || len > SE_SVP_TOKEN_MAX)
+        return false;
+    for (uint64_t i = 0; i < len; i++)
+        if (buf[i] == 0u)
+            return false; /* a binary file, not a token someone typed */
+    *tlen = (uint32_t)len;
+    return true;
+}
+
+SeSvpTokenPerm SeSvp_token_perm(bool regular, uint32_t mode,
+                                uint32_t owner_uid, uint32_t my_uid)
+{
+    if (!regular)
+        return SE_SVP_TOKEN_NOT_REGULAR;
+    if (owner_uid != my_uid)
+        return SE_SVP_TOKEN_WRONG_OWNER;
+    if ((mode & 077u) != 0u)
+        return SE_SVP_TOKEN_TOO_OPEN;
+    return SE_SVP_TOKEN_PERM_OK;
 }
 
 /* ------------------------------------------------------------- frames */
