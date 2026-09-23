@@ -156,3 +156,39 @@ needs a real codec at 80 Mbit/s. As step 1's test client it costs nothing.
 End-to-end latency of any option; WebRTC jitter-buffer cost; NVENC
 per-frame latency, as opposed to throughput; flatpot CPU encode; anything
 from the 80 Mbit site.
+
+## Owner answers (2026-09-23, same day, before any build)
+
+Hila, relayed verbatim by the Manager: "phone? no, laptop! mercury, the laptop.
+sahara runs on mercury or flatpot, and when on flatpot (phase 2 is running on
+flatpot) I want remote view&control from mercury".
+
+1. **Client = mercury, native.** No phone, so browser/WebRTC is not forced.
+2. **One viewer, which owns input** (view and control). No spectators.
+3. **Resize: unanswered.** Default is to keep 640x480; the view scales on the
+   client (cosmetic, outside determinism).
+
+**Re-pick: A-native.** The spark NVENC bridge as in A, but with a native
+`sahara-view` on mercury instead of a browser: SDL2 (reusing `gui/`) plus
+libavcodec H.264 decode (VA-API on mercury is optional). Input goes back over
+the view's own connection.
+
+- Why not WebRTC any more: its jitter buffer was the largest latency term
+  (~10-30 ms) and existed only to reach a browser. A native decoder on a
+  bounded TCP/UDP stream drops that term, which puts the estimate at roughly
+  15-30 ms on the LAN.
+- Why not B (Moonlight): still a fake desktop for Sunshine to capture, and
+  input takes three hops. A native view is the same size of work with fewer
+  hops.
+- C's raw/LZ4 path stays inside `sahara-view` as a codec choice (`--codec raw`):
+  zero encode, used for the phase-2 bring-up on the LAN and whenever spark is
+  unavailable. H.264 via spark is the codec for full motion and the 80 Mbit site.
+
+Phases:
+
+- **Phase 1**: Sahara runs locally on mercury: the existing `sahara-gui`,
+  built on flatpot (same Ubuntu 26.04 / SDL2 ABI) and copied over. No code
+  change.
+- **Phase 2**: `sahara-serve` on flatpot + `sahara-view` on mercury (raw
+  first), then the spark NVENC bridge (H.264). Plan:
+  `docs/2026-09-23-remote-frontend-plan.md`.
