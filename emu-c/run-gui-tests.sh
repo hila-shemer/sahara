@@ -297,15 +297,18 @@ CMD="$(grep '^sahara-emu ' "$OUT/serve-live.out")"
 PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/serve-live-replay.out" || true
 cmp_post_meta "$OUT/serve-live.trc" "$OUT/serve-live.trc.replay.trc"
 
-echo "sahara-serve: input flood is budgeted and in order; BUSY view retries"
-# A client holds the only slot and dumps 20000 KEY messages at once
-# (press/release pairs over a..z), far more than one poll's budget.
+echo "sahara-serve: input flood is rate-limited and in order; BUSY view retries"
+# A client holds the only slot and dumps 6000 KEY messages at once
+# (press/release pairs over a..z), far more than one poll's budget and
+# than the server's input rate (a burst of 256, then 1000 a second), so
+# the server must take at least (6000-256)/1000 s over them -- longer
+# than the holder's own 3 s stay, which is what the timing check sees.
 # While it holds the slot a real sahara-view gets BUSY and must retry
 # rather than die; once the holder leaves, the view gets in, probes two
-# keys and ends the session. The trace must hold all 20000 flood keys
+# keys and ends the session. The trace must hold all 6000 flood keys
 # in send order, spread over many poll stamps (the budget at work),
 # then the view's 4, and the session must replay byte-identically.
-FLOOD=20000
+FLOOD=6000
 start_serve serve-flood
 python3 - "$PORT" "$FLOOD" > "$OUT/flood-holder.out" <<'PYEOF' &
 import socket, struct, sys, time
@@ -316,6 +319,7 @@ while len(hdr) < 8:
     hdr += s.recv(8 - len(hdr))
 assert hdr[0] == 1, f"expected HELLO, got type {hdr[0]}"
 print("holding", flush=True)
+t0 = time.monotonic()
 blob = b"".join(struct.pack("<B3xIIBB2x", 16, 8, 4 + (i // 2) % 26,
                             1 - i % 2, 0) for i in range(n))
 s.sendall(blob)
@@ -326,6 +330,7 @@ s.shutdown(socket.SHUT_WR)
 while s.recv(65536):
     pass
 s.close()
+print(f"consumed in {time.monotonic() - t0:.2f} s", flush=True)
 PYEOF
 HOLDER_PID=$!
 BG_PIDS+=("$HOLDER_PID")
@@ -342,6 +347,14 @@ BG_PIDS=()
 grep -q 'session busy.*retrying for up to 60 s' "$OUT/view-flood.err"
 test "$(grep -c retrying "$OUT/view-flood.err")" = 1 # one line, not a spam
 grep -q '^input-to-present: n=2 ' "$OUT/view-flood.out"
+python3 - "$OUT/flood-holder.out" "$FLOOD" <<'PYEOF'
+import re, sys
+secs = float(re.search(r"consumed in ([0-9.]+) s", open(sys.argv[1]).read())[1])
+n = int(sys.argv[2])
+floor = (n - 256) / 1000 * 0.9
+print(f"  {n} flood keys consumed in {secs:.2f} s (rate floor {floor:.2f} s)")
+assert secs >= floor, "input was not rate-limited"
+PYEOF
 python3 - "$OUT/serve-flood.trc" "$FLOOD" <<'PYEOF'
 import sys
 sys.path.insert(0, "../trace-q")

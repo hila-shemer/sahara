@@ -218,6 +218,48 @@ static void test_budgeted_stream(void)
     RWC_ASSERT(!SeSvpRx_next(&r, &m) && r.bad && !SeSvpRx_ready(&r));
 }
 
+/* The input token bucket: burst first, then the refill rate and no
+ * more, however often it is polled -- the per-poll budget alone let a
+ * flooding viewer be served as fast as the server loops. */
+static void test_rate(void)
+{
+    SeSvpRate q;
+    SeSvpRate_reset(&q, 256u, 1000u, 5000u);
+    RWC_ASSERT(SeSvpRate_refill(&q, 5000u) == 256u);
+    SeSvpRate_spend(&q, 256u);
+    RWC_ASSERT(SeSvpRate_refill(&q, 5000u) == 0u);
+    RWC_ASSERT(SeSvpRate_wait_ms(&q) == 1u);
+
+    /* A tight poll loop over 2 s of clock, 0.1 ms per poll modelled as
+     * every millisecond polled ten times, takes 2000 tokens. */
+    uint64_t taken = 0;
+    for (uint64_t ms = 5000u; ms < 7000u; ms++)
+        for (unsigned i = 0; i < 10u; i++) {
+            uint32_t n = SeSvpRate_refill(&q, ms);
+            SeSvpRate_spend(&q, n);
+            taken += n;
+        }
+    RWC_ASSERT(taken == 1999u); /* ms 5000 adds none, 5001..6999 add */
+
+    /* An idle stretch refills to the burst and no further. */
+    RWC_ASSERT(SeSvpRate_refill(&q, 60000u) == 256u);
+    RWC_ASSERT(SeSvpRate_wait_ms(&q) == 0u);
+    /* A clock that steps back changes nothing. */
+    RWC_ASSERT(SeSvpRate_refill(&q, 10u) == 256u);
+
+    /* A fractional rate: 3 tokens a second is one per 334 ms. */
+    SeSvpRate_reset(&q, 1u, 3u, 0u);
+    SeSvpRate_spend(&q, SeSvpRate_refill(&q, 0u));
+    RWC_ASSERT(SeSvpRate_wait_ms(&q) == 334u);
+    RWC_ASSERT(SeSvpRate_refill(&q, 333u) == 0u);
+    RWC_ASSERT(SeSvpRate_refill(&q, 334u) == 1u);
+
+    /* Huge values do not overflow: a full bucket after a huge gap. */
+    SeSvpRate_reset(&q, UINT32_MAX, UINT32_MAX, 0u);
+    SeSvpRate_spend(&q, SeSvpRate_refill(&q, 0u));
+    RWC_ASSERT(SeSvpRate_refill(&q, UINT64_MAX) == UINT32_MAX);
+}
+
 static void test_frame_codec(void)
 {
     uint64_t max = SeSvp_frame_msg_max(W, H);
@@ -315,6 +357,7 @@ int main(void)
     test_fixed_messages();
     test_rx_rejects();
     test_budgeted_stream();
+    test_rate();
     test_frame_codec();
     printf("test_svp: ok\n");
     return 0;

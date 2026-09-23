@@ -76,6 +76,13 @@ static SDL_Renderer *ren;
 static SDL_Texture *tex;
 static bool captured, lctrl, lalt;
 static uint8_t btn_mask;
+/* Pointer motion waits here until the event batch ends or another
+ * event must go first: one MOUSE per batch, not one per SDL motion
+ * event, which a 1 kHz mouse sends 1000 of a second -- the server's
+ * input rate limit, and each one would be a trace EVENT. The position
+ * is absolute, so only the newest matters. */
+static bool motion_pending;
+static int32_t motion_x, motion_y;
 static uint64_t frames; /* presented */
 static uint64_t frame_rx_us; /* when the newest FRAME was parsed */
 /* Bandwidth accounting for the step-6 trigger (remote-frontend plan):
@@ -246,6 +253,15 @@ static uint64_t drain(void)
     return pong;
 }
 
+static void flush_motion(void)
+{
+    uint8_t m[32];
+    if (!motion_pending)
+        return;
+    motion_pending = false;
+    send_all(m, SeSvp_mouse(m, motion_x, motion_y, btn_mask));
+}
+
 static void release(void)
 {
     uint8_t m[16];
@@ -278,6 +294,8 @@ static void send_key(uint32_t usage, bool press, bool repeat)
 static bool handle(const SDL_Event *e)
 {
     uint8_t m[32];
+    if (e->type != SDL_MOUSEMOTION)
+        flush_motion(); /* keep order: the move happened first */
     switch (e->type) {
     case SDL_QUIT:
         return false;
@@ -318,8 +336,11 @@ static bool handle(const SDL_Event *e)
         send_all(m, SeSvp_mouse(m, e->button.x, e->button.y, btn_mask));
         return true;
     case SDL_MOUSEMOTION:
-        if (captured)
-            send_all(m, SeSvp_mouse(m, e->motion.x, e->motion.y, btn_mask));
+        if (captured) {
+            motion_pending = true;
+            motion_x = e->motion.x;
+            motion_y = e->motion.y;
+        }
         return true;
     default:
         return true;
@@ -491,6 +512,7 @@ int main(int argc, char **argv)
             SDL_Event e;
             while (open && SDL_PollEvent(&e))
                 open = handle(&e);
+            flush_motion();
             if (!pull(4)) /* bounds added input delay to 4 ms */
                 die("server closed the connection");
             (void)drain();

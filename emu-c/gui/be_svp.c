@@ -19,7 +19,14 @@
  * and MOUSE becomes a SeCpu_feed, whose queue only empties as the guest
  * runs, so an unbounded drain would let a viewer that floods the
  * socket grow the server's memory and stall the session inside one
- * poll. TCP flow control pushes the backlog back to the viewer.
+ * poll. TCP flow control pushes the backlog back to the viewer. The
+ * budget bounds one poll, not the polls per second, so a token bucket
+ * on the wall clock (SeSvpRate) caps the rate too: a burst of
+ * RATE_BURST, then RATE_PER_S messages a second, well above typing and
+ * the viewer's coalesced pointer motion. Unthrottled, a loopback flood
+ * grew the trace by about 40 MB/s (every KEY is an EVENT plus the
+ * guest's work on it); capped, a flood costs what a very busy human
+ * does. With the bucket empty the server stops reading the socket.
  *
  * A viewer that vanishes without a FIN (a laptop suspended mid-session)
  * would otherwise hold the only slot forever: an idle guest sends
@@ -47,6 +54,8 @@ const char *const se_live_prog = "sahara-serve";
 enum {
     RX_CAP = 4096,         /* input messages only; a frame-sized one is bad */
     POLL_MSG_BUDGET = 256, /* per SeLiveBe_poll; a full RX_CAP of KEYs */
+    RATE_BURST = 256,      /* input messages at once ... */
+    RATE_PER_S = 1000,     /* ... then this many a second */
     /* Dead-peer reaping, seconds: first probe after KEEPIDLE quiet
      * seconds, then every KEEPINTVL; USER_TIMEOUT_MS also bounds how
      * long sent frame bytes may sit unacknowledged. */
@@ -70,6 +79,7 @@ static uint8_t *out;       /* pending bytes to the viewer */
 static uint64_t out_len, out_off, out_cap;
 static uint8_t rxbuf[RX_CAP];
 static SeSvpRx rx;
+static SeSvpRate rate;     /* this viewer's input allowance */
 
 static void die(const char *msg)
 {
@@ -237,6 +247,7 @@ static void accept_viewer(void)
     cfd = fd;
     set_reaping(cfd);
     SeSvpRx_reset(&rx, rxbuf, sizeof rxbuf);
+    SeSvpRate_reset(&rate, RATE_BURST, RATE_PER_S, SeLiveBe_now_ms());
     SeSvpEnc_reset(&enc, enc_prev, (uint64_t)fw * fh);
     out_len = out_off = 0;
     queue_small(msg, SeSvp_hello(msg, fw, fh));
@@ -289,8 +300,13 @@ void SeLiveBe_poll(SeLive *lv)
         return;
     /* Buffered messages first (a previous poll may have stopped on its
      * budget), then the socket, until the budget or the socket runs
-     * out. Whatever is left waits for the next poll, in order. */
-    uint32_t budget = POLL_MSG_BUDGET;
+     * out. Whatever is left waits for the next poll, in order. The
+     * budget is the smaller of the per-poll cap and the rate bucket;
+     * a zero budget reads nothing, so wait_fds must not wake on the
+     * socket until a token is due. */
+    uint32_t allowed = SeSvpRate_refill(&rate, SeLiveBe_now_ms());
+    uint32_t budget = allowed < POLL_MSG_BUDGET ? allowed : POLL_MSG_BUDGET;
+    uint32_t start = budget;
     for (;;) {
         SeSvpMsg m;
         while (budget > 0u && SeSvpRx_next(&rx, &m)) {
@@ -315,6 +331,7 @@ void SeLiveBe_poll(SeLive *lv)
             break;
         SeSvpRx_commit(&rx, (uint64_t)n);
     }
+    SeSvpRate_spend(&rate, start - budget);
     if (!pump_frame())
         drop_viewer(lv);
 }
@@ -337,8 +354,21 @@ void SeLiveBe_present(const uint8_t *frame, uint64_t w, uint64_t h)
  * (the next poll handles it) or when a draining frame can move. */
 static void wait_fds(int ms)
 {
-    if (cfd >= 0 && SeSvpRx_ready(&rx))
-        ms = 0; /* the last poll stopped on its budget: no sleeping */
+    /* Out of tokens: leave the socket unread (no POLLIN, or poll would
+     * return at once on the backlog) and wake when the next token is
+     * due. With tokens and a whole message already buffered, the last
+     * poll stopped on its budget: no sleeping. */
+    short in = POLLIN;
+    if (cfd >= 0) {
+        uint64_t due = SeSvpRate_wait_ms(&rate);
+        if (due > 0u) {
+            in = 0;
+            if ((uint64_t)ms > due)
+                ms = (int)due;
+        } else if (SeSvpRx_ready(&rx)) {
+            ms = 0;
+        }
+    }
     struct pollfd p[2];
     nfds_t n = 0;
     if (lfd >= 0)
@@ -346,7 +376,7 @@ static void wait_fds(int ms)
     if (cfd >= 0)
         p[n++] = (struct pollfd){
             .fd = cfd,
-            .events = (short)(POLLIN | (out_len > out_off ? POLLOUT : 0)),
+            .events = (short)(in | (out_len > out_off ? POLLOUT : 0)),
         };
     if (n == 0u) {
         struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };

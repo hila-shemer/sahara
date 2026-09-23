@@ -127,6 +127,30 @@ RWC_WARN_UNUSED bool SeSvpRx_next(SeSvpRx *r, SeSvpMsg *m);
  * socket while this holds -- the bytes are already here. */
 RWC_WARN_UNUSED bool SeSvpRx_ready(const SeSvpRx *r);
 
+/* Input rate limit: a token bucket on the wall clock, sans-IO (the
+ * caller passes now_ms). The per-poll budget alone bounds one poll,
+ * not the polls per second; a viewer that streams input without pause
+ * would otherwise be served as fast as the server can loop, and every
+ * accepted KEY or MOUSE grows the session trace. When the bucket is
+ * empty the server stops reading and TCP pushes back on the viewer. */
+typedef struct SeSvpRate {
+    uint64_t milli;   /* tokens held, in thousandths */
+    uint64_t cap;     /* burst, in thousandths */
+    uint32_t per_s;   /* refill, tokens per second */
+    uint64_t last_ms; /* clock at the last refill */
+} SeSvpRate;
+
+/* Full bucket of burst tokens at now_ms. per_s must be nonzero. */
+void SeSvpRate_reset(SeSvpRate *r, uint32_t burst, uint32_t per_s,
+                     uint64_t now_ms);
+/* Refill up to now_ms; the whole tokens available. A clock that steps
+ * backwards refills nothing. */
+RWC_WARN_UNUSED uint32_t SeSvpRate_refill(SeSvpRate *r, uint64_t now_ms);
+/* Spend n tokens, n at most what the last refill returned. */
+void SeSvpRate_spend(SeSvpRate *r, uint32_t n);
+/* Milliseconds until one whole token is available (0: one is now). */
+RWC_WARN_UNUSED uint64_t SeSvpRate_wait_ms(const SeSvpRate *r);
+
 /* Field readers for fixed payloads; false if the payload is short. */
 RWC_WARN_UNUSED bool SeSvp_parse_hello(const SeSvpMsg *m, uint32_t *w,
                                        uint32_t *h);

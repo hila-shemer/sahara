@@ -234,6 +234,45 @@ static bool header_bad(const SeSvpRx *r, const uint8_t *h, uint32_t plen)
            SE_SVP_HDR_BYTES + (uint64_t)plen > r->cap;
 }
 
+void SeSvpRate_reset(SeSvpRate *r, uint32_t burst, uint32_t per_s,
+                     uint64_t now_ms)
+{
+    RWC_ASSERT(per_s != 0u);
+    r->cap = (uint64_t)burst * 1000u;
+    r->milli = r->cap;
+    r->per_s = per_s;
+    r->last_ms = now_ms;
+}
+
+uint32_t SeSvpRate_refill(SeSvpRate *r, uint64_t now_ms)
+{
+    if (now_ms > r->last_ms) {
+        /* per_s tokens a second is per_s thousandths a millisecond.
+         * A gap that would fill the bucket fills it; any shorter one
+         * keeps dt * per_s below room + per_s, so nothing overflows. */
+        uint64_t dt = now_ms - r->last_ms;
+        uint64_t room = r->cap - r->milli;
+        uint64_t fill_ms = (room + r->per_s - 1u) / r->per_s;
+        r->milli = dt >= fill_ms ? r->cap : r->milli + dt * r->per_s;
+        r->last_ms = now_ms;
+    }
+    return (uint32_t)(r->milli / 1000u);
+}
+
+void SeSvpRate_spend(SeSvpRate *r, uint32_t n)
+{
+    RWC_ASSERT((uint64_t)n * 1000u <= r->milli);
+    r->milli -= (uint64_t)n * 1000u;
+}
+
+uint64_t SeSvpRate_wait_ms(const SeSvpRate *r)
+{
+    if (r->milli >= 1000u)
+        return 0u;
+    uint64_t need = 1000u - r->milli;
+    return (need + r->per_s - 1u) / r->per_s;
+}
+
 bool SeSvpRx_ready(const SeSvpRx *r)
 {
     if (r->bad)
