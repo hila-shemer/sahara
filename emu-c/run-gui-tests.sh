@@ -245,12 +245,69 @@ grep -qx "HALT r0=0000000000000000000000000000bad5" "$OUT/nb-noserve.out"
 python3 ../rom/netboot/test/screencheck.py "$OUT/nb-noserve.trc" \
     --expect-sub "no boot image configured"
 
+echo "SVP auth: constant-time compare is the only MAC check"
+# Structural: the MAC verdict goes through SeHmac_equal (volatile fold,
+# no early exit), and neither auth TU has a memcmp to slip back to.
+grep -q 'return SeHmac_equal(m->p, want, SE_SVP_MAC_BYTES);' gui/svp.c
+if grep -n 'memcmp' gui/svp.c gui/hmac.c; then
+    echo "ERROR: memcmp in the auth path"; exit 1
+fi
+
+# The shared token for every serve/view leg below: a private temp file,
+# created the way frontend-notes.md tells a user to.
+TOKDIR="$OUT/token.d"
+rm -rf "$TOKDIR"
+mkdir -m 700 "$TOKDIR"
+TOKEN_FILE="$TOKDIR/serve-token"
+(umask 077; head -c 32 /dev/urandom | base64 > "$TOKEN_FILE")
+WRONG_TOKEN_FILE="$TOKDIR/wrong-token"
+(umask 077; head -c 32 /dev/urandom | base64 > "$WRONG_TOKEN_FILE")
+
+echo "sahara-serve: refuses to start without a private token file"
+# Missing (explicit path, and the XDG default), 0644, and 0640: each a
+# non-zero exit before anything is written, naming the fix.
+refuse_serve() { # refuse_serve NAME EXPECTED-TEXT env/args...
+    local name=$1 want=$2; shift 2
+    if env "$@" --script gui/session.script \
+        --trace "$OUT/$name.trc" > /dev/null 2> "$OUT/$name.err"; then
+        echo "ERROR: sahara-serve started ($name)"; exit 1
+    fi
+    grep -qF -- "$want" "$OUT/$name.err" || {
+        echo "ERROR: $name: expected '$want' in:"; cat "$OUT/$name.err"
+        exit 1; }
+    if [ -e "$OUT/$name.trc" ]; then
+        echo "ERROR: refused start ($name) still wrote a trace"; exit 1
+    fi
+    echo "  $name: $(head -1 "$OUT/$name.err")"
+}
+rm -f "$OUT"/tok-*.trc
+refuse_serve tok-missing 'head -c 32 /dev/urandom | base64 >' \
+    bazel-bin/sahara-serve "$OUT/demo.img" --token-file "$TOKDIR/nope"
+refuse_serve tok-default "$TOKDIR/xdg/sahara/serve-token" \
+    XDG_CONFIG_HOME="$PWD/$TOKDIR/xdg" bazel-bin/sahara-serve "$OUT/demo.img"
+cp "$TOKEN_FILE" "$TOKDIR/open-token"
+chmod 644 "$TOKDIR/open-token"
+refuse_serve tok-0644 'mode 0644, must be 0600 or stricter' \
+    bazel-bin/sahara-serve "$OUT/demo.img" --token-file "$TOKDIR/open-token"
+chmod 640 "$TOKDIR/open-token"
+refuse_serve tok-0640 "chmod 600 '$TOKDIR/open-token'" \
+    bazel-bin/sahara-serve "$OUT/demo.img" --token-file "$TOKDIR/open-token"
+(umask 077; echo short > "$TOKDIR/short-token")
+refuse_serve tok-short 'must hold 16..1024 bytes' \
+    bazel-bin/sahara-serve "$OUT/demo.img" --token-file "$TOKDIR/short-token"
+# The view applies the same rule to its own file, before connecting.
+if bazel-bin/sahara-view 127.0.0.1:9 --token-file "$TOKDIR/open-token" \
+    2> "$OUT/view-open-token.err"; then
+    echo "ERROR: sahara-view accepted a 0640 token file"; exit 1
+fi
+grep -q 'must be 0600 or stricter' "$OUT/view-open-token.err"
+
 echo "sahara-serve: scripted session is sahara-gui's, byte for byte"
 # The two binaries share gui/live_main.c; under --script the backend is
 # never consulted for input or time, so the traces must be identical,
 # whole file. This is what makes a served session trustworthy.
 bazel-bin/sahara-serve "$OUT/demo.img" --script gui/session.script \
-    --trace "$OUT/serve-script.trc" > /dev/null
+    --token-file "$TOKEN_FILE" --trace "$OUT/serve-script.trc" > /dev/null
 cmp "$OUT/session.trc" "$OUT/serve-script.trc"
 
 # start_serve NAME: sahara-serve on the demo image, loopback port 0 (the
@@ -259,7 +316,8 @@ cmp "$OUT/session.trc" "$OUT/serve-script.trc"
 start_serve() {
     local name=$1
     bazel-bin/sahara-serve "$OUT/demo.img" --nic off \
-        --listen 127.0.0.1:0 --trace "$OUT/$name.trc" \
+        --listen 127.0.0.1:0 --token-file "$TOKEN_FILE" \
+        --trace "$OUT/$name.trc" \
         > "$OUT/$name.out" 2> "$OUT/$name.err" &
     SERVE_PID=$!
     BG_PIDS+=("$SERVE_PID")
@@ -273,56 +331,196 @@ start_serve() {
     [ -n "$PORT" ] || { echo "ERROR: sahara-serve never listened"; exit 1; }
 }
 
-echo "sahara-serve + sahara-view: live loopback session replays"
-# A real remote session: serve on a loopback port, view connects under
-# the offscreen SDL driver, --probe types a/Backspace, --end-session
-# ends it. The server's trace must hold the viewer's keys as keyboard
-# EVENTs and replay byte-identically through the printed command.
-start_serve serve-live
-SDL_VIDEODRIVER=offscreen timeout 60 bazel-bin/sahara-view \
-    "127.0.0.1:$PORT" --probe 10 --end-session > "$OUT/view-probe.out"
-wait "$SERVE_PID"
-BG_PIDS=()
-grep -q '^input-to-present: n=10 ' "$OUT/view-probe.out"
-python3 - "$OUT/serve-live.trc" <<'PYEOF'
+# stop_serve: the operator's way to end a session now that no viewer
+# can -- SIGTERM -- then the replay line must be there.
+stop_serve() {
+    kill -0 "$SERVE_PID" || { echo "ERROR: sahara-serve already gone"; exit 1; }
+    kill -TERM "$SERVE_PID"
+    wait "$SERVE_PID"
+    BG_PIDS=()
+}
+
+# kbd_events TRACE: keyboard EVENT records in a session trace.
+kbd_events() {
+    python3 - "$1" <<'PYEOF'
 import sys
 sys.path.insert(0, "../trace-q")
 import tracefile as T
-kbd = sum(1 for r in T.read_records(sys.argv[1])
-          if r.name == "EVENT" and r.fields["device"] == 1)
-# 10 keys, press + release each; the demo guest needs no others.
-assert kbd == 20, f"expected 20 keyboard EVENTs from the viewer, got {kbd}"
+print(sum(1 for r in T.read_records(sys.argv[1])
+          if r.name == "EVENT" and r.fields["device"] == 1))
 PYEOF
+}
+
+# svp_client.py: a raw SVP/2 peer for the legs a real view cannot play
+# (wrong answers, input before auth, holding the slot, flooding).
+cat > "$OUT/svp_client.py" <<'PYEOF'
+import hashlib, hmac, socket, struct, sys
+
+def recv_msg(s):
+    hdr = b""
+    while len(hdr) < 8:
+        b = s.recv(8 - len(hdr))
+        if not b:
+            return None
+        hdr += b
+    t, n = hdr[0], struct.unpack_from("<I", hdr, 4)[0]
+    body = b""
+    while len(body) < n:
+        b = s.recv(n - len(body))
+        if not b:
+            return None
+        body += b
+    return t, body
+
+def token(path):
+    return open(path, "rb").read().rstrip(b" \t\r\n")
+
+def auth(s, tok):
+    t, body = recv_msg(s)
+    assert t == 5 and len(body) == 36, f"expected CHALLENGE, got {t}"
+    assert struct.unpack_from("<I", body)[0] == 2, "not SVP/2"
+    mac = hmac.new(tok, b"SVP/2 AUTH" + body[4:], hashlib.sha256).digest()
+    s.sendall(struct.pack("<B3xI", 21, 32) + mac)
+
+def key(usage, press):
+    return struct.pack("<B3xIIBB2x", 16, 8, usage, press, 0)
+PYEOF
+
+echo "SVP auth negative controls: wrong token, input before auth, silence"
+# Each is refused without a FRAME, feeds no EVENT, and the server keeps
+# running; the session's trace is checked for zero keyboard EVENTs
+# before any authenticated view has attached.
+start_serve serve-auth
+python3 - "$PORT" "$WRONG_TOKEN_FILE" <<'PYEOF'
+import socket, sys, time
+sys.path.insert(0, "gui/out")
+from svp_client import *
+port, wrong = int(sys.argv[1]), token(sys.argv[2])
+# 1. Wrong token, with KEYs pipelined behind the AUTH: DENIED, close.
+s = socket.create_connection(("127.0.0.1", port))
+auth(s, wrong)
+s.sendall(b"".join(key(4 + i, 1) + key(4 + i, 0) for i in range(8)))
+seen = []
+while (m := recv_msg(s)) is not None:
+    seen.append(m[0])
+assert seen == [6], f"wrong token: expected only DENIED, got {seen}"
+print("  wrong token: DENIED, connection closed, no FRAME")
+# 2. Input instead of AUTH: the first message is the one attempt.
+s = socket.create_connection(("127.0.0.1", port))
+t, _ = recv_msg(s)
+assert t == 5
+s.sendall(b"".join(key(4, p) for p in (1, 0)) * 8)
+seen = []
+while (m := recv_msg(s)) is not None:
+    seen.append(m[0])
+assert seen == [6], f"input before auth: expected only DENIED, got {seen}"
+print("  input before auth: DENIED, no FRAME")
+# 3. Silence: closed at the 5 s deadline, nothing sent but CHALLENGE.
+s = socket.create_connection(("127.0.0.1", port))
+t0 = time.monotonic()
+t, _ = recv_msg(s)
+assert t == 5
+s.settimeout(15)
+m = recv_msg(s)
+dt = time.monotonic() - t0
+assert m is None, f"silent peer got message {m[0]}"
+assert 4.5 <= dt <= 8, f"auth deadline {dt:.2f} s, want ~5 s"
+print(f"  silent peer: closed after {dt:.2f} s")
+PYEOF
+# The real view with the wrong token: the distinct message, exit 1, and
+# no retry (one line, no "retrying").
+if SDL_VIDEODRIVER=offscreen timeout 20 bazel-bin/sahara-view \
+    "127.0.0.1:$PORT" --token-file "$WRONG_TOKEN_FILE" --probe 1 \
+    > /dev/null 2> "$OUT/view-wrong.err"; then
+    echo "ERROR: sahara-view with a wrong token succeeded"; exit 1
+fi
+grep -qx 'sahara-view: authentication failed (wrong token for this server)' \
+    "$OUT/view-wrong.err"
+if grep -q retrying "$OUT/view-wrong.err"; then
+    echo "ERROR: sahara-view retried a refused token"; exit 1
+fi
+kill -0 "$SERVE_PID"
+test "$(grep -c 'viewer authentication failed' "$OUT/serve-auth.err")" = 3
+if grep -q 'viewer connected' "$OUT/serve-auth.err"; then
+    echo "ERROR: an unauthenticated peer became the viewer"; exit 1
+fi
+stop_serve
+test "$(kbd_events "$OUT/serve-auth.trc")" = 0
+echo "  server kept running; 0 keyboard EVENTs in its trace"
+CMD="$(grep '^sahara-emu ' "$OUT/serve-auth.out")"
+PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/serve-auth-replay.out" || true
+cmp_post_meta "$OUT/serve-auth.trc" "$OUT/serve-auth.trc.replay.trc"
+
+echo "sahara-serve + sahara-view: CLOSE detaches, a second view drives on"
+# A real remote session over loopback: view 1 (token file) probes 10
+# keys and leaves with CLOSE; the session keeps running; view 2 (token
+# from the environment) attaches while an unauthenticated peer sits in
+# the door, probes 4 more, leaves. SIGTERM then ends the session, and
+# its one trace -- both viewers' keys -- replays byte-identically.
+start_serve serve-live
+SDL_VIDEODRIVER=offscreen timeout 60 bazel-bin/sahara-view \
+    "127.0.0.1:$PORT" --token-file "$TOKEN_FILE" --probe 10 \
+    > "$OUT/view-probe.out"
+grep -q '^input-to-present: n=10 ' "$OUT/view-probe.out"
+sleep 0.5
+kill -0 "$SERVE_PID" || { echo "ERROR: CLOSE ended the session"; exit 1; }
+grep -q 'viewer disconnected; session continues' "$OUT/serve-live.err"
+if grep -q '^sahara-emu ' "$OUT/serve-live.out"; then
+    echo "ERROR: the session ended when the view closed"; exit 1
+fi
+# An unauthenticated connection holds a door slot during view 2's
+# whole attach: it must not take or block the viewer slot.
+python3 -c "
+import socket, sys, time
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])))
+time.sleep(6)" "$PORT" &
+LURKER_PID=$!
+BG_PIDS+=("$LURKER_PID")
+sleep 0.2
+SAHARA_VIEW_TOKEN="$(cat "$TOKEN_FILE")" SDL_VIDEODRIVER=offscreen \
+    timeout 60 bazel-bin/sahara-view "127.0.0.1:$PORT" --probe 4 \
+    > "$OUT/view-probe2.out" 2> "$OUT/view-probe2.err"
+grep -q '^input-to-present: n=4 ' "$OUT/view-probe2.out"
+if grep -q retrying "$OUT/view-probe2.err"; then
+    echo "ERROR: view 2 was kept waiting by an unauthenticated peer"; exit 1
+fi
+wait "$LURKER_PID" || true
+test "$(grep -c 'viewer connected' "$OUT/serve-live.err")" = 2
+stop_serve
+grep -q 'SIGTERM: ending the session' "$OUT/serve-live.err"
+# 14 keys, press + release each; the demo guest needs no others.
+test "$(kbd_events "$OUT/serve-live.trc")" = 28
+echo "  two viewers, one session: 28 keyboard EVENTs"
 CMD="$(grep '^sahara-emu ' "$OUT/serve-live.out")"
 PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/serve-live-replay.out" || true
 cmp_post_meta "$OUT/serve-live.trc" "$OUT/serve-live.trc.replay.trc"
 
 echo "sahara-serve: input flood is rate-limited and in order; BUSY view retries"
-# A client holds the only slot and dumps 6000 KEY messages at once
-# (press/release pairs over a..z), far more than one poll's budget and
-# than the server's input rate (a burst of 256, then 1000 a second), so
-# the server must take at least (6000-256)/1000 s over them -- longer
-# than the holder's own 3 s stay, which is what the timing check sees.
-# While it holds the slot a real sahara-view gets BUSY and must retry
-# rather than die; once the holder leaves, the view gets in, probes two
-# keys and ends the session. The trace must hold all 6000 flood keys
-# in send order, spread over many poll stamps (the budget at work),
-# then the view's 4, and the session must replay byte-identically.
+# An authenticated client holds the only slot and dumps 6000 KEY
+# messages at once (press/release pairs over a..z), far more than one
+# poll's budget and than the server's input rate (a burst of 256, then
+# 1000 a second), so the server must take at least (6000-256)/1000 s
+# over them -- longer than the holder's own 3 s stay, which is what the
+# timing check sees. While it holds the slot a real sahara-view
+# authenticates, gets BUSY and must retry rather than die; once the
+# holder leaves, the view gets in, probes two keys and detaches. The
+# trace must hold all 6000 flood keys in send order, spread over many
+# poll stamps (the budget at work), then the view's 4, and the session
+# must replay byte-identically.
 FLOOD=6000
 start_serve serve-flood
-python3 - "$PORT" "$FLOOD" > "$OUT/flood-holder.out" <<'PYEOF' &
-import socket, struct, sys, time
+python3 - "$PORT" "$FLOOD" "$TOKEN_FILE" > "$OUT/flood-holder.out" <<'PYEOF' &
+import socket, sys, time
+sys.path.insert(0, "gui/out")
+from svp_client import *
 port, n = int(sys.argv[1]), int(sys.argv[2])
 s = socket.create_connection(("127.0.0.1", port))
-hdr = b""
-while len(hdr) < 8:
-    hdr += s.recv(8 - len(hdr))
-assert hdr[0] == 1, f"expected HELLO, got type {hdr[0]}"
+auth(s, token(sys.argv[3]))
+t, _ = recv_msg(s)
+assert t == 1, f"expected HELLO, got type {t}"
 print("holding", flush=True)
 t0 = time.monotonic()
-blob = b"".join(struct.pack("<B3xIIBB2x", 16, 8, 4 + (i // 2) % 26,
-                            1 - i % 2, 0) for i in range(n))
-s.sendall(blob)
+s.sendall(b"".join(key(4 + (i // 2) % 26, 1 - i % 2) for i in range(n)))
 time.sleep(3)  # keep the slot while the view knocks
 # FIN, not RST: every flood byte must reach the server. Read until the
 # server closes its side (it has consumed everything by then).
@@ -339,11 +537,10 @@ for _ in $(seq 50); do
     sleep 0.1
 done
 SDL_VIDEODRIVER=offscreen timeout 60 bazel-bin/sahara-view \
-    "127.0.0.1:$PORT" --probe 2 --end-session \
+    "127.0.0.1:$PORT" --token-file "$TOKEN_FILE" --probe 2 \
     > "$OUT/view-flood.out" 2> "$OUT/view-flood.err"
 wait "$HOLDER_PID"
-wait "$SERVE_PID"
-BG_PIDS=()
+stop_serve
 grep -q 'session busy.*retrying for up to 60 s' "$OUT/view-flood.err"
 test "$(grep -c retrying "$OUT/view-flood.err")" = 1 # one line, not a spam
 grep -q '^input-to-present: n=2 ' "$OUT/view-flood.out"

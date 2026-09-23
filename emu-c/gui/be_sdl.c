@@ -26,6 +26,11 @@ static void die(const char *msg)
     exit(1);
 }
 
+void SeLiveBe_check(void)
+{
+    /* Nothing to check before the window opens. */
+}
+
 int SeLiveBe_option(int argc, char **argv, int i)
 {
     (void)argc;

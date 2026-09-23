@@ -555,6 +555,9 @@ int main(int argc, char **argv)
     uint64_t region_len = ram > se_lo64(SE_PLAT_RAM_MAX)
                               ? se_lo64(SE_PLAT_RAM_MAX)
                               : ram;
+    /* The backend's own startup refusals (sahara-serve's token) before
+     * anything is written: a refused start leaves no trace file. */
+    SeLiveBe_check();
 
     /* Recording is mandatory: it is the session's source of truth.
      * Resolved before the image because the materialized ROM's name

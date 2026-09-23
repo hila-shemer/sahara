@@ -1,16 +1,32 @@
 /* The SVP backend of the live session (gui/live.h): sahara-serve, the
  * same live session as sahara-gui with its window replaced by one TCP
- * viewer speaking SVP/1 (gui/svp.h). This TU is the socket carve-out,
+ * viewer speaking SVP/2 (gui/svp.h). This TU is the socket carve-out,
  * on nic_host.c's pattern: allow_banned, out of the source audits,
  * never linked into sahara-emu. It only moves bytes -- every protocol
  * decision is in gui/svp.c.
  *
- *   sahara-serve [live options] --listen HOST:PORT
+ *   sahara-serve [live options] --listen HOST:PORT [--token-file PATH]
  *
- * One viewer owns input; a second connection gets BUSY and is closed.
- * A viewer disconnecting is a capture loss (every held key and button
- * released) and the session keeps running; the next viewer gets HELLO
- * and a full frame. Frames coalesce: while the previous FRAME is still
+ * Every connection must first prove it holds the shared token (svp.h,
+ * Authentication): the server reads it from --token-file, default
+ * ${XDG_CONFIG_HOME:-~/.config}/sahara/serve-token, and refuses to
+ * start without a private one (gui/token_io.c). A new connection sits
+ * in a small pending table, apart from the viewer slot: it gets
+ * CHALLENGE and nothing else, its bytes are read only as its one AUTH,
+ * and it is closed after SE_SVP_AUTH_DEADLINE_MS or a wrong answer
+ * (DENIED). So a peer without the token can neither see a frame, feed
+ * the guest, learn whether the slot is taken, nor push an owner out.
+ * The table is small and full means new connections are closed at
+ * once: a tailnet peer can still keep the door busy (for 5 s per
+ * connection), but never reach the session.
+ *
+ * One authenticated viewer owns input; a second one gets BUSY and is
+ * closed. A viewer leaving -- CLOSE or a dropped connection -- is a
+ * capture loss (every held key and button released) and the session
+ * keeps running; the next viewer gets HELLO and a full frame. Nothing
+ * a viewer sends ends the session: the guest halting, --maxcycles, or
+ * SIGINT/SIGTERM to this process do, and all print the replay line.
+ * Frames coalesce: while the previous FRAME is still
  * draining, only the newest snapshot is kept, so a slow link never
  * queues stale frames (display.md 5: the host may drop frames).
  *
@@ -38,16 +54,20 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "gui/live.h"
 #include "gui/svp.h"
+#include "gui/token_io.h"
 #include "hostmem.h"
+#include "rwc/status.h"
 
 const char *const se_live_prog = "sahara-serve";
 
@@ -63,9 +83,25 @@ enum {
     KEEPINTVL_S = 5,
     KEEPCNT = 3,
     USER_TIMEOUT_MS = 20000,
+    PENDING_MAX = 4,       /* connections still owing their AUTH */
+    PENDING_RX = 256,      /* room for one AUTH (and a bad header) */
 };
 
+/* A connection that has been sent CHALLENGE and owes its AUTH. */
+typedef struct Pending {
+    int fd; /* -1: free */
+    uint64_t deadline_ms;
+    uint8_t nonce[SE_SVP_NONCE_BYTES];
+    SeSvpRx rx;
+    uint8_t buf[PENDING_RX];
+} Pending;
+
 static const char *listen_arg;
+static const char *token_file_arg;
+static uint8_t token[SE_SVP_TOKEN_MAX];
+static uint32_t token_len;
+static Pending pending[PENDING_MAX];
+static volatile sig_atomic_t stop_signal; /* SIGINT/SIGTERM seen */
 static bool scripted;
 static int lfd = -1, cfd = -1;
 static uint32_t fw, fh;
@@ -91,6 +127,10 @@ int SeLiveBe_option(int argc, char **argv, int i)
 {
     if (strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
         listen_arg = argv[i + 1];
+        return 2;
+    }
+    if (strcmp(argv[i], "--token-file") == 0 && i + 1 < argc) {
+        token_file_arg = argv[i + 1];
         return 2;
     }
     return 0;
@@ -132,6 +172,48 @@ static void open_listener(void)
             (unsigned)ntohs(sa.sin_port));
 }
 
+static void on_stop_signal(int sig)
+{
+    stop_signal = sig;
+}
+
+/* SIGINT/SIGTERM end the session the orderly way -- the next poll
+ * quits, and live_main flushes the trace and prints the replay line --
+ * now that no viewer can. The two stay blocked except inside the
+ * ppoll() in wait_fds, which unblocks them atomically: a signal that
+ * lands while the guest runs waits for that ppoll and cuts it short at
+ * once, never racing a check-then-sleep into a long idle wait. */
+static sigset_t run_mask; /* the mask to sleep with: stop signals open */
+
+static void catch_stop_signals(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    (void)sigaction(SIGINT, &sa, NULL);
+    (void)sigaction(SIGTERM, &sa, NULL);
+    sigset_t stop;
+    sigemptyset(&stop);
+    sigaddset(&stop, SIGINT);
+    sigaddset(&stop, SIGTERM);
+    (void)sigprocmask(SIG_BLOCK, &stop, &run_mask);
+}
+
+void SeLiveBe_check(void)
+{
+    /* The token is required even under --script, which opens no
+     * socket: one rule (no private token, no start) is easier to trust
+     * than one with a mode-dependent exception. */
+    char path[4096];
+    if (token_file_arg) {
+        (void)snprintf(path, sizeof path, "%s", token_file_arg);
+    } else {
+        SeSvpToken_default_path(se_live_prog, path, sizeof path);
+    }
+    SeSvpToken_load(se_live_prog, path, token, &token_len);
+}
+
 void SeLiveBe_init(SeLive *lv, uint64_t w, uint64_t h, bool is_scripted)
 {
     (void)lv;
@@ -142,6 +224,9 @@ void SeLiveBe_init(SeLive *lv, uint64_t w, uint64_t h, bool is_scripted)
         return; /* --script owns input and the clock: no network */
     if (!listen_arg)
         die("--listen HOST:PORT is required (bind a specific address)");
+    for (unsigned i = 0; i < PENDING_MAX; i++)
+        pending[i].fd = -1;
+    catch_stop_signals();
     last = se_host_alloc(4u * w * h);
     enc_prev = se_host_alloc(4u * w * h);
     out_cap = SeSvp_frame_msg_max(fw, fh) + 64u;
@@ -151,6 +236,9 @@ void SeLiveBe_init(SeLive *lv, uint64_t w, uint64_t h, bool is_scripted)
 
 void SeLiveBe_fini(void)
 {
+    for (unsigned i = 0; i < PENDING_MAX; i++)
+        if (pending[i].fd >= 0)
+            close(pending[i].fd);
     if (cfd >= 0)
         close(cfd);
     if (lfd >= 0)
@@ -175,7 +263,8 @@ static void drop_viewer(SeLive *lv)
         SeLive_host_capture_lost(lv);
     else
         lost_pending = true; /* dropped from present: no session handle */
-    fprintf(stderr, "sahara-serve: viewer disconnected\n");
+    fprintf(stderr, "sahara-serve: viewer disconnected; session "
+                    "continues\n");
 }
 
 /* Push pending bytes; false if the viewer is gone. */
@@ -230,60 +319,164 @@ static void set_reaping(int fd)
     (void)setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &uto, sizeof uto);
 }
 
-static void accept_viewer(void)
+/* A new connection into the pending table, with its CHALLENGE sent.
+ * Nothing about the session -- geometry, whether the slot is taken --
+ * goes out before its AUTH checks. */
+static void accept_pending(void)
 {
     int fd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (fd < 0)
         return;
+    Pending *p = NULL;
+    for (unsigned i = 0; i < PENDING_MAX && !p; i++)
+        if (pending[i].fd < 0)
+            p = &pending[i];
+    if (!p) {
+        close(fd); /* door busy: nothing sent, nothing learned */
+        fprintf(stderr, "sahara-serve: too many unauthenticated "
+                        "connections; closed one\n");
+        return;
+    }
+    if (getrandom(p->nonce, sizeof p->nonce, 0) != (ssize_t)sizeof p->nonce) {
+        close(fd); /* no fresh nonce, no challenge */
+        fprintf(stderr, "sahara-serve: getrandom failed; closed a "
+                        "connection\n");
+        return;
+    }
     int one = 1;
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    uint8_t msg[32];
-    if (cfd >= 0) {
-        uint32_t n = SeSvp_empty(msg, SE_SVP_BUSY);
-        (void)send(fd, msg, n, MSG_NOSIGNAL | MSG_DONTWAIT);
+    uint8_t msg[64];
+    uint32_t n = SeSvp_challenge(msg, p->nonce);
+    /* A fresh socket's send buffer takes 44 bytes whole. */
+    if (send(fd, msg, n, MSG_NOSIGNAL | MSG_DONTWAIT) != (ssize_t)n) {
         close(fd);
         return;
     }
-    cfd = fd;
+    p->fd = fd;
+    p->deadline_ms = SeLiveBe_now_ms() + SE_SVP_AUTH_DEADLINE_MS;
+    SeSvpRx_reset(&p->rx, p->buf, sizeof p->buf);
+}
+
+static void pending_close(Pending *p, const char *why)
+{
+    close(p->fd);
+    p->fd = -1;
+    if (why)
+        fprintf(stderr, "sahara-serve: %s\n", why);
+}
+
+/* The authenticated connection becomes the viewer: HELLO and a full
+ * frame. Bytes it sent behind its AUTH are input after authentication
+ * and carry over, in order. */
+static void promote(Pending *p)
+{
+    cfd = p->fd;
+    p->fd = -1;
     set_reaping(cfd);
     SeSvpRx_reset(&rx, rxbuf, sizeof rxbuf);
+    uint64_t rest = p->rx.len - p->rx.off, room;
+    uint8_t *dst = SeSvpRx_space(&rx, &room);
+    RWC_ASSERT(rest <= room); /* PENDING_RX < RX_CAP */
+    memcpy(dst, p->rx.buf + p->rx.off, rest);
+    SeSvpRx_commit(&rx, rest);
     SeSvpRate_reset(&rate, RATE_BURST, RATE_PER_S, SeLiveBe_now_ms());
     SeSvpEnc_reset(&enc, enc_prev, (uint64_t)fw * fh);
     out_len = out_off = 0;
+    uint8_t msg[32];
     queue_small(msg, SeSvp_hello(msg, fw, fh));
     frame_dirty = have_last; /* full frame against a zero reference */
     fprintf(stderr, "sahara-serve: viewer connected\n");
 }
 
-static void handle(SeLive *lv, const SeSvpMsg *m)
+/* Refuse a pending connection with msg (DENIED or BUSY) and close it.
+ * What the peer already sent behind its first message is read and
+ * dropped first: closing with unread bytes makes the kernel send RST,
+ * which can destroy the refusal before the peer reads it. */
+static void pending_refuse(Pending *p, SeSvpType type, const char *why)
+{
+    uint8_t reply[16], sink[4096];
+    (void)send(p->fd, reply, SeSvp_empty(reply, type),
+               MSG_NOSIGNAL | MSG_DONTWAIT);
+    for (unsigned i = 0; i < 16u; i++) /* bounded: 64 KB at most */
+        if (recv(p->fd, sink, sizeof sink, MSG_DONTWAIT) <= 0)
+            break;
+    (void)shutdown(p->fd, SHUT_WR);
+    pending_close(p, why);
+}
+
+/* One pending connection: read toward its AUTH, and decide once. */
+static void pending_poll(Pending *p, uint64_t now)
+{
+    SeSvpMsg m;
+    while (!SeSvpRx_next(&p->rx, &m)) {
+        if (p->rx.bad)
+            break; /* garbage header: a wrong answer, below */
+        uint64_t room;
+        uint8_t *dst = SeSvpRx_space(&p->rx, &room);
+        ssize_t n = room ? recv(p->fd, dst, room, MSG_DONTWAIT) : 0;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (now >= p->deadline_ms)
+                pending_close(p, "authentication timed out; closed");
+            return;
+        }
+        if (n <= 0) {
+            pending_close(p, NULL); /* left before answering */
+            return;
+        }
+        SeSvpRx_commit(&p->rx, (uint64_t)n);
+    }
+    if (p->rx.bad || !SeSvp_auth_ok(&m, token, token_len, p->nonce)) {
+        pending_refuse(p, SE_SVP_DENIED,
+                       "viewer authentication failed; closed");
+        return;
+    }
+    if (cfd >= 0) {
+        pending_refuse(p, SE_SVP_BUSY, NULL);
+        return;
+    }
+    promote(p);
+}
+
+static void door_poll(void)
+{
+    accept_pending();
+    uint64_t now = SeLiveBe_now_ms();
+    for (unsigned i = 0; i < PENDING_MAX; i++)
+        if (pending[i].fd >= 0)
+            pending_poll(&pending[i], now);
+}
+
+/* One viewer message; false when the viewer detached (CLOSE). */
+static bool handle(SeLive *lv, const SeSvpMsg *m)
 {
     uint32_t usage;
     bool press, repeat;
     int32_t x, y;
     uint8_t btn;
-    uint64_t token;
+    uint64_t ping;
     uint8_t reply[32];
     switch (m->type) {
     case SE_SVP_KEY:
         if (SeSvp_parse_key(m, &usage, &press, &repeat))
             SeLive_host_key(lv, usage, press, repeat);
-        return;
+        return true;
     case SE_SVP_MOUSE:
         if (SeSvp_parse_mouse(m, &x, &y, &btn))
             SeLive_host_mouse(lv, x, y, btn);
-        return;
+        return true;
     case SE_SVP_FOCUSLOST:
         SeLive_host_capture_lost(lv);
-        return;
+        return true;
     case SE_SVP_PING:
-        if (SeSvp_parse_ping(m, &token))
-            queue_small(reply, SeSvp_ping(reply, SE_SVP_PONG, token));
-        return;
+        if (SeSvp_parse_ping(m, &ping))
+            queue_small(reply, SeSvp_ping(reply, SE_SVP_PONG, ping));
+        return true;
     case SE_SVP_CLOSE:
-        SeLive_host_quit(lv);
-        return;
+        /* The view is leaving, not the session: detach it like a
+         * dropped connection (capture loss), keep running. */
+        return false;
     default:
-        return; /* unknown types from a newer viewer are ignored */
+        return true; /* unknown types from a newer viewer are ignored */
     }
 }
 
@@ -291,11 +484,17 @@ void SeLiveBe_poll(SeLive *lv)
 {
     if (scripted)
         return;
+    if (stop_signal) {
+        fprintf(stderr, "sahara-serve: %s: ending the session\n",
+                stop_signal == SIGINT ? "SIGINT" : "SIGTERM");
+        SeLive_host_quit(lv);
+        return;
+    }
     if (lost_pending) {
         lost_pending = false;
         SeLive_host_capture_lost(lv);
     }
-    accept_viewer();
+    door_poll();
     if (cfd < 0)
         return;
     /* Buffered messages first (a previous poll may have stopped on its
@@ -310,8 +509,12 @@ void SeLiveBe_poll(SeLive *lv)
     for (;;) {
         SeSvpMsg m;
         while (budget > 0u && SeSvpRx_next(&rx, &m)) {
-            handle(lv, &m);
             budget--;
+            if (!handle(lv, &m)) {
+                SeSvpRate_spend(&rate, start - budget);
+                drop_viewer(lv);
+                return;
+            }
         }
         if (rx.bad) {
             fprintf(stderr, "sahara-serve: malformed stream\n");
@@ -369,21 +572,34 @@ static void wait_fds(int ms)
             ms = 0;
         }
     }
-    struct pollfd p[2];
+    struct pollfd p[2 + PENDING_MAX];
     nfds_t n = 0;
     if (lfd >= 0)
         p[n++] = (struct pollfd){ .fd = lfd, .events = POLLIN };
+    /* Pending connections: wake on their AUTH, and by the earliest
+     * deadline so a silent one is closed on time. */
+    uint64_t now = SeLiveBe_now_ms();
+    for (unsigned i = 0; i < PENDING_MAX; i++) {
+        if (pending[i].fd < 0)
+            continue;
+        p[n++] = (struct pollfd){ .fd = pending[i].fd, .events = POLLIN };
+        uint64_t left = pending[i].deadline_ms > now
+                            ? pending[i].deadline_ms - now
+                            : 0u;
+        if ((uint64_t)ms > left)
+            ms = (int)left;
+    }
     if (cfd >= 0)
         p[n++] = (struct pollfd){
             .fd = cfd,
             .events = (short)(in | (out_len > out_off ? POLLOUT : 0)),
         };
-    if (n == 0u) {
-        struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
-        nanosleep(&ts, NULL);
-        return;
-    }
-    (void)poll(p, n, ms);
+    if (stop_signal)
+        return; /* the next poll ends the session */
+    /* n > 0: the listener is open whenever this runs (never under
+     * --script, which does not sleep). */
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    (void)ppoll(p, n, &ts, &run_mask);
 }
 
 void SeLiveBe_wait_input(int timeout_ms)

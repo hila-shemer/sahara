@@ -62,9 +62,10 @@ rwc_binary(
 )
 
 # The same live session with its window replaced by one remote viewer
-# speaking SVP/1 (gui/svp.h): gui/be_svp.c is the socket carve-out on
-# nic_host.c's pattern. Linked with sahara-gui's NIC shim so --nic
-# behaves identically; never linked into sahara-emu.
+# speaking SVP/2 (gui/svp.h): gui/be_svp.c is the socket carve-out on
+# nic_host.c's pattern, gui/token_io.c the file carve-out that reads the
+# shared token. Linked with sahara-gui's NIC shim so --nic behaves
+# identically; never linked into sahara-emu.
 rwc_binary(
     name = "sahara-serve",
     srcs = [
@@ -73,6 +74,8 @@ rwc_binary(
         "gui/live_main.c",
         "gui/nic_host.c",
         "gui/nic_host.h",
+        "gui/token_io.c",
+        "gui/token_io.h",
     ],
     allow_banned = True,
     deps = [
@@ -81,12 +84,16 @@ rwc_binary(
     ],
 )
 
-# The remote window onto a sahara-serve session (SVP/1 client). SDL +
-# socket carve-out like the two shims above; the protocol logic it
-# calls is gui/svp.c in :gui_core.
+# The remote window onto a sahara-serve session (SVP/2 client). SDL +
+# socket carve-out like the two shims above, plus the token reader;
+# the protocol logic it calls is gui/svp.c in :gui_core.
 rwc_binary(
     name = "sahara-view",
-    srcs = ["gui/view_main.c"],
+    srcs = [
+        "gui/token_io.c",
+        "gui/token_io.h",
+        "gui/view_main.c",
+    ],
     allow_banned = True,
     linkopts = ["-lSDL2"],
     deps = [
@@ -203,6 +210,7 @@ AUDIT_SRCS = glob(
         "gui/be_svp.c",
         "gui/live_main.c",
         "gui/nic_host.c",
+        "gui/token_io.c",
         "gui/view_main.c",
     ],
 )

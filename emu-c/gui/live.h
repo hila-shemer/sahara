@@ -32,6 +32,10 @@ extern const char *const se_live_prog;
  * options; live_main then reports it as unknown). */
 int SeLiveBe_option(int argc, char **argv, int i);
 
+/* After option parsing, before any file is written: refuse to start
+ * (print why, exit non-zero) if the backend's options or environment
+ * cannot work. */
+void SeLiveBe_check(void);
 /* Window/connection up at the reset mode (w x h). scripted: --script
  * owns input and the clock, so a backend with no local window (the
  * SVP server) opens nothing and drops frames. */

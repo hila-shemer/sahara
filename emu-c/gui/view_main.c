@@ -1,7 +1,17 @@
 /* sahara-view: a window onto a sahara-serve session somewhere else,
- * speaking SVP/1 (gui/svp.h) over one TCP connection.
+ * speaking SVP/2 (gui/svp.h) over one TCP connection.
  *
- *   sahara-view HOST:PORT [--probe N] [--end-session]
+ *   sahara-view HOST:PORT [--token-file PATH] [--probe N]
+ *
+ * The view answers the server's CHALLENGE with the shared token (svp.h,
+ * Authentication). The token comes from --token-file PATH if given,
+ * else from the environment variable SAHARA_VIEW_TOKEN, else from
+ * ${XDG_CONFIG_HOME:-~/.config}/sahara/serve-token -- never from argv,
+ * where any user on the machine could read it in ps. A token file must
+ * be private (0600 or stricter, owned by this user), exactly as the
+ * server requires of its own; otherwise the view refuses to start. A
+ * DENIED answer prints "authentication failed" and exits 1 at once:
+ * a wrong token does not become right by retrying.
  *
  * The view sends raw host facts -- page-7 usage + press/repeat, the
  * pointer in guest pixels with the button mask, capture loss -- and
@@ -10,7 +20,9 @@
  * Capture UX is sahara-gui's (frontend-notes.md, input.md Appendix A):
  * click to capture, left Ctrl+Alt or focus loss releases, and a release
  * tells the server to synthesize releases for everything held. Closing
- * the window disconnects; the session keeps running on the server.
+ * the window sends CLOSE and disconnects; the session keeps running on
+ * the server, and the next view can attach. Nothing a view sends ends
+ * the session (stop it on the server: SIGINT/SIGTERM).
  *
  * The window is resizable and scales the guest frame to fit (aspect
  * kept, SDL logical size); the guest display stays at its reset mode.
@@ -21,10 +33,6 @@
  * frame that arrives after it -- input-to-photon as far as this
  * process can see it (compositor and scanout excluded). Also reports
  * PING round trips. Runs under SDL_VIDEODRIVER=offscreen.
- *
- * --end-session sends CLOSE on exit, ending the server's session (it
- * flushes its trace and prints the replay command). Off by default:
- * closing a view, or probing, never ends a session by accident.
  *
  * A BUSY answer or a refused connection is retried for up to a minute:
  * after a laptop resume the server may still hold the slot for the
@@ -50,6 +58,7 @@
 #include <unistd.h>
 
 #include "gui/svp.h"
+#include "gui/token_io.h"
 #include "hostmem.h"
 
 enum { USAGE_A = 0x04, USAGE_BACKSPACE = 0x2A, USAGE_LCTRL = 0xE0,
@@ -58,7 +67,8 @@ enum { USAGE_A = 0x04, USAGE_BACKSPACE = 0x2A, USAGE_LCTRL = 0xE0,
 #define HELLO_TIMEOUT_US 5000000u  /* connected, but no HELLO: give up */
 #define RETRY_FOR_US 60000000u     /* BUSY / refused: keep trying */
 #define RETRY_EVERY_S 1
-#define USAGE "usage: sahara-view HOST:PORT [--probe N] [--end-session]"
+#define USAGE "usage: sahara-view HOST:PORT [--token-file PATH] [--probe N]"
+#define TOKEN_ENV "SAHARA_VIEW_TOKEN"
 
 /* Why a session could not be opened, when it is worth trying again. */
 typedef enum OpenResult {
@@ -69,6 +79,8 @@ typedef enum OpenResult {
 
 static int fd = -1;
 static SeSvpRx rx;
+static uint8_t token[SE_SVP_TOKEN_MAX];
+static uint32_t token_len;
 static uint32_t gw, gh;
 static uint8_t *fb;
 static SDL_Window *win;
@@ -181,25 +193,53 @@ static bool pull(int timeout_ms)
     return true;
 }
 
-/* Connect and read HELLO into rx (a small buffer: HELLO sizes the
- * rest). BUSY and refusal come back for the caller to retry; a
- * connection that stays silent for HELLO_TIMEOUT_US is fatal -- that
- * is not a sahara-serve, or it is wedged. */
+/* The next whole message into m, by t0 + HELLO_TIMEOUT_US; what names
+ * the message awaited, for the diagnostics. */
+static void next_by(uint64_t t0, SeSvpMsg *m, const char *what)
+{
+    char msg[128];
+    while (!SeSvpRx_next(&rx, m)) {
+        if (rx.bad)
+            die("malformed stream from server (not an SVP/2 server?)");
+        uint64_t spent = now_us() - t0;
+        if (spent >= HELLO_TIMEOUT_US) {
+            (void)snprintf(msg, sizeof msg,
+                           "no %s within 5 s (not a sahara-serve, or "
+                           "wedged?)", what);
+            die(msg);
+        }
+        if (!pull((int)((HELLO_TIMEOUT_US - spent) / 1000u) + 1)) {
+            (void)snprintf(msg, sizeof msg,
+                           "server closed the connection before %s", what);
+            die(msg);
+        }
+    }
+}
+
+/* Connect, authenticate, and read HELLO into rx (a small buffer: HELLO
+ * sizes the rest). BUSY and refusal come back for the caller to retry;
+ * DENIED is fatal at once (one attempt, and the token will not
+ * change), and so is a connection that stays silent for
+ * HELLO_TIMEOUT_US -- that is not a sahara-serve, or it is wedged. */
 static OpenResult open_session(const char *hostport, SeSvpMsg *hello)
 {
     if (!connect_to(hostport))
         return OPEN_REFUSED;
     SeSvpRx_reset(&rx, rx.buf, rx.cap);
     uint64_t t0 = now_us();
-    while (!SeSvpRx_next(&rx, hello)) {
-        if (rx.bad)
-            die("malformed stream from server (not an SVP/1 server?)");
-        uint64_t spent = now_us() - t0;
-        if (spent >= HELLO_TIMEOUT_US)
-            die("no HELLO within 5 s (not a sahara-serve, or wedged?)");
-        if (!pull((int)((HELLO_TIMEOUT_US - spent) / 1000u) + 1))
-            die("server closed the connection before HELLO");
-    }
+    SeSvpMsg ch;
+    next_by(t0, &ch, "CHALLENGE");
+    uint8_t nonce[SE_SVP_NONCE_BYTES];
+    if (ch.type == SE_SVP_HELLO)
+        die("server speaks SVP/1, without authentication: upgrade "
+            "sahara-serve");
+    if (!SeSvp_parse_challenge(&ch, nonce))
+        die("bad CHALLENGE (not an SVP/2 server?)");
+    uint8_t m[64];
+    send_all(m, SeSvp_auth(m, token, token_len, nonce));
+    next_by(t0, hello, "HELLO");
+    if (hello->type == SE_SVP_DENIED)
+        die("authentication failed (wrong token for this server)");
     if (hello->type != SE_SVP_BUSY)
         return OPEN_OK;
     close(fd);
@@ -428,15 +468,18 @@ static int probe(uint32_t n)
 int main(int argc, char **argv)
 {
     const char *hostport = NULL;
+    const char *token_file = NULL;
     uint64_t probe_n = 0;
-    bool end_session = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--probe") == 0 && i + 1 < argc) {
             probe_n = strtoull(argv[++i], NULL, 0);
             if (probe_n == 0u || probe_n > PROBE_MAX)
                 die("--probe N must be 1..10000");
+        } else if (strcmp(argv[i], "--token-file") == 0 && i + 1 < argc) {
+            token_file = argv[++i];
         } else if (strcmp(argv[i], "--end-session") == 0) {
-            end_session = true;
+            die("--end-session is gone: a view only detaches; end the "
+                "session on the server (SIGINT/SIGTERM)");
         } else if (argv[i][0] == '-' || hostport) {
             die(USAGE);
         } else {
@@ -445,6 +488,19 @@ int main(int argc, char **argv)
     }
     if (!hostport)
         die(USAGE);
+    /* The token before the network: a missing one is a local problem
+     * and should not cost a connection. */
+    const char *env_token = getenv(TOKEN_ENV);
+    if (token_file) {
+        SeSvpToken_load("sahara-view", token_file, token, &token_len);
+    } else if (env_token && env_token[0]) {
+        SeSvpToken_from_env("sahara-view", TOKEN_ENV, env_token, token,
+                            &token_len);
+    } else {
+        char path[4096];
+        SeSvpToken_default_path("sahara-view", path, sizeof path);
+        SeSvpToken_load("sahara-view", path, token, &token_len);
+    }
 
     /* HELLO first: it sizes everything else. */
     uint64_t cap = 4096u;
@@ -473,7 +529,7 @@ int main(int argc, char **argv)
         nanosleep(&ts, NULL);
     }
     if (!SeSvp_parse_hello(&m, &gw, &gh))
-        die("bad HELLO (not an SVP/1 server?)");
+        die("bad HELLO (not an SVP/2 server?)");
     /* Carry over anything that arrived behind HELLO. */
     uint64_t big = SeSvp_frame_msg_max(gw, gh) + 64u;
     uint8_t *rxbuf = se_host_alloc(big);
@@ -527,10 +583,9 @@ int main(int argc, char **argv)
             (unsigned long long)frames, (unsigned long long)frame_bytes,
             frames ? (double)frame_bytes / (double)frames : 0.0,
             (double)peak_win_bytes * 8.0 / 1e6);
-    if (end_session) {
-        uint8_t cm[16];
-        send_all(cm, SeSvp_empty(cm, SE_SVP_CLOSE));
-    }
+    /* A clean detach; the server would treat the bare FIN the same. */
+    uint8_t cm[16];
+    send_all(cm, SeSvp_empty(cm, SE_SVP_CLOSE));
     close(fd);
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
