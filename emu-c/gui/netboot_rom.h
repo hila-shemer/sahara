@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /* The embedded netboot ROM (rom/netboot/): the SAHIMG01 bytes of
- * netboot.img, verbatim. sdl_main materializes them next to the trace
+ * netboot.img, verbatim. live_main materializes them next to the trace
  * and loads the file through the ordinary image loader, so META
  * image_sha256 and --replay work with zero image argument. The .c is
  * generated and drift-gated by rom/netboot/build.sh --check. */

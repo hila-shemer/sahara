@@ -1,5 +1,5 @@
 /* Real UDP sockets for `--nic host`. This TU is the socket carve-out,
- * compiled like sdl_main.c: allow_banned, excluded from the source
+ * compiled like live_main.c: allow_banned, excluded from the source
  * audits, linked only into sahara-gui -- sahara-emu's banned-symbol
  * audit is the structural proof no socket call can reach headless
  * replay (nic.md 7.3 / NIC-C-35). Everything with a decision in it

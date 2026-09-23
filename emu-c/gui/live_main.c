@@ -1,8 +1,12 @@
-/* sahara-gui: the interactive SDL2 front end (the platform's
- * interactive face, emu-c-prompt.md; design fixed by
- * emu-c-gui-frontend-prompt.md).
+/* The live session shared by the interactive front ends: sahara-gui
+ * (gui/be_sdl.c, the platform's interactive face, emu-c-prompt.md;
+ * design fixed by emu-c-gui-frontend-prompt.md) and sahara-serve
+ * (gui/be_svp.c, the same session driven by a remote viewer; see
+ * gui/live.h and docs/2026-09-23-remote-frontend-plan.md). Until the
+ * split, this file was sdl_main.c; the backend calls below replaced its
+ * SDL calls one for one.
  *
- *   sahara-gui [IMAGE] [--rom PATH] [--serve-image PATH]
+ *   sahara-gui|sahara-serve [IMAGE] [--rom PATH] [--serve-image PATH]
  *              [--trace OUT.trc] [--trace-level {0,1,2}]
  *              [--hz N] [--ram BYTES] [--maxcycles N] [--script FILE]
  *              [--nic host|off|fake] [--untethered]
@@ -43,17 +47,16 @@
  * and only to timestamp events into virtual cycles: the wall<->cycle
  * map is a pacing heuristic, never semantics.
  *
- * --script (test-only) swaps SDL's event queue and clock for a line
+ * --script (test-only) swaps the backend's input and clock for a line
  * script and a fake millisecond counter: same translation, feeding,
  * pacing and rendering code, deterministic end to end. Grammar (one
  * command per line, '#' comments):
  *   wait MS | keydown U | keyup U | keyrepeat U | mouse X Y BTN |
  *   focuslost | close        (U = page-7 usage, BTN = sahara mask)
  *
- * This TU is the sanctioned SDL carve-out (allow_banned): everything
+ * This TU keeps sdl_main.c's carve-out (allow_banned: stdio, getrandom,
+ * strtoull) and is linked with exactly one backend; everything
  * unit-testable lives in gui_core, under full doctrine. */
-#include <SDL2/SDL.h>
-
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -67,6 +70,7 @@
 #include "gen/sahara_isa.h"
 #include "gen/spec_version.h"
 #include "gui/blit.h"
+#include "gui/live.h"
 #include "gui/netboot_rom.h"
 #include "gui/nic.h"
 #include "gui/nic_fake.h"
@@ -87,7 +91,7 @@
 
 static void die(const char *msg)
 {
-    fprintf(stderr, "sahara-gui: %s\n", msg);
+    fprintf(stderr, "%s: %s\n", se_live_prog, msg);
     exit(1);
 }
 
@@ -96,7 +100,7 @@ static uint64_t parse_u64(const char *s, const char *what)
     char *end = NULL;
     unsigned long long v = strtoull(s, &end, 0);
     if (!end || *end != '\0' || end == s) {
-        fprintf(stderr, "sahara-gui: bad %s: %s\n", what, s);
+        fprintf(stderr, "%s: bad %s: %s\n", se_live_prog, what, s);
         exit(1);
     }
     return (uint64_t)v;
@@ -108,7 +112,9 @@ typedef enum NicMode {
     NIC_FAKE,    /* echo backend (nic_fake.c); test-only */
 } NicMode;
 
-typedef struct Gui {
+typedef struct SeLive Gui;
+
+struct SeLive {
     SeMem mem;
     SeDev dev;
     SeTrace tr;
@@ -132,14 +138,8 @@ typedef struct Gui {
     char *script; /* whole file, NUL-terminated; pos walks it */
     size_t script_pos;
     uint64_t fake_now_ms;
-    /* SDL side */
-    SDL_Window *win;
-    SDL_Renderer *ren;
-    SDL_Texture *tex;
+    /* host side: pointer grab state lives in the backend */
     uint8_t *staging; /* 4 * W * H frame snapshot */
-    bool captured;    /* pointer grabbed + hidden */
-    uint8_t btn_mask; /* current sahara button state (live mode) */
-    int32_t ptr_x, ptr_y;
     bool quit;         /* window closed / script ended */
     bool out_of_cycles;
     /* one stamp per pump iteration: all events polled together feed
@@ -149,11 +149,11 @@ typedef struct Gui {
      * SplitMix64 stands in for getrandom so the scripted gate never
      * touches real entropy and double-runs stay byte-identical. */
     uint64_t script_rng_state;
-} Gui;
+};
 
 static uint64_t now_ms(const Gui *g)
 {
-    return g->script_mode ? g->fake_now_ms : SDL_GetTicks64();
+    return g->script_mode ? g->fake_now_ms : SeLiveBe_now_ms();
 }
 
 static uint64_t cycle_target(const Gui *g, uint64_t now)
@@ -271,81 +271,34 @@ static void capture_lost(Gui *g)
 {
     SeGxlEv burst[SE_GXL_MAX_BURST];
     feed_events(g, burst, SeGxl_capture_lost(&g->xl, burst));
-    if (g->captured) {
-        g->captured = false;
-        SDL_SetWindowGrab(g->win, SDL_FALSE);
-        SDL_ShowCursor(SDL_ENABLE);
-    }
-    g->btn_mask = 0;
+    SeLiveBe_release_capture();
 }
 
-/* ------------------------------------------------------- SDL host side */
+/* ----------------------------------------------- backend entry points */
 
-static uint8_t sdl_button_bit(uint8_t sdl_button)
+void SeLive_host_key(SeLive *lv, uint32_t usage, bool press, bool repeat)
 {
-    /* SDL numbers left/middle/right 1/2/3; the platform packs bit 0
-     * left, bit 1 right, bit 2 middle (PLATFORM-SPEC 6). */
-    switch (sdl_button) {
-    case SDL_BUTTON_LEFT: return 1u;
-    case SDL_BUTTON_RIGHT: return 2u;
-    case SDL_BUTTON_MIDDLE: return 4u;
-    default: return 0u; /* X1/X2: no field, discarded */
-    }
+    host_key(lv, usage, press, repeat);
 }
 
-static void handle_sdl_event(Gui *g, const SDL_Event *e)
+void SeLive_host_mouse(SeLive *lv, int64_t x, int64_t y, uint8_t buttons)
 {
-    switch (e->type) {
-    case SDL_QUIT:
-        g->quit = true;
-        return;
-    case SDL_KEYDOWN:
-    case SDL_KEYUP: {
-        /* SDL scancodes are page-7 usages; the subset filter and the
-         * alternation guard live in the translator. Keyboard capture
-         * follows window focus (Appendix A): SDL only routes key
-         * events to the focused window, so no extra gate is needed. */
-        uint32_t usage = (uint32_t)e->key.keysym.scancode;
-        host_key(g, usage, e->type == SDL_KEYDOWN, e->key.repeat != 0);
-        if (g->captured && SeGxl_chord(&g->xl))
-            capture_lost(g); /* left Ctrl+Alt releases the pointer */
-        return;
-    }
-    case SDL_WINDOWEVENT:
-        if (e->window.event == SDL_WINDOWEVENT_FOCUS_LOST)
-            capture_lost(g);
-        return;
-    case SDL_MOUSEBUTTONDOWN:
-        if (!g->captured) {
-            /* Click-to-capture; the capturing click itself is
-             * delivered to the guest (Appendix A). */
-            g->captured = true;
-            SDL_SetWindowGrab(g->win, SDL_TRUE);
-            SDL_ShowCursor(SDL_DISABLE);
-        }
-        g->btn_mask |= sdl_button_bit(e->button.button);
-        g->ptr_x = e->button.x;
-        g->ptr_y = e->button.y;
-        host_mouse(g, g->ptr_x, g->ptr_y, g->btn_mask);
-        return;
-    case SDL_MOUSEBUTTONUP:
-        if (!g->captured)
-            return;
-        g->btn_mask &= (uint8_t)~sdl_button_bit(e->button.button);
-        g->ptr_x = e->button.x;
-        g->ptr_y = e->button.y;
-        host_mouse(g, g->ptr_x, g->ptr_y, g->btn_mask);
-        return;
-    case SDL_MOUSEMOTION:
-        if (!g->captured)
-            return; /* uncaptured motion is invisible to the guest */
-        g->ptr_x = e->motion.x;
-        g->ptr_y = e->motion.y;
-        host_mouse(g, g->ptr_x, g->ptr_y, g->btn_mask);
-        return;
-    default:
-        return;
-    }
+    host_mouse(lv, x, y, buttons);
+}
+
+void SeLive_host_capture_lost(SeLive *lv)
+{
+    capture_lost(lv);
+}
+
+void SeLive_host_quit(SeLive *lv)
+{
+    lv->quit = true;
+}
+
+bool SeLive_chord(const SeLive *lv)
+{
+    return SeGxl_chord(&lv->xl);
 }
 
 /* ---------------------------------------------------- script host side */
@@ -426,10 +379,7 @@ static void render_if_pending(Gui *g)
     g->dev.present_pending = false;
     uint64_t w = g->dev.disp_width, h = g->dev.disp_height;
     SeGuiBlit_frame(&g->mem, w, h, g->dev.disp_stride, g->staging);
-    (void)SDL_UpdateTexture(g->tex, NULL, g->staging, (int)(4u * w));
-    (void)SDL_RenderClear(g->ren);
-    (void)SDL_RenderCopy(g->ren, g->tex, NULL, NULL);
-    SDL_RenderPresent(g->ren);
+    SeLiveBe_present(g->staging, w, h);
 }
 
 /* ------------------------------------------------------------ stepping */
@@ -439,7 +389,7 @@ static void render_if_pending(Gui *g)
 static bool step_chunk(Gui *g, uint64_t target)
 {
     uint64_t deadline =
-        g->script_mode ? 0u : SDL_GetTicks64() + CHUNK_MS;
+        g->script_mode ? 0u : SeLiveBe_now_ms() + CHUNK_MS;
     while (g->cpu->state == SE_RUN_RUNNING && !g->cpu->wfi_idle &&
            se_lo64(g->cpu->cycle) < target) {
         if (g->maxcycles != 0u &&
@@ -450,7 +400,7 @@ static bool step_chunk(Gui *g, uint64_t target)
         SeCpu_step(g->cpu);
         /* Check the wall clock once per ~4k cycles, not per step. */
         if (!g->script_mode && (se_lo64(g->cpu->cycle) & 0xFFFu) == 0u &&
-            SDL_GetTicks64() >= deadline)
+            SeLiveBe_now_ms() >= deadline)
             break;
     }
     return g->cpu->state == SE_RUN_RUNNING;
@@ -544,7 +494,7 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--serve-image") == 0 && i + 1 < argc) {
             serve_path = argv[++i];
         } else if (a[0] == '-') {
-            fprintf(stderr, "sahara-gui: unknown option %s\n", a);
+            fprintf(stderr, "%s: unknown option %s\n", se_live_prog, a);
             return 1;
         } else if (!image) {
             image = a;
@@ -730,21 +680,7 @@ int main(int argc, char **argv)
      * display mode, so replay depends on the fixed reset default
      * (display.md 1); resize is deferred to v2 (frontend-notes.md). */
     uint64_t win_w = g.dev.disp_width, win_h = g.dev.disp_height;
-    if (SDL_Init(SDL_INIT_VIDEO) != 0)
-        die("SDL_Init failed");
-    g.win = SDL_CreateWindow("sahara", SDL_WINDOWPOS_UNDEFINED,
-                             SDL_WINDOWPOS_UNDEFINED, (int)win_w,
-                             (int)win_h, 0);
-    if (!g.win)
-        die("SDL_CreateWindow failed");
-    g.ren = SDL_CreateRenderer(g.win, -1, 0);
-    if (!g.ren)
-        die("SDL_CreateRenderer failed");
-    g.tex = SDL_CreateTexture(g.ren, SDL_PIXELFORMAT_ARGB8888,
-                              SDL_TEXTUREACCESS_STREAMING, (int)win_w,
-                              (int)win_h);
-    if (!g.tex)
-        die("SDL_CreateTexture failed");
+    SeLiveBe_init(&g, win_w, win_h, g.script_mode);
     g.staging = se_host_alloc(4u * win_w * win_h);
 
     g.t0_ms = now_ms(&g);
@@ -786,9 +722,7 @@ int main(int argc, char **argv)
             if (running && !script_command(&g))
                 g.quit = true;
         } else {
-            SDL_Event e;
-            while (SDL_PollEvent(&e))
-                handle_sdl_event(&g, &e);
+            SeLiveBe_poll(&g);
         }
         /* NIC backend sweep after input: one deterministic poll order
          * per tick (input batch, then flow-order return traffic),
@@ -812,15 +746,15 @@ int main(int argc, char **argv)
             if (g.hz != 0u && tc != 0u && tc > g.c0) {
                 uint64_t ms = (tc - g.c0) * 1000u / g.hz;
                 uint64_t due = g.t0_ms + ms;
-                uint64_t now2 = SDL_GetTicks64();
+                uint64_t now2 = SeLiveBe_now_ms();
                 timeout = due > now2 ? (int)(due - now2) : 1;
             }
-            (void)SDL_WaitEventTimeout(NULL, timeout);
+            SeLiveBe_wait_input(timeout);
         } else {
-            uint64_t now2 = SDL_GetTicks64();
+            uint64_t now2 = SeLiveBe_now_ms();
             uint64_t next = now + CHUNK_MS;
             if (next > now2)
-                SDL_Delay((Uint32)(next - now2));
+                SeLiveBe_delay(next - now2);
         }
     }
 
@@ -843,10 +777,7 @@ int main(int argc, char **argv)
                image, trace_path, trace_path, level, ram, end_cycle);
     }
 
-    SDL_DestroyTexture(g.tex);
-    SDL_DestroyRenderer(g.ren);
-    SDL_DestroyWindow(g.win);
-    SDL_Quit();
+    SeLiveBe_fini();
 
     if (g.out_of_cycles) {
         printf("MAXCYCLES\n");
@@ -854,7 +785,8 @@ int main(int argc, char **argv)
     }
     if (g.cpu->state == SE_RUN_HALT) {
         if (g.cpu->halt_note)
-            fprintf(stderr, "sahara-gui: note: %s\n", g.cpu->halt_note);
+            fprintf(stderr, "%s: note: %s\n", se_live_prog,
+                    g.cpu->halt_note);
         printf("HALT r0=%016" PRIx64 "%016" PRIx64 "\n",
                se_hi64(g.cpu->r[0]), se_lo64(g.cpu->r[0]));
         return 0;

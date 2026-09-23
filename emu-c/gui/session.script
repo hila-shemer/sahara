@@ -1,7 +1,7 @@
 # Canned session for the scripted-session gate (run-gui-tests.sh):
 # exercises key press/release, host-repeat suppression, out-of-table
 # discard, focus-loss release synthesis, mouse clamping and dedup, and
-# the Escape halt. Grammar per gui/sdl_main.c; the clock is fake, so
+# the Escape halt. Grammar per gui/live_main.c; the clock is fake, so
 # the whole session is deterministic. ~2000 cycles/ms at default --hz.
 wait 30
 keydown 0x04
