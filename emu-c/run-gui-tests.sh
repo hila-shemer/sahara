@@ -19,8 +19,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-bazel build //:sahara-emu //:sahara-gui //:gui-seam-driver //:test_gui
-bazel test //:test_gui
+bazel build //:sahara-emu //:sahara-gui //:sahara-serve //:sahara-view \
+    //:gui-seam-driver //:test_gui //:test_svp
+bazel test //:test_gui //:test_svp
 
 ASM=../asm/asm.py
 OUT=gui/out
@@ -232,5 +233,43 @@ SDL_VIDEODRIVER=dummy bazel-bin/sahara-gui --script "$NBSCRIPT" \
 grep -qx "HALT r0=0000000000000000000000000000bad5" "$OUT/nb-noserve.out"
 python3 ../rom/netboot/test/screencheck.py "$OUT/nb-noserve.trc" \
     --expect-sub "no boot image configured"
+
+echo "sahara-serve: scripted session is sahara-gui's, byte for byte"
+# The two binaries share gui/live_main.c; under --script the backend is
+# never consulted for input or time, so the traces must be identical,
+# whole file. This is what makes a served session trustworthy.
+bazel-bin/sahara-serve "$OUT/demo.img" --script gui/session.script \
+    --trace "$OUT/serve-script.trc" > /dev/null
+cmp "$OUT/session.trc" "$OUT/serve-script.trc"
+
+echo "sahara-serve + sahara-view: live loopback session replays"
+# A real remote session: serve on a loopback port, view connects under
+# the offscreen SDL driver, --probe types a/Backspace, --end-session
+# ends it. The server's trace must hold the viewer's keys as keyboard
+# EVENTs and replay byte-identically through the printed command.
+PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+bazel-bin/sahara-serve "$OUT/demo.img" --nic off --listen "127.0.0.1:$PORT" \
+    --trace "$OUT/serve-live.trc" > "$OUT/serve-live.out" 2> "$OUT/serve-live.err" &
+SERVE_PID=$!
+for _ in $(seq 50); do
+    grep -q 'listening on' "$OUT/serve-live.err" 2>/dev/null && break
+    sleep 0.1
+done
+SDL_VIDEODRIVER=offscreen timeout 60 bazel-bin/sahara-view \
+    "127.0.0.1:$PORT" --probe 10 --end-session > "$OUT/view-probe.out"
+wait "$SERVE_PID"
+grep -q '^input-to-present: n=10 ' "$OUT/view-probe.out"
+python3 - "$OUT/serve-live.trc" <<'PYEOF'
+import sys
+sys.path.insert(0, "../trace-q")
+import tracefile as T
+kbd = sum(1 for r in T.read_records(sys.argv[1])
+          if r.name == "EVENT" and r.fields["device"] == 1)
+# 10 keys, press + release each; the demo guest needs no others.
+assert kbd == 20, f"expected 20 keyboard EVENTs from the viewer, got {kbd}"
+PYEOF
+CMD="$(grep '^sahara-emu ' "$OUT/serve-live.out")"
+PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/serve-live-replay.out" || true
+cmp_post_meta "$OUT/serve-live.trc" "$OUT/serve-live.trc.replay.trc"
 
 echo "run-gui-tests: all green"

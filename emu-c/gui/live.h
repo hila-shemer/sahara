@@ -27,6 +27,11 @@ typedef struct SeLive SeLive;
  * binary. `prog` names the binary in diagnostics. */
 extern const char *const se_live_prog;
 
+/* Backend-specific command-line options: return how many argv entries
+ * starting at argv[i] this backend consumed (0 = not one of its
+ * options; live_main then reports it as unknown). */
+int SeLiveBe_option(int argc, char **argv, int i);
+
 /* Window/connection up at the reset mode (w x h). scripted: --script
  * owns input and the clock, so a backend with no local window (the
  * SVP server) opens nothing and drops frames. */

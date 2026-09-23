@@ -145,6 +145,9 @@ struct SeLive {
     /* one stamp per pump iteration: all events polled together feed
      * at the same cycle, in poll order (work-order rule 3/8) */
     uint64_t pump_earliest;
+    /* host input was fed this iteration: skip the inter-chunk sleep so
+     * the guest reacts now, not at the next tick (live mode only) */
+    bool fed_input;
     /* --script fake entropy source (rng.md 7.5): a fixed-seed
      * SplitMix64 stands in for getrandom so the scripted gate never
      * touches real entropy and double-runs stay byte-identical. */
@@ -167,6 +170,8 @@ static uint64_t cycle_target(const Gui *g, uint64_t now)
 
 static void feed_events(Gui *g, const SeGxlEv *evs, uint32_t n)
 {
+    if (n != 0u)
+        g->fed_input = true;
     for (uint32_t i = 0; i < n; i++)
         SeCpu_feed(g->cpu, evs[i].device, evs[i].payload,
                    SE_GXL_EV_BYTES, g->pump_earliest);
@@ -398,6 +403,12 @@ static bool step_chunk(Gui *g, uint64_t target)
             return false;
         }
         SeCpu_step(g->cpu);
+        /* Live mode: hand a PRESENTed frame to the backend now rather
+         * than at the end of the chunk (up to CHUNK_MS later). Host
+         * pacing only; --script keeps its exact step pattern, which
+         * the scripted gate's byte-identity depends on. */
+        if (!g->script_mode && g->dev.present_pending)
+            break;
         /* Check the wall clock once per ~4k cycles, not per step. */
         if (!g->script_mode && (se_lo64(g->cpu->cycle) & 0xFFFu) == 0u &&
             SeLiveBe_now_ms() >= deadline)
@@ -467,7 +478,7 @@ int main(int argc, char **argv)
     int level = 0; /* the cheapest legal level (SPEC-ISSUES 39) */
     bool untethered = false, level_arg = false;
 
-    for (int i = 1; i < argc; i++) {
+    for (int i = 1, k; i < argc; i++) {
         const char *a = argv[i];
         if (strcmp(a, "--trace") == 0 && i + 1 < argc) {
             trace_path = argv[++i];
@@ -493,6 +504,8 @@ int main(int argc, char **argv)
             rom_path = argv[++i];
         } else if (strcmp(a, "--serve-image") == 0 && i + 1 < argc) {
             serve_path = argv[++i];
+        } else if ((k = SeLiveBe_option(argc, argv, i)) > 0) {
+            i += k - 1;
         } else if (a[0] == '-') {
             fprintf(stderr, "%s: unknown option %s\n", se_live_prog, a);
             return 1;
@@ -735,6 +748,29 @@ int main(int argc, char **argv)
             break;
         if (g.script_mode)
             continue; /* fake clock: no sleeping, no blocking */
+        if (g.fed_input) {
+            /* Input just landed: run the guest on it now instead of
+             * sleeping out the rest of the tick. A retired WFI jumps
+             * the cycle straight to timecmp (ISA 7.6), so an idling
+             * guest sits up to one timer period AHEAD of the pacing
+             * clock, and the input it was just fed would wait for the
+             * wall to catch up -- 50 ms per key at Oasis's 100k-cycle
+             * tick and 2 MHz (measured). Re-anchor so the guest runs
+             * from where it is: the mirror image of the behind-slew
+             * above, and like it a pacing heuristic only (stamps come
+             * from the cycle, never from the wall). */
+            g.fed_input = false;
+            uint64_t cyc2 = se_lo64(g.cpu->cycle), now3 = now_ms(&g);
+            if (g.hz != 0u && cyc2 + g.hz * CHUNK_MS / 1000u >
+                                  cycle_target(&g, now3)) {
+                /* Anchored one chunk back: the guest gets a chunk of
+                 * budget immediately instead of none until the next
+                 * tick (measured: 16 ms of a 21 ms loopback round). */
+                g.t0_ms = now3 > CHUNK_MS ? now3 - CHUNK_MS : 0u;
+                g.c0 = cyc2;
+            }
+            continue;
+        }
         if (g.cpu->wfi_idle) {
             /* Nothing to execute until input arrives. If a timer is
              * armed, wake when the pacing clock will reach timecmp;

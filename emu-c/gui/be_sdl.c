@@ -26,6 +26,14 @@ static void die(const char *msg)
     exit(1);
 }
 
+int SeLiveBe_option(int argc, char **argv, int i)
+{
+    (void)argc;
+    (void)argv;
+    (void)i;
+    return 0; /* sahara-gui's CLI is live_main's, unchanged */
+}
+
 void SeLiveBe_init(SeLive *lv, uint64_t w, uint64_t h, bool scripted)
 {
     (void)lv;

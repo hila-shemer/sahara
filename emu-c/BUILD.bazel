@@ -61,6 +61,40 @@ rwc_binary(
     ],
 )
 
+# The same live session with its window replaced by one remote viewer
+# speaking SVP/1 (gui/svp.h): gui/be_svp.c is the socket carve-out on
+# nic_host.c's pattern. Linked with sahara-gui's NIC shim so --nic
+# behaves identically; never linked into sahara-emu.
+rwc_binary(
+    name = "sahara-serve",
+    srcs = [
+        "gui/be_svp.c",
+        "gui/live.h",
+        "gui/live_main.c",
+        "gui/nic_host.c",
+        "gui/nic_host.h",
+    ],
+    allow_banned = True,
+    deps = [
+        ":core",
+        ":gui_core",
+    ],
+)
+
+# The remote window onto a sahara-serve session (SVP/1 client). SDL +
+# socket carve-out like the two shims above; the protocol logic it
+# calls is gui/svp.c in :gui_core.
+rwc_binary(
+    name = "sahara-view",
+    srcs = ["gui/view_main.c"],
+    allow_banned = True,
+    linkopts = ["-lSDL2"],
+    deps = [
+        ":core",
+        ":gui_core",
+    ],
+)
+
 # The record->replay keystone (run-gui-tests.sh): plays the front
 # end's role through SeCpu_feed against scripted guests, no SDL.
 rwc_binary(
@@ -164,8 +198,10 @@ AUDIT_SRCS = glob(
     ["*.c", "*.h", "gen/*.h", "gui/*.c", "gui/*.h"],
     exclude = [
         "gui/be_sdl.c",
+        "gui/be_svp.c",
         "gui/live_main.c",
         "gui/nic_host.c",
+        "gui/view_main.c",
     ],
 )
 
