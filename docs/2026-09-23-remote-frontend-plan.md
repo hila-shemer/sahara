@@ -78,6 +78,36 @@ view scales); multiple viewers; audio (Sahara has no audio device).
   would add encode + decode + a hop, making text slower. It pays only
   for full-motion guests (the DOOM lane), which do not exist yet.
 
+## Usage (SVP/2: token auth, CLOSE detaches) - 2026-09-23
+
+Owner decision (Hila: "much like other remote-view servers"): a shared-token
+challenge-response in the handshake, and a view's CLOSE ends only that view.
+Detail and the test list: `emu-c/gui/frontend-notes.md`, Authentication.
+
+One-time setup, token created on flatpot and copied to mercury, private on
+both ends (both binaries refuse a token file that is not 0600-or-stricter and
+owned by the user):
+
+    # flatpot, as the user that runs sahara-serve
+    umask 077; mkdir -p ~/.config/sahara && head -c 32 /dev/urandom | base64 > ~/.config/sahara/serve-token
+    ssh mercury 'umask 077; mkdir -p ~/.config/sahara'
+    scp -p ~/.config/sahara/serve-token mercury:.config/sahara/serve-token
+    ssh mercury 'chmod 600 ~/.config/sahara/serve-token'
+
+Run:
+
+    flatpot$ sahara-serve oasis.img --listen 100.123.236.10:8453   # reads the default token file
+    mercury$ ./sahara-view flatpot.tail0b59ad.ts.net:8453           # same default path there
+
+`--token-file PATH` overrides the path on either end; the view also takes
+`SAHARA_VIEW_TOKEN` from the environment. The token is never an argv value.
+Closing the view detaches it and the session keeps running for the next view;
+end the session on flatpot with SIGINT/SIGTERM (`systemctl --user stop
+sahara-serve`), which prints the replay line. A wrong token prints
+`authentication failed` and exits 1. The SVP/1 sahara-serve already running
+does not speak to this view, and this sahara-serve will not start until the
+token file exists.
+
 ## Step 6 trigger (decided 2026-09-23, Manager, on the measurement above)
 
 Step 6 is **deferred**, not dropped. Build the spark NVENC lane when a real guest makes

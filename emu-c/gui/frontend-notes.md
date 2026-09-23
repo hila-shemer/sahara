@@ -105,19 +105,25 @@ the window resizable:
 
 `sahara-serve` is this live session with an SVP/1 socket backend
 (gui/be_svp.c) instead of the window; `sahara-view` is the window,
-anywhere on the network (gui/view_main.c). Protocol: gui/svp.h.
+anywhere on the network (gui/view_main.c). Protocol: SVP/2, gui/svp.h.
 
-    sahara-serve IMAGE --listen 100.123.236.10:8453 [live options]
-    sahara-view flatpot.tail0b59ad.ts.net:8453 [--probe N] [--end-session]
+    sahara-serve IMAGE --listen 100.123.236.10:8453 [--token-file PATH] [live options]
+    sahara-view flatpot.tail0b59ad.ts.net:8453 [--token-file PATH] [--probe N]
+
+Both ends need the same secret token, in a private file (setup below).
 
 - The view sends raw host facts; the server translates and feeds them
   through the same path as SDL, so a served session replays under
   `sahara-emu --replay` (run-gui-tests: scripted serve == gui, whole
   file; live loopback serve+view replays byte-identically).
-- One viewer owns input; a second gets BUSY. Closing the view
-  disconnects (a capture loss: all keys and buttons released); the
-  session keeps running and the next view gets a full frame.
-  `--end-session` makes the view end the session instead.
+- One authenticated viewer owns input; a second authenticated one gets
+  BUSY. Closing the view sends CLOSE and disconnects (a capture loss:
+  all keys and buttons released); the session keeps running and the
+  next view gets HELLO and a full frame. A dropped connection is the
+  same. **Nothing a view sends ends the session**: the guest halting,
+  `--maxcycles`, or SIGINT/SIGTERM to sahara-serve do, and each prints
+  the replay line (SIGTERM is what `systemctl --user stop` sends). The
+  old `sahara-view --end-session` is gone and says so.
 - A view that dies without closing (laptop suspended) is reaped by TCP
   keepalive + `TCP_USER_TIMEOUT` on the server's socket in about 20 s;
   until then the slot is still taken. sahara-view retries BUSY and
@@ -150,19 +156,76 @@ anywhere on the network (gui/view_main.c). Protocol: gui/svp.h.
   ~65 KB/s (see Open decisions). Keep traces on tmpfs, and restart the
   session to reset.
 
-**Open decisions (owner's call, not implemented):**
-- *No authentication.* Anyone who can reach the listen address -- any
-  tailnet peer, for the flatpot deployment -- can take the slot when it
-  is free, drive the guest's keyboard and mouse, and send CLOSE, which
-  ends the session for everyone. BUSY only protects a slot that is
-  taken. Whether to add a shared secret, a tailnet-identity check, or
-  make CLOSE require something more is open.
+### Authentication (owner decision 2026-09-23: "much like other remote-view servers")
+
+Shared-token challenge-response, VNC's shape with HMAC-SHA256 in place
+of DES (gui/svp.h has the wire detail):
+
+- sahara-serve reads the token from `--token-file PATH`, default
+  `${XDG_CONFIG_HOME:-~/.config}/sahara/serve-token`. It refuses to
+  start, before writing anything (no trace file), if the file is
+  missing, not a regular file, not owned by the serving user, has any
+  group/other permission bit (0600 or 0400 only), or does not hold
+  16..1024 bytes after the trailing newline is trimmed. The message
+  names the file and the one command that fixes it. This applies under
+  `--script` too: one rule, no mode-dependent exception.
+- sahara-view takes the token from `--token-file PATH`, else from the
+  environment variable `SAHARA_VIEW_TOKEN`, else from the same default
+  path on its own machine; a token file there is held to the same rule
+  (the view refuses too, so both ends behave alike). The token is never
+  accepted on argv on either end (ps would show it).
+- On connect the server sends `CHALLENGE{version 2, 32 random bytes
+  from getrandom}`; the view answers `AUTH{HMAC-SHA256(token, "SVP/2
+  AUTH" || nonce)}`. The token never crosses the wire, and an answer is
+  useless against the next nonce. The server compares in constant time
+  (`SeHmac_equal`; run-gui-tests checks it is the only compare) and
+  allows one attempt: a wrong MAC, any other first message, or input
+  sent instead gets `DENIED` and a close; silence is closed after 5 s.
+  The view prints `sahara-view: authentication failed (wrong token for
+  this server)` and exits 1 without retrying.
+- Before AUTH checks, a connection gets nothing but CHALLENGE: no
+  HELLO, no FRAME, not even whether the slot is taken, and none of its
+  bytes are read as input. It waits in a separate pending table (4
+  entries) and never holds or contends for the viewer slot, so it can
+  neither push out nor block an authenticated view. BUSY is only ever
+  said to an authenticated view. Residual: a tailnet peer without the
+  token can keep the 4 pending entries full (5 s each) and so delay new
+  views; it can never reach the session.
+- One-way, as in VNC: the view does not authenticate the server (the
+  tailnet already authenticates the host). SHA-256 is the core's
+  FIPS 180-4 one (sha256.c, unchanged); HMAC is gui/hmac.c. test_svp
+  checks FIPS 180-4 and all seven RFC 4231 vectors.
+- An SVP/1 view against this server fails on the CHALLENGE ("bad
+  HELLO"); this view against an SVP/1 server says to upgrade the server.
+
+Setup (flatpot serves, mercury views):
+
+    # on flatpot, as the user that runs sahara-serve
+    umask 077; mkdir -p ~/.config/sahara && head -c 32 /dev/urandom | base64 > ~/.config/sahara/serve-token
+    # copy it to mercury without widening its mode
+    ssh mercury 'umask 077; mkdir -p ~/.config/sahara'
+    scp -p ~/.config/sahara/serve-token mercury:.config/sahara/serve-token
+    ssh mercury 'chmod 600 ~/.config/sahara/serve-token'
+
+run-gui-tests covers: a missing, default-path-missing, 0644, 0640 and
+too-short token file each stop the server with no trace written, and
+the view refuses a 0640 file; a wrong-token AUTH (with KEYs pipelined
+behind it), input instead of AUTH, and a silent peer are each refused
+with no FRAME, the server keeps running, and its trace has 0 keyboard
+EVENTs; the real view with a wrong token prints the message above,
+exits 1, and never retries; view 1 probes 10 keys and CLOSEs, the
+session keeps running, view 2 (token from the environment) attaches
+while an unauthenticated peer sits in the door and probes 4 more, and
+the one trace (28 keyboard EVENTs) replays byte-identically after
+SIGTERM.
+
+**Open decision (owner's call, not implemented):**
 - *Trace retention.* The live session trace grows about 65 KB/s
   (measured: 194 MB in 50 minutes) and lives under ~/.cache, which on
   flatpot is RAM. Nothing caps or rotates it; a session left running
   for a day costs ~5.6 GB of RAM. A viewer flooding input at the rate
-  cap adds about 2-3 MB/s (~150 MB a minute) on top, and without auth
-  any tailnet peer holding the free slot can do it. Cap, rotate, drop
+  cap adds about 2-3 MB/s (~150 MB a minute) on top; since auth only a
+  token holder can. Cap, rotate, drop
   to untethered for long-lived serves, or leave as is: open.
 
 Latency (`sahara-view --probe`, key sent -> frame presented by the view,
