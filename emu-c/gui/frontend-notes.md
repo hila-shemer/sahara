@@ -124,10 +124,21 @@ anywhere on the network (gui/view_main.c). Protocol: gui/svp.h.
   "connection refused" for up to 60 s (one line on stderr), so a view
   started right after a resume gets in once the dead one is gone. A
   server that accepts but never sends HELLO fails the view in 5 s.
-- Input is budgeted: 256 messages per server poll, the rest waits in
-  the socket (TCP pushes back on the view). A flood cannot grow the
-  core's feed queue or stall the session in one poll; order is kept
-  (run-gui-tests: 20000 keys in one burst, checked in order).
+  Any other connect failure (no route, no IPv6, no fds) fails at once.
+  Linux applies `TCP_USER_TIMEOUT` to zero-window probing too: a live
+  view that stops reading for 20 s with a frame waiting (Ctrl-Z, a
+  blocked event loop) is dropped the same way -- a capture loss.
+- Input is budgeted and rate-limited: at most 256 messages per server
+  poll, and a token bucket of 256 then 1000 messages a second across
+  polls; the rest waits in the socket (TCP pushes back on the view),
+  in order. The per-poll cap alone kept the core's feed queue bounded
+  but not the rate: a loopback flood was served at ~21k keys/s and
+  grew the trace by ~40 MB/s. Capped, a flood costs about 2-3 MB/s
+  of trace on the demo image (~1.9 KB of guest work per key; the
+  gate's 6000-key flood session is a 16 MB trace). The view sends pointer motion once per event batch, not per
+  SDL motion event, so a 1 kHz mouse stays well under the cap.
+  run-gui-tests: 6000 keys in one burst, checked in order and taking
+  at least the rate's time.
 - `--listen HOST:0` binds a free port and prints the real one on the
   `listening on` line (the test gate uses this).
 - Frames: RAW or XRLE (XOR vs previous frame, run-length), whichever
@@ -149,8 +160,10 @@ anywhere on the network (gui/view_main.c). Protocol: gui/svp.h.
 - *Trace retention.* The live session trace grows about 65 KB/s
   (measured: 194 MB in 50 minutes) and lives under ~/.cache, which on
   flatpot is RAM. Nothing caps or rotates it; a session left running
-  for a day costs ~5.6 GB of RAM. Cap, rotate, drop to untethered for
-  long-lived serves, or leave as is: open.
+  for a day costs ~5.6 GB of RAM. A viewer flooding input at the rate
+  cap adds about 2-3 MB/s (~150 MB a minute) on top, and without auth
+  any tailnet peer holding the free slot can do it. Cap, rotate, drop
+  to untethered for long-lived serves, or leave as is: open.
 
 Latency (`sahara-view --probe`, key sent -> frame presented by the view,
 compositor and scanout excluded), Oasis, --hz 2 MHz, -c opt:
