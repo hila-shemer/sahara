@@ -77,3 +77,16 @@ view scales); multiple viewers; audio (Sahara has no audio device).
   the Oasis console XRLE is a few hundred bytes per key, and H.264
   would add encode + decode + a hop, making text slower. It pays only
   for full-motion guests (the DOOM lane), which do not exist yet.
+
+## Step 6 trigger (decided 2026-09-23, Manager, on the measurement above)
+
+Step 6 is **deferred**, not dropped. Build the spark NVENC lane when a real guest makes
+sahara-view report, on exit, **`peak 1 s` above 40 Mbit/s**, half the 80 Mbit/s remote
+link. That is the point where XRLE starts coalescing (dropping) frames at the remote
+site, while H.264 holds ~7.3 Mbit/s (measured on spark at CBR 8M).
+
+For scale: Oasis measured **261 bytes/frame, peak 0.03 Mbit/s** (30 keys, loopback). A
+full-screen change is a RAW 1.23 MB frame, so 40 Mbit/s is about 4 full-screen redraws
+per second. The first candidate to cross it is the DOOM lane. When it does, the lane
+costs an estimated +8-10 ms (NVENC <=5 ms, decode ~2 ms, one LAN hop), which is why
+text stays on XRLE.

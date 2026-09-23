@@ -17,7 +17,7 @@ file.
 Hila on mercury: `~/sahara/sahara-view flatpot.tail0b59ad.ts.net:8453`. Local phase 1:
 `cd ~/sahara && ./sahara-gui oasis.img`.
 
-Open DECISION: step 6, H.264 via spark NVENC. It is deliberately not started. For the
+DECIDED (Manager, 2026-09-23): step 6, H.264 via spark NVENC, is DEFERRED until a guest makes `sahara-view` report `peak 1 s` > 40 Mbit/s on exit (Oasis: 0.03 Mbit/s, 261 B/frame). Trigger and reasoning: plan, "Step 6 trigger". For the
 text console it would be slower (encode + decode + a hop) with no bandwidth need; it
 pays only for full-motion guests. When it is wanted: the libavcodec-dev button on flatpot,
 and a spark bridge (Python + ffmpeg h264_nvenc, bridging SVP), which is a button for the

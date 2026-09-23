@@ -61,6 +61,9 @@ static bool captured, lctrl, lalt;
 static uint8_t btn_mask;
 static uint64_t frames; /* presented */
 static uint64_t frame_rx_us; /* when the newest FRAME was parsed */
+/* Bandwidth accounting for the step-6 trigger (remote-frontend plan):
+ * FRAME bytes on the wire, and the busiest one-second window. */
+static uint64_t frame_bytes, win_start_us, win_bytes, peak_win_bytes;
 
 static void die(const char *msg)
 {
@@ -156,6 +159,14 @@ static uint64_t drain(void)
         switch (m.type) {
         case SE_SVP_FRAME:
             frame_rx_us = now_us();
+            frame_bytes += SE_SVP_HDR_BYTES + (uint64_t)m.len;
+            if (frame_rx_us - win_start_us >= 1000000u) {
+                win_start_us = frame_rx_us;
+                win_bytes = 0;
+            }
+            win_bytes += SE_SVP_HDR_BYTES + (uint64_t)m.len;
+            if (win_bytes > peak_win_bytes)
+                peak_win_bytes = win_bytes;
             if (!SeSvp_apply_frame(&m, gw, gh, fb, &seq))
                 die("malformed FRAME from server");
             present();
@@ -411,6 +422,15 @@ int main(int argc, char **argv)
             (void)drain();
         }
     }
+    /* The number that decides the spark H.264 lane: build it when a
+     * real guest's peak here stays above 40 Mbit/s, half the 80 Mbit/s
+     * remote link (plan, step 6). */
+    fprintf(stderr,
+            "sahara-view: %llu frames, %llu bytes (%.0f per frame), "
+            "peak 1 s %.2f Mbit/s\n",
+            (unsigned long long)frames, (unsigned long long)frame_bytes,
+            frames ? (double)frame_bytes / (double)frames : 0.0,
+            (double)peak_win_bytes * 8.0 / 1e6);
     if (end_session) {
         uint8_t cm[16];
         send_all(cm, SeSvp_empty(cm, SE_SVP_CLOSE));
