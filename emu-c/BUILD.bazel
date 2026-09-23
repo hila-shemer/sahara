@@ -81,6 +81,7 @@ rwc_library(
         "gui/netboot_rom.c",  # generated: rom/netboot/build.sh --check
         "gui/nic.c",
         "gui/nic_fake.c",
+        "gui/svp.c",
         "gui/translate.c",
     ],
     hdrs = [
@@ -89,6 +90,7 @@ rwc_library(
         "gui/netboot_rom.h",
         "gui/nic.h",
         "gui/nic_fake.h",
+        "gui/svp.h",
         "gui/translate.h",
     ],
     deps = [":core"],
@@ -118,6 +120,16 @@ rwc_test(
 rwc_test(
     name = "test_gui",
     srcs = ["test_gui.c"],
+    tier = "short",
+    deps = [
+        ":core",
+        ":gui_core",
+    ],
+)
+
+rwc_test(
+    name = "test_svp",
+    srcs = ["test_svp.c"],
     tier = "short",
     deps = [
         ":core",
