@@ -118,14 +118,39 @@ anywhere on the network (gui/view_main.c). Protocol: gui/svp.h.
   disconnects (a capture loss: all keys and buttons released); the
   session keeps running and the next view gets a full frame.
   `--end-session` makes the view end the session instead.
+- A view that dies without closing (laptop suspended) is reaped by TCP
+  keepalive + `TCP_USER_TIMEOUT` on the server's socket in about 20 s;
+  until then the slot is still taken. sahara-view retries BUSY and
+  "connection refused" for up to 60 s (one line on stderr), so a view
+  started right after a resume gets in once the dead one is gone. A
+  server that accepts but never sends HELLO fails the view in 5 s.
+- Input is budgeted: 256 messages per server poll, the rest waits in
+  the socket (TCP pushes back on the view). A flood cannot grow the
+  core's feed queue or stall the session in one poll; order is kept
+  (run-gui-tests: 20000 keys in one burst, checked in order).
+- `--listen HOST:0` binds a free port and prints the real one on the
+  `listening on` line (the test gate uses this).
 - Frames: RAW or XRLE (XOR vs previous frame, run-length), whichever
   is smaller -- a glyph echo is a few hundred bytes. Frames coalesce to
   the newest while one is draining.
 - Build `-c opt` for real use: the XRLE encode is 3 ms optimized and
   20 ms at fastbuild's -O0.
 - Recording is on (level 0): a served Oasis session grows its trace at
-  ~60 KiB/s idle (~210 MB/hour). Keep traces on tmpfs, and restart the
+  ~65 KB/s (see Open decisions). Keep traces on tmpfs, and restart the
   session to reset.
+
+**Open decisions (owner's call, not implemented):**
+- *No authentication.* Anyone who can reach the listen address -- any
+  tailnet peer, for the flatpot deployment -- can take the slot when it
+  is free, drive the guest's keyboard and mouse, and send CLOSE, which
+  ends the session for everyone. BUSY only protects a slot that is
+  taken. Whether to add a shared secret, a tailnet-identity check, or
+  make CLOSE require something more is open.
+- *Trace retention.* The live session trace grows about 65 KB/s
+  (measured: 194 MB in 50 minutes) and lives under ~/.cache, which on
+  flatpot is RAM. Nothing caps or rotates it; a session left running
+  for a day costs ~5.6 GB of RAM. Cap, rotate, drop to untethered for
+  long-lived serves, or leave as is: open.
 
 Latency (`sahara-view --probe`, key sent -> frame presented by the view,
 compositor and scanout excluded), Oasis, --hz 2 MHz, -c opt:
