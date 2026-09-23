@@ -19,6 +19,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Background processes this script started (sahara-serve, test
+# clients): killed on any exit, so a failing or timed-out leg under
+# set -e never leaves a server behind.
+BG_PIDS=()
+cleanup() {
+    for pid in ${BG_PIDS[@]+"${BG_PIDS[@]}"}; do
+        kill "$pid" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT
+
 bazel build //:sahara-emu //:sahara-gui //:sahara-serve //:sahara-view \
     //:gui-seam-driver //:test_gui //:test_svp
 bazel test //:test_gui //:test_svp
@@ -242,22 +253,36 @@ bazel-bin/sahara-serve "$OUT/demo.img" --script gui/session.script \
     --trace "$OUT/serve-script.trc" > /dev/null
 cmp "$OUT/session.trc" "$OUT/serve-script.trc"
 
+# start_serve NAME: sahara-serve on the demo image, loopback port 0 (the
+# kernel picks a free one, no pick-then-bind race); sets SERVE_PID and
+# PORT from the "listening on" line.
+start_serve() {
+    local name=$1
+    bazel-bin/sahara-serve "$OUT/demo.img" --nic off \
+        --listen 127.0.0.1:0 --trace "$OUT/$name.trc" \
+        > "$OUT/$name.out" 2> "$OUT/$name.err" &
+    SERVE_PID=$!
+    BG_PIDS+=("$SERVE_PID")
+    PORT=
+    for _ in $(seq 50); do
+        PORT="$(sed -n 's/^sahara-serve: listening on 127\.0\.0\.1:\([0-9]*\)$/\1/p' \
+            "$OUT/$name.err")"
+        [ -n "$PORT" ] && break
+        sleep 0.1
+    done
+    [ -n "$PORT" ] || { echo "ERROR: sahara-serve never listened"; exit 1; }
+}
+
 echo "sahara-serve + sahara-view: live loopback session replays"
 # A real remote session: serve on a loopback port, view connects under
 # the offscreen SDL driver, --probe types a/Backspace, --end-session
 # ends it. The server's trace must hold the viewer's keys as keyboard
 # EVENTs and replay byte-identically through the printed command.
-PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-bazel-bin/sahara-serve "$OUT/demo.img" --nic off --listen "127.0.0.1:$PORT" \
-    --trace "$OUT/serve-live.trc" > "$OUT/serve-live.out" 2> "$OUT/serve-live.err" &
-SERVE_PID=$!
-for _ in $(seq 50); do
-    grep -q 'listening on' "$OUT/serve-live.err" 2>/dev/null && break
-    sleep 0.1
-done
+start_serve serve-live
 SDL_VIDEODRIVER=offscreen timeout 60 bazel-bin/sahara-view \
     "127.0.0.1:$PORT" --probe 10 --end-session > "$OUT/view-probe.out"
 wait "$SERVE_PID"
+BG_PIDS=()
 grep -q '^input-to-present: n=10 ' "$OUT/view-probe.out"
 python3 - "$OUT/serve-live.trc" <<'PYEOF'
 import sys
@@ -271,5 +296,76 @@ PYEOF
 CMD="$(grep '^sahara-emu ' "$OUT/serve-live.out")"
 PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/serve-live-replay.out" || true
 cmp_post_meta "$OUT/serve-live.trc" "$OUT/serve-live.trc.replay.trc"
+
+echo "sahara-serve: input flood is budgeted and in order; BUSY view retries"
+# A client holds the only slot and dumps 20000 KEY messages at once
+# (press/release pairs over a..z), far more than one poll's budget.
+# While it holds the slot a real sahara-view gets BUSY and must retry
+# rather than die; once the holder leaves, the view gets in, probes two
+# keys and ends the session. The trace must hold all 20000 flood keys
+# in send order, spread over many poll stamps (the budget at work),
+# then the view's 4, and the session must replay byte-identically.
+FLOOD=20000
+start_serve serve-flood
+python3 - "$PORT" "$FLOOD" > "$OUT/flood-holder.out" <<'PYEOF' &
+import socket, struct, sys, time
+port, n = int(sys.argv[1]), int(sys.argv[2])
+s = socket.create_connection(("127.0.0.1", port))
+hdr = b""
+while len(hdr) < 8:
+    hdr += s.recv(8 - len(hdr))
+assert hdr[0] == 1, f"expected HELLO, got type {hdr[0]}"
+print("holding", flush=True)
+blob = b"".join(struct.pack("<B3xIIBB2x", 16, 8, 4 + (i // 2) % 26,
+                            1 - i % 2, 0) for i in range(n))
+s.sendall(blob)
+time.sleep(3)  # keep the slot while the view knocks
+# FIN, not RST: every flood byte must reach the server. Read until the
+# server closes its side (it has consumed everything by then).
+s.shutdown(socket.SHUT_WR)
+while s.recv(65536):
+    pass
+s.close()
+PYEOF
+HOLDER_PID=$!
+BG_PIDS+=("$HOLDER_PID")
+for _ in $(seq 50); do
+    grep -q holding "$OUT/flood-holder.out" 2>/dev/null && break
+    sleep 0.1
+done
+SDL_VIDEODRIVER=offscreen timeout 60 bazel-bin/sahara-view \
+    "127.0.0.1:$PORT" --probe 2 --end-session \
+    > "$OUT/view-flood.out" 2> "$OUT/view-flood.err"
+wait "$HOLDER_PID"
+wait "$SERVE_PID"
+BG_PIDS=()
+grep -q 'session busy.*retrying for up to 60 s' "$OUT/view-flood.err"
+test "$(grep -c retrying "$OUT/view-flood.err")" = 1 # one line, not a spam
+grep -q '^input-to-present: n=2 ' "$OUT/view-flood.out"
+python3 - "$OUT/serve-flood.trc" "$FLOOD" <<'PYEOF'
+import sys
+sys.path.insert(0, "../trace-q")
+import tracefile as T
+n = int(sys.argv[2])
+kbd = [r.fields for r in T.read_records(sys.argv[1])
+       if r.name == "EVENT" and r.fields["device"] == 1]
+assert len(kbd) == n + 4, f"expected {n + 4} keyboard EVENTs, got {len(kbd)}"
+for i, f in enumerate(kbd[:n]):
+    word = int.from_bytes(f["bytes"][:8], "little")
+    want = (4 + (i // 2) % 26) | ((1 - i % 2) << 32)
+    assert word == want, f"flood EVENT {i}: {word:#x}, want {want:#x}"
+stamps = {}
+for f in kbd[:n]:
+    stamps[f["cycle"]] = stamps.get(f["cycle"], 0) + 1
+biggest = max(stamps.values())
+print(f"  {n} flood keys in order over {len(stamps)} stamps, "
+      f"largest {biggest}")
+# An unbudgeted drain takes whole socket reads per poll; the budget
+# (256 per poll) must show up as many small batches.
+assert len(stamps) >= n // 1024, "flood was not spread over polls"
+PYEOF
+CMD="$(grep '^sahara-emu ' "$OUT/serve-flood.out")"
+PATH="$PWD/bazel-bin:$PATH" sh -c "$CMD" > "$OUT/serve-flood-replay.out" || true
+cmp_post_meta "$OUT/serve-flood.trc" "$OUT/serve-flood.trc.replay.trc"
 
 echo "run-gui-tests: all green"
