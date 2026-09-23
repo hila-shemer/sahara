@@ -26,6 +26,11 @@
  * flushes its trace and prints the replay command). Off by default:
  * closing a view, or probing, never ends a session by accident.
  *
+ * A BUSY answer or a refused connection is retried for up to a minute:
+ * after a laptop resume the server may still hold the slot for the
+ * view that died with the suspend, until its keepalive reaps it (about
+ * 20 s), and a server being restarted refuses for a moment.
+ *
  * This TU is an SDL + socket carve-out (allow_banned, out of the source
  * audits); every protocol decision lives in gui/svp.c. */
 #define _GNU_SOURCE /* SOCK_CLOEXEC */
@@ -49,6 +54,18 @@
 
 enum { USAGE_A = 0x04, USAGE_BACKSPACE = 0x2A, USAGE_LCTRL = 0xE0,
        USAGE_LALT = 0xE2, PROBE_MAX = 10000 };
+
+#define HELLO_TIMEOUT_US 5000000u  /* connected, but no HELLO: give up */
+#define RETRY_FOR_US 60000000u     /* BUSY / refused: keep trying */
+#define RETRY_EVERY_S 1
+#define USAGE "usage: sahara-view HOST:PORT [--probe N] [--end-session]"
+
+/* Why a session could not be opened, when it is worth trying again. */
+typedef enum OpenResult {
+    OPEN_OK,
+    OPEN_BUSY,    /* another view (maybe a dead one) owns the session */
+    OPEN_REFUSED, /* nothing listening there right now */
+} OpenResult;
 
 static int fd = -1;
 static SeSvpRx rx;
@@ -92,12 +109,14 @@ static void send_all(const uint8_t *p, uint32_t n)
     }
 }
 
-static void connect_to(const char *hostport)
+/* False only when every address refused the connection (retryable);
+ * any other failure is fatal. */
+static bool connect_to(const char *hostport)
 {
     char host[256];
     const char *colon = strrchr(hostport, ':');
     if (!colon || (size_t)(colon - hostport) >= sizeof host)
-        die("usage: sahara-view HOST:PORT [--probe N] [--end-session]");
+        die(USAGE);
     memcpy(host, hostport, (size_t)(colon - hostport));
     host[colon - hostport] = '\0';
     struct addrinfo hints, *res = NULL;
@@ -106,6 +125,7 @@ static void connect_to(const char *hostport)
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, colon + 1, &hints, &res) != 0 || !res)
         die("cannot resolve HOST:PORT");
+    bool all_refused = true;
     for (struct addrinfo *a = res; a; a = a->ai_next) {
         fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC,
                     a->ai_protocol);
@@ -113,17 +133,25 @@ static void connect_to(const char *hostport)
             continue;
         if (connect(fd, a->ai_addr, a->ai_addrlen) == 0)
             break;
+        if (errno != ECONNREFUSED)
+            all_refused = false;
         close(fd);
         fd = -1;
     }
     freeaddrinfo(res);
-    if (fd < 0)
+    if (fd < 0) {
+        if (all_refused)
+            return false;
         die("cannot connect (is sahara-serve listening there?)");
+    }
     int one = 1;
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    return true;
 }
 
-/* Read whatever is available within timeout_ms; false on EOF. */
+/* Read whatever is available within timeout_ms; false on EOF. A
+ * timeout is not EOF: callers that need a message by a deadline keep
+ * their own clock. */
 static bool pull(int timeout_ms)
 {
     struct pollfd p = { .fd = fd, .events = POLLIN };
@@ -138,6 +166,32 @@ static bool pull(int timeout_ms)
         return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
     SeSvpRx_commit(&rx, (uint64_t)n);
     return true;
+}
+
+/* Connect and read HELLO into rx (a small buffer: HELLO sizes the
+ * rest). BUSY and refusal come back for the caller to retry; a
+ * connection that stays silent for HELLO_TIMEOUT_US is fatal -- that
+ * is not a sahara-serve, or it is wedged. */
+static OpenResult open_session(const char *hostport, SeSvpMsg *hello)
+{
+    if (!connect_to(hostport))
+        return OPEN_REFUSED;
+    SeSvpRx_reset(&rx, rx.buf, rx.cap);
+    uint64_t t0 = now_us();
+    while (!SeSvpRx_next(&rx, hello)) {
+        if (rx.bad)
+            die("malformed stream from server (not an SVP/1 server?)");
+        uint64_t spent = now_us() - t0;
+        if (spent >= HELLO_TIMEOUT_US)
+            die("no HELLO within 5 s (not a sahara-serve, or wedged?)");
+        if (!pull((int)((HELLO_TIMEOUT_US - spent) / 1000u) + 1))
+            die("server closed the connection before HELLO");
+    }
+    if (hello->type != SE_SVP_BUSY)
+        return OPEN_OK;
+    close(fd);
+    fd = -1;
+    return OPEN_BUSY;
 }
 
 static void present(void)
@@ -175,7 +229,7 @@ static uint64_t drain(void)
             if (!SeSvp_parse_ping(&m, &pong))
                 die("malformed PONG from server");
             break;
-        case SE_SVP_BUSY:
+        case SE_SVP_BUSY: /* only ever instead of HELLO */
             die("session busy: another viewer owns it");
         default:
             break;
@@ -357,26 +411,40 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--end-session") == 0) {
             end_session = true;
         } else if (argv[i][0] == '-' || hostport) {
-            die("usage: sahara-view HOST:PORT [--probe N] [--end-session]");
+            die(USAGE);
         } else {
             hostport = argv[i];
         }
     }
     if (!hostport)
-        die("usage: sahara-view HOST:PORT [--probe N] [--end-session]");
-    connect_to(hostport);
+        die(USAGE);
 
     /* HELLO first: it sizes everything else. */
     uint64_t cap = 4096u;
     uint8_t *small = se_host_alloc(cap);
     SeSvpRx_reset(&rx, small, cap);
     SeSvpMsg m;
-    while (!SeSvpRx_next(&rx, &m)) {
-        if (rx.bad || !pull(5000))
-            die("no HELLO from server");
+    uint64_t t_first = now_us();
+    bool said = false;
+    for (;;) {
+        OpenResult r = open_session(hostport, &m);
+        if (r == OPEN_OK)
+            break;
+        if (now_us() - t_first >= RETRY_FOR_US)
+            die(r == OPEN_BUSY ? "session busy: another viewer owns it "
+                                 "(gave up after 60 s)"
+                               : "connection refused (gave up after 60 s; "
+                                 "is sahara-serve listening there?)");
+        if (!said) {
+            fprintf(stderr, "sahara-view: %s; retrying for up to 60 s\n",
+                    r == OPEN_BUSY ? "session busy (another viewer, or a "
+                                     "dead one not reaped yet)"
+                                   : "connection refused");
+            said = true;
+        }
+        struct timespec ts = { RETRY_EVERY_S, 0 };
+        nanosleep(&ts, NULL);
     }
-    if (m.type == SE_SVP_BUSY)
-        die("session busy: another viewer owns it");
     if (!SeSvp_parse_hello(&m, &gw, &gh))
         die("bad HELLO (not an SVP/1 server?)");
     /* Carry over anything that arrived behind HELLO. */
